@@ -1,7 +1,21 @@
 {
-  "defaults":{
+  "defaults": {
     "run-as": "package"
   },
+  "ctrl-script": [
+    {
+      "action": "start",
+      "run-as": "root"
+    },
+    {
+      "action": "stop",
+      "run-as": "root"
+    },
+    {
+      "action": "status",
+      "run-as": "root"
+    }
+  ],
   "username": "tailscale",
   "groupname": "tailscale"
 }
