@@ -75,6 +75,140 @@ wait_for_status() {
     return 1
 }
 
+startup_error() {
+    local ts
+    ts=$(date --iso-8601=second)
+    echo "${ts} ERROR: $*" >&2
+    echo "${ts} ERROR: $*" >>"${LOG_FILE}"
+}
+
+check_iptables_chain() {
+    local table="$1"
+    local chain="$2"
+    local output
+
+    if ! output="$("${IPTABLES_BIN}" -t "${table}" -S "${chain}" 2>&1)"; then
+        startup_error "cannot access iptables ${table}/${chain}: ${output}"
+        return 1
+    fi
+}
+
+check_iptables_rule_support() {
+    local description="$1"
+    local table="$2"
+    local chain="$3"
+    local output
+    local status
+
+    shift 3
+
+    output="$("${IPTABLES_BIN}" -t "${table}" -C "${chain}" "$@" 2>&1)"
+    status=$?
+
+    case "${status}" in
+    0)
+        # An identical rule already exists.
+        return 0
+        ;;
+    1)
+        # A missing rule is expected. The check still proves that iptables,
+        # the selected table, and all referenced matches and targets parsed.
+        case "${output}" in
+        *"does a matching rule exist"*)
+            return 0
+            ;;
+        *)
+            startup_error "iptables prerequisite ${description} failed: ${output}"
+            return 1
+            ;;
+        esac
+        ;;
+    *)
+        startup_error "iptables prerequisite ${description} failed: ${output}"
+        return 1
+        ;;
+    esac
+}
+
+check_netfilter_prerequisites() {
+    # This fork targets DSM 7 kernel networking. Preserve the existing DSM 6
+    # startup behavior.
+    if [ "${SYNOPKG_DSM_VERSION_MAJOR}" -ne "7" ]; then
+        return 0
+    fi
+
+    if [ "$(id -u 2>/dev/null)" != "0" ]; then
+        startup_error "the DSM service-control script must run as root"
+        return 1
+    fi
+
+    IPTABLES_BIN="$(command -v iptables 2>/dev/null)" || {
+        startup_error "iptables was not found in PATH"
+        return 1
+    }
+
+    # Verify the built-in chains used by the Linux router.
+    check_iptables_chain filter INPUT || return 1
+    check_iptables_chain filter FORWARD || return 1
+    check_iptables_chain nat POSTROUTING || return 1
+    check_iptables_chain mangle PREROUTING || return 1
+    check_iptables_chain mangle OUTPUT || return 1
+    check_iptables_chain mangle FORWARD || return 1
+
+    # Verify the userspace extensions and corresponding kernel support used by
+    # Tailscale's IPv4 subnet-routing and netfilter rules. `iptables -C` does
+    # not modify the active ruleset.
+    check_iptables_rule_support \
+        "MARK target" \
+        filter FORWARD \
+        -j MARK --set-mark 0x40000/0xff0000 ||
+        return 1
+
+    check_iptables_rule_support \
+        "mark match" \
+        filter FORWARD \
+        -m mark --mark 0x40000/0xff0000 -j ACCEPT ||
+        return 1
+
+    check_iptables_rule_support \
+        "conntrack match" \
+        filter FORWARD \
+        -m conntrack ! --ctstate ESTABLISHED,RELATED -j DROP ||
+        return 1
+
+    check_iptables_rule_support \
+        "CONNMARK restore target" \
+        mangle PREROUTING \
+        -m conntrack --ctstate ESTABLISHED,RELATED \
+        -j CONNMARK --restore-mark \
+        --nfmask 0xff0000 --ctmask 0xff0000 ||
+        return 1
+
+    check_iptables_rule_support \
+        "CONNMARK save target" \
+        mangle OUTPUT \
+        -m conntrack --ctstate NEW \
+        -m mark ! --mark 0x0/0xff0000 \
+        -j CONNMARK --save-mark \
+        --nfmask 0xff0000 --ctmask 0xff0000 ||
+        return 1
+
+    check_iptables_rule_support \
+        "MASQUERADE target" \
+        nat POSTROUTING \
+        -m mark --mark 0x40000/0xff0000 -j MASQUERADE ||
+        return 1
+
+    check_iptables_rule_support \
+        "TCPMSS target" \
+        mangle FORWARD \
+        -p tcp --tcp-flags SYN,RST SYN \
+        -j TCPMSS --clamp-mss-to-pmtu ||
+        return 1
+
+    return 0
+}
+
 ensure_tun_created() {
     if [ "${SYNOPKG_DSM_VERSION_MAJOR}" -eq "7" ]; then
         if [ ! -c /dev/net/tun ]; then
@@ -107,6 +241,9 @@ start)
         exit 0
     else
         if ! ensure_tun_created; then
+            exit 1
+        fi
+        if ! check_netfilter_prerequisites; then
             exit 1
         fi
         start_daemon
