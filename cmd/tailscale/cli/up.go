@@ -164,9 +164,6 @@ func (notFalseVar) Set(v string) error {
 func (notFalseVar) String() string { return "true" }
 
 func defaultNetfilterMode() string {
-	if distro.Get() == distro.Synology {
-		return "off"
-	}
 	return "on"
 }
 
@@ -331,11 +328,6 @@ func prefsFromUpArgs(upArgs upArgsT, warnf logger.Logf, st *ipnstate.Status, goo
 	prefs.ControlURL = upArgs.server
 	prefs.WantRunning = true
 	prefs.RouteAll = upArgs.acceptRoutes
-	if distro.Get() == distro.Synology {
-		// ipn.NewPrefs returns a non-zero Netfilter default. But Synology only
-		// supports "off" mode.
-		prefs.NetfilterMode = preftype.NetfilterOff
-	}
 	if upArgs.exitNodeIP != "" {
 		if expr, useAutoExitNode := ipn.ParseAutoExitNodeString(upArgs.exitNodeIP); useAutoExitNode {
 			prefs.AutoExitNode = expr
@@ -532,19 +524,6 @@ func runUp(ctx context.Context, cmd string, args []string, upArgs upArgsT) (retE
 			return false
 		}
 		return true
-	}
-
-	if distro.Get() == distro.Synology {
-		notSupported := "not supported on Synology; see https://github.com/tailscale/tailscale/issues/1995"
-		if upArgs.acceptRoutes {
-			return errors.New("--accept-routes is " + notSupported)
-		}
-		if upArgs.exitNodeIP != "" {
-			return errors.New("--exit-node is " + notSupported)
-		}
-		if upArgs.netfilterMode != "off" {
-			return errors.New("--netfilter-mode values besides \"off\" " + notSupported)
-		}
 	}
 
 	prefs, err := prefsFromUpArgs(upArgs, warnf, st, effectiveGOOS())
@@ -1032,14 +1011,6 @@ func checkForAccidentalSettingReverts(newPrefs, curPrefs *ipn.Prefs, env upCheck
 			continue
 		}
 		if flagName == "login-server" && ipn.IsLoginServerSynonym(valCur) && ipn.IsLoginServerSynonym(valNew) {
-			continue
-		}
-		if flagName == "accept-routes" && valNew == false && env.goos == "linux" && env.distro == distro.Synology {
-			// Issue 3176. Old prefs had 'RouteAll: true' on disk, so ignore that.
-			continue
-		}
-		if flagName == "netfilter-mode" && valNew == preftype.NetfilterOn && env.goos == "linux" && env.distro == distro.Synology {
-			// Issue 6811. Ignore on Synology.
 			continue
 		}
 		if flagName == "stateful-filtering" && valCur == true && valNew == false && env.goos == "linux" {

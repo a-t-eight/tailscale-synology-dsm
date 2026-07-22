@@ -587,9 +587,9 @@ func TestCheckForAccidentalSettingReverts(t *testing.T) {
 			want: accidentalUpPrefix + " --netfilter-mode=off --accept-dns=false",
 		},
 		{
-			// Issue 3176: on Synology, don't require --accept-routes=false because user
-			// might've had an old install, and we don't support --accept-routes anyway.
-			name:  "synology_permit_omit_accept_routes",
+			// This fork supports --accept-routes on Synology, so apply the same
+			// accidental-setting-revert protection used by other Linux systems.
+			name:  "synology_dont_permit_omit_accept_routes",
 			flags: []string{"--hostname=foo"},
 			curPrefs: &ipn.Prefs{
 				ControlURL:          "https://login.tailscale.com",
@@ -600,10 +600,10 @@ func TestCheckForAccidentalSettingReverts(t *testing.T) {
 			},
 			goos:   "linux",
 			distro: distro.Synology,
-			want:   "",
+			want:   accidentalUpPrefix + " --hostname=foo --accept-routes",
 		},
 		{
-			// Same test case as "synology_permit_omit_accept_routes" above, but
+			// Same test case as "synology_dont_permit_omit_accept_routes" above, but
 			// on non-Synology distro.
 			name:  "not_synology_dont_permit_omit_accept_routes",
 			flags: []string{"--hostname=foo"},
