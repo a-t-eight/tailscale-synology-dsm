@@ -2,6 +2,13 @@
 
 SERVICE_NAME="tailscale"
 
+# DSM package services receive a restricted environment. Include the standard
+# system paths required for ip, iptables, ip6tables, nft, and related tools.
+export PATH="${SYNOPKG_PKGDEST}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Route subnet traffic through the Linux kernel rather than netstack.
+export TS_DEBUG_NETSTACK_SUBNETS=false
+
 if [ "${SYNOPKG_DSM_VERSION_MAJOR}" -eq "6" ]; then
     PKGVAR="/var/packages/Tailscale/etc"
 else
@@ -17,7 +24,8 @@ PORT="41641"
 SERVICE_COMMAND="${SYNOPKG_PKGDEST}/bin/tailscaled \
 --state=${STATE_FILE} \
 --socket=${SOCKET_FILE} \
---port=$PORT"
+--port=${PORT} \
+--tun=tailscale0"
 
 if [ "${SYNOPKG_DSM_VERSION_MAJOR}" -eq "6" ]; then
     chown -R tailscale:tailscale "${PKGVAR}/"
