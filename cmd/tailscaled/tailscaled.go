@@ -83,9 +83,9 @@ func defaultTunName() string {
 		return "userspace-networking"
 	case "linux":
 		if buildfeatures.HasSynology && buildfeatures.HasNetstack && distro.Get() == distro.Synology {
-			// Try TUN, but fall back to userspace networking if needed.
-			// See https://github.com/tailscale/tailscale-synology/issues/35
-			return "tailscale0,userspace-networking"
+			// This fork targets Synology systems with a working TUN device and
+			// the required kernel networking modules. Never silently fall back.
+			return "tailscale0"
 		}
 	}
 	return "tailscale0"
@@ -724,9 +724,6 @@ func createEngine(logf logger.Logf, sys *tsd.System) (onlyNetstack bool, err err
 func handleSubnetsInNetstack() bool {
 	if v, ok := envknob.LookupBool("TS_DEBUG_NETSTACK_SUBNETS"); ok {
 		return v
-	}
-	if distro.Get() == distro.Synology {
-		return true
 	}
 	switch runtime.GOOS {
 	case "windows", "darwin", "freebsd", "openbsd", "solaris", "illumos":
