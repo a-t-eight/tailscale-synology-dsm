@@ -18,6 +18,11 @@ PID_FILE="${PACKAGE_VAR}/tailscaled.pid"
 BACKUP_ROOT="${PACKAGE_VAR}/bootstrap-backups"
 
 SYNO_PKG="${TAILSCALE_SYNOLOGY_SYNOPKG:-synopkg}"
+PROC_ROOT="/proc"
+
+if [ "${TAILSCALE_SYNOLOGY_TEST_MODE:-0}" = "1" ]; then
+    PROC_ROOT="${TAILSCALE_SYNOLOGY_PROC_ROOT:-/proc}"
+fi
 STATE_SCHEMA="1"
 ROLLBACK_ARMED=0
 BACKUP_DIR=""
@@ -210,7 +215,7 @@ daemon_pid() {
 
     pid="$(tr -cd '0-9' <"${PID_FILE}")"
     [ -n "${pid}" ] || return 1
-    [ -d "/proc/${pid}" ] || return 1
+    [ -d "${PROC_ROOT}/${pid}" ] || return 1
 
     printf '%s\n' "${pid}"
 }
@@ -229,7 +234,7 @@ daemon_uid() {
             print $2
             exit
         }
-    ' "/proc/${pid}/status"
+    ' "${PROC_ROOT}/${pid}/status"
 }
 
 stop_package() {
