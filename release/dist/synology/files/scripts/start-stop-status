@@ -170,16 +170,20 @@ bootstrap_is_current() {
     [ "${stored_privilege_hash}" = "${current_privilege_hash}" ] ||
         return 1
 
-    cmp -s         "${ACTIVE_PRIVILEGE_FILE}"         "${ROOT_PRIVILEGE_TEMPLATE}" ||
+    cmp -s \
+        "${ACTIVE_PRIVILEGE_FILE}" \
+        "${ROOT_PRIVILEGE_TEMPLATE}" ||
         return 1
 
     return 0
 }
 
 log_bootstrap_required() {
-    log_message NOTICE         "Tailscale is installed but requires administrator bootstrap."
+    log_message NOTICE \
+        "Tailscale is installed but requires administrator bootstrap."
 
-    log_message NOTICE         "Run: ${BOOTSTRAP_COMMAND}"
+    log_message NOTICE \
+        "Run: ${BOOTSTRAP_COMMAND}"
 }
 
 
@@ -354,7 +358,8 @@ check_netfilter_prerequisites() {
 ensure_tun_created() {
     if [ "${SYNOPKG_DSM_VERSION_MAJOR}" -eq "7" ]; then
         if [ ! -c /dev/net/tun ]; then
-            log_message ERROR                 "/dev/net/tun is unavailable; install and load the TUN kernel module before starting Tailscale."
+            log_message ERROR \
+                "/dev/net/tun is unavailable; install and load the TUN kernel module before starting Tailscale."
             return 1
         fi
         return 0
@@ -385,7 +390,8 @@ start)
         fi
 
         if [ "$(id -u 2>/dev/null)" != "0" ]; then
-            log_message ERROR                 "bootstrap state is current, but DSM did not start the package as root"
+            log_message ERROR \
+                "bootstrap state is current, but DSM did not start the package as root"
             exit 1
         fi
 
