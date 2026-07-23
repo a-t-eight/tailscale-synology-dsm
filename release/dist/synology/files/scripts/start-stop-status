@@ -138,7 +138,7 @@ secure_root_path() {
     uid="$(stat -c %u -- "${path}")" ||
         return 1
 
-    [ "${uid}" = "0" ||
+    [ "${uid}" = "0" ] ||
         return 1
 
     mode="$(stat -c %a -- "${path}")" ||
