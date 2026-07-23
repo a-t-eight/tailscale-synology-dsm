@@ -275,14 +275,70 @@ check_iptables_chain() {
 }
 
 
+cleanup_iptables_rule_preflight() {
+    local table="$1"
+    local chain="$2"
+    local failed=0
+
+    "${IPTABLES_BIN}" \
+        -t "${table}" \
+        -F "${chain}" \
+        >/dev/null 2>&1 ||
+        failed=1
+
+    "${IPTABLES_BIN}" \
+        -t "${table}" \
+        -X "${chain}" \
+        >/dev/null 2>&1 ||
+        failed=1
+
+    return "${failed}"
+}
+
+
 check_iptables_rule_support() {
     local description="$1"
     local table="$2"
-    local chain="$3"
+    local intended_chain="$3"
+    local chain="ts-pf-rule-$$"
     local output
     local status
 
     shift 3
+
+    output="$(
+        "${IPTABLES_BIN}" \
+            -t "${table}" \
+            -N "${chain}" \
+            2>&1
+    )"
+    status=$?
+
+    if [ "${status}" -ne 0 ]; then
+        log_message ERROR \
+            "cannot create temporary ${table} preflight chain for ${description}: ${output}"
+        return 1
+    fi
+
+    output="$(
+        "${IPTABLES_BIN}" \
+            -t "${table}" \
+            -A "${chain}" \
+            "$@" \
+            2>&1
+    )"
+    status=$?
+
+    if [ "${status}" -ne 0 ]; then
+        cleanup_iptables_rule_preflight \
+            "${table}" \
+            "${chain}" ||
+            true
+
+        log_message ERROR \
+            "iptables prerequisite ${description} for ${table}/${intended_chain} failed: ${output}"
+        return 1
+    fi
 
     output="$(
         "${IPTABLES_BIN}" \
@@ -293,34 +349,28 @@ check_iptables_rule_support() {
     )"
     status=$?
 
-    case "${status}" in
-    0)
-        # An identical rule already exists.
-        return 0
-        ;;
-    1)
-        # Accept only the normal diagnostic for a valid rule that is absent.
-        # Other status-1 failures can indicate a missing match, target,
-        # extension, table, chain, or kernel feature.
-        case "${output}" in
-        *"does a matching rule exist"*)
-            return 0
-            ;;
-        *)
-            log_message ERROR \
-                "iptables prerequisite ${description} failed: ${output}"
-            return 1
-            ;;
-        esac
-        ;;
-    *)
-        log_message ERROR \
-            "iptables prerequisite ${description} failed: ${output}"
-        return 1
-        ;;
-    esac
-}
+    if [ "${status}" -ne 0 ]; then
+        cleanup_iptables_rule_preflight \
+            "${table}" \
+            "${chain}" ||
+            true
 
+        log_message ERROR \
+            "cannot verify iptables prerequisite ${description}: ${output}"
+        return 1
+    fi
+
+    if ! cleanup_iptables_rule_preflight \
+        "${table}" \
+        "${chain}"
+    then
+        log_message ERROR \
+            "cannot remove temporary ${table} preflight chain for ${description}"
+        return 1
+    fi
+
+    return 0
+}
 
 
 cleanup_tailscale_nat_preflight() {
