@@ -237,15 +237,37 @@ check_iptables_chain() {
     local table="$1"
     local chain="$2"
     local output
+    local status
 
-    if ! output="$(
+    output="$(
         "${IPTABLES_BIN}" \
             -t "${table}" \
-            -S "${chain}" \
+            -S \
             2>&1
-    )"; then
+    )"
+    status=$?
+
+    if [ "${status}" -ne 0 ]; then
         log_message ERROR \
-            "cannot access iptables ${table}/${chain}: ${output}"
+            "cannot access iptables ${table} table: ${output}"
+        return 1
+    fi
+
+    if ! printf '%s\n' "${output}" |
+        awk -v wanted="${chain}" '
+            ($1 == "-P" || $1 == "-N") &&
+            $2 == wanted {
+                found = 1
+                exit
+            }
+
+            END {
+                exit found ? 0 : 1
+            }
+        '
+    then
+        log_message ERROR \
+            "required iptables chain ${table}/${chain} is unavailable"
         return 1
     fi
 
@@ -299,6 +321,153 @@ check_iptables_rule_support() {
     esac
 }
 
+
+
+cleanup_tailscale_nat_preflight() {
+    local chain="$1"
+    local failed=0
+
+    while "${IPTABLES_BIN}" \
+        -t nat \
+        -D POSTROUTING \
+        -j "${chain}" \
+        >/dev/null 2>&1
+    do
+        :
+    done
+
+    # DSM exposes its effective built-in NAT chain as
+    # DEFAULT_POSTROUTING in full table listings. This fallback is
+    # harmless when the normal POSTROUTING deletion already succeeded.
+    while "${IPTABLES_BIN}" \
+        -t nat \
+        -D DEFAULT_POSTROUTING \
+        -j "${chain}" \
+        >/dev/null 2>&1
+    do
+        :
+    done
+
+    "${IPTABLES_BIN}" \
+        -t nat \
+        -F "${chain}" \
+        >/dev/null 2>&1 ||
+        failed=1
+
+    "${IPTABLES_BIN}" \
+        -t nat \
+        -X "${chain}" \
+        >/dev/null 2>&1 ||
+        failed=1
+
+    return "${failed}"
+}
+
+
+check_tailscale_nat_topology() {
+    local chain="ts-pf-nat-$$"
+    local output
+    local status
+
+    output="$(
+        "${IPTABLES_BIN}" \
+            -t nat \
+            -N "${chain}" \
+            2>&1
+    )"
+    status=$?
+
+    if [ "${status}" -ne 0 ]; then
+        log_message ERROR \
+            "cannot create temporary NAT preflight chain: ${output}"
+        return 1
+    fi
+
+    output="$(
+        "${IPTABLES_BIN}" \
+            -t nat \
+            -I POSTROUTING \
+            1 \
+            -j "${chain}" \
+            2>&1
+    )"
+    status=$?
+
+    if [ "${status}" -ne 0 ]; then
+        cleanup_tailscale_nat_preflight "${chain}" ||
+            true
+
+        log_message ERROR \
+            "cannot hook a temporary chain from nat/POSTROUTING: ${output}"
+        return 1
+    fi
+
+    output="$(
+        "${IPTABLES_BIN}" \
+            -t nat \
+            -C POSTROUTING \
+            -j "${chain}" \
+            2>&1
+    )"
+    status=$?
+
+    if [ "${status}" -ne 0 ]; then
+        cleanup_tailscale_nat_preflight "${chain}" ||
+            true
+
+        log_message ERROR \
+            "cannot verify the temporary nat/POSTROUTING hook: ${output}"
+        return 1
+    fi
+
+    output="$(
+        "${IPTABLES_BIN}" \
+            -t nat \
+            -A "${chain}" \
+            -m mark \
+            --mark 0xfe0000/0xff0000 \
+            -j MASQUERADE \
+            2>&1
+    )"
+    status=$?
+
+    if [ "${status}" -ne 0 ]; then
+        cleanup_tailscale_nat_preflight "${chain}" ||
+            true
+
+        log_message ERROR \
+            "cannot add a marked MASQUERADE rule: ${output}"
+        return 1
+    fi
+
+    output="$(
+        "${IPTABLES_BIN}" \
+            -t nat \
+            -C "${chain}" \
+            -m mark \
+            --mark 0xfe0000/0xff0000 \
+            -j MASQUERADE \
+            2>&1
+    )"
+    status=$?
+
+    if [ "${status}" -ne 0 ]; then
+        cleanup_tailscale_nat_preflight "${chain}" ||
+            true
+
+        log_message ERROR \
+            "cannot verify the marked MASQUERADE rule: ${output}"
+        return 1
+    fi
+
+    if ! cleanup_tailscale_nat_preflight "${chain}"; then
+        log_message ERROR \
+            "cannot remove the temporary NAT preflight topology"
+        return 1
+    fi
+
+    return 0
+}
 
 check_netfilter_prerequisites() {
     if [ "${SYNOPKG_DSM_VERSION_MAJOR}" -ne "7" ]; then
@@ -379,13 +548,7 @@ check_netfilter_prerequisites() {
         --ctmask 0xff0000 ||
         return 1
 
-    check_iptables_rule_support \
-        "MASQUERADE target" \
-        nat \
-        POSTROUTING \
-        -m mark \
-        --mark 0x40000/0xff0000 \
-        -j MASQUERADE ||
+    check_tailscale_nat_topology ||
         return 1
 
     check_iptables_rule_support \
