@@ -63,7 +63,6 @@ tar -xf "${SIDELOAD_SPK}" -C "${SIDE}"
 tar -xf "${PACKAGE_CENTER_SPK}" -C "${CENTER}"
 
 for file in \
-    package.tgz \
     conf/resource \
     scripts/start-stop-status \
     scripts/preupgrade \
@@ -76,6 +75,116 @@ do
         exit 1
     }
 done
+
+python3 - \
+    "${SIDE}/package.tgz" \
+    "${CENTER}/package.tgz" <<'PYTAR'
+import hashlib
+import itertools
+import sys
+import tarfile
+from pathlib import Path
+
+sideload_path = Path(sys.argv[1])
+package_center_path = Path(sys.argv[2])
+
+
+def file_digest(archive: tarfile.TarFile, member: tarfile.TarInfo) -> str:
+    stream = archive.extractfile(member)
+
+    if stream is None:
+        raise RuntimeError(
+            f"cannot extract {member.name!r} from {archive.name}"
+        )
+
+    digest = hashlib.sha256()
+
+    while True:
+        chunk = stream.read(1024 * 1024)
+        if not chunk:
+            break
+        digest.update(chunk)
+
+    return digest.hexdigest()
+
+
+def archive_manifest(path: Path):
+    rows = []
+
+    with tarfile.open(path, mode="r:gz") as archive:
+        members = sorted(
+            archive.getmembers(),
+            key=lambda member: (
+                member.name,
+                member.type,
+                member.linkname,
+            ),
+        )
+
+        for member in members:
+            digest = None
+
+            if member.isfile():
+                digest = file_digest(archive, member)
+
+            rows.append(
+                (
+                    member.name,
+                    member.type,
+                    member.mode,
+                    member.uid,
+                    member.gid,
+                    member.uname,
+                    member.gname,
+                    member.size,
+                    member.linkname,
+                    member.devmajor,
+                    member.devminor,
+                    digest,
+                )
+            )
+
+    return rows
+
+
+sideload = archive_manifest(sideload_path)
+package_center = archive_manifest(package_center_path)
+
+if sideload != package_center:
+    print(
+        "ERROR: inner package payloads differ",
+        file=sys.stderr,
+    )
+
+    for index, pair in enumerate(
+        itertools.zip_longest(
+            sideload,
+            package_center,
+            fillvalue=None,
+        )
+    ):
+        left, right = pair
+
+        if left == right:
+            continue
+
+        print(
+            f"  entry {index}:",
+            file=sys.stderr,
+        )
+        print(
+            f"    sideload:       {left!r}",
+            file=sys.stderr,
+        )
+        print(
+            f"    package-center: {right!r}",
+            file=sys.stderr,
+        )
+
+    raise SystemExit(1)
+
+print("Inner package payload validation passed.")
+PYTAR
 
 if cmp -s \
     "${SIDE}/conf/privilege" \
