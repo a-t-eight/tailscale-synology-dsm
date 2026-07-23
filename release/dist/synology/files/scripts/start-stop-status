@@ -182,6 +182,85 @@ log_bootstrap_required() {
     log_message NOTICE         "Run: ${BOOTSTRAP_COMMAND}"
 }
 
+check_iptables_chain() {
+    local table="$1"
+    local chain="$2"
+    local output
+
+    if ! output="$("${IPTABLES_BIN}" -t "${table}" -S "${chain}" 2>&1)"; then
+        log_message ERROR             "cannot access iptables ${table}/${chain}: ${output}"
+        return 1
+    fi
+}
+
+check_iptables_rule_support() {
+    local description="$1"
+    local table="$2"
+    local chain="$3"
+    local output
+    local status
+
+    shift 3
+
+    output="$(
+        "${IPTABLES_BIN}"             -t "${table}"             -C "${chain}"             "$@"             2>&1
+    )"
+    status=$?
+
+    case "${status}" in
+    0|1)
+        # 0 means the rule exists. 1 means it parsed successfully but no
+        # matching rule exists. Neither case modifies the active ruleset.
+        return 0
+        ;;
+    *)
+        log_message ERROR             "iptables prerequisite ${description} failed: ${output}"
+        return 1
+        ;;
+    esac
+}
+
+check_netfilter_prerequisites() {
+    if [ "${SYNOPKG_DSM_VERSION_MAJOR}" -ne "7" ]; then
+        return 0
+    fi
+
+    IPTABLES_BIN="$(command -v iptables 2>/dev/null)" || {
+        log_message ERROR "iptables was not found in PATH"
+        return 1
+    }
+
+    check_iptables_chain filter INPUT || return 1
+    check_iptables_chain filter FORWARD || return 1
+    check_iptables_chain nat POSTROUTING || return 1
+    check_iptables_chain mangle PREROUTING || return 1
+    check_iptables_chain mangle OUTPUT || return 1
+    check_iptables_chain mangle FORWARD || return 1
+
+    check_iptables_rule_support         "MARK target"         filter FORWARD         -j MARK --set-mark 0x40000/0xff0000 ||
+        return 1
+
+    check_iptables_rule_support         "mark match"         filter FORWARD         -m mark --mark 0x40000/0xff0000 -j ACCEPT ||
+        return 1
+
+    check_iptables_rule_support         "conntrack match"         filter FORWARD         -m conntrack ! --ctstate ESTABLISHED,RELATED -j DROP ||
+        return 1
+
+    check_iptables_rule_support         "CONNMARK restore target"         mangle PREROUTING         -m conntrack --ctstate ESTABLISHED,RELATED         -j CONNMARK --restore-mark         --nfmask 0xff0000 --ctmask 0xff0000 ||
+        return 1
+
+    check_iptables_rule_support         "CONNMARK save target"         mangle OUTPUT         -m conntrack --ctstate NEW         -m mark ! --mark 0x0/0xff0000         -j CONNMARK --save-mark         --nfmask 0xff0000 --ctmask 0xff0000 ||
+        return 1
+
+    check_iptables_rule_support         "MASQUERADE target"         nat POSTROUTING         -m mark --mark 0x40000/0xff0000 -j MASQUERADE ||
+        return 1
+
+    check_iptables_rule_support         "TCPMSS target"         mangle FORWARD         -p tcp --tcp-flags SYN,RST SYN         -j TCPMSS --clamp-mss-to-pmtu ||
+        return 1
+
+    return 0
+}
+
 ensure_tun_created() {
     if [ "${SYNOPKG_DSM_VERSION_MAJOR}" -eq "7" ]; then
         if [ ! -c /dev/net/tun ]; then
@@ -221,6 +300,10 @@ start)
         fi
 
         if ! ensure_tun_created; then
+            exit 1
+        fi
+
+        if ! check_netfilter_prerequisites; then
             exit 1
         fi
 
