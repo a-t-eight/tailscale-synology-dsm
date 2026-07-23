@@ -64,6 +64,7 @@ tar -xf "${PACKAGE_CENTER_SPK}" -C "${CENTER}"
 
 for file in \
     conf/resource \
+    conf/PKG_DEPS \
     scripts/start-stop-status \
     scripts/preupgrade \
     scripts/postupgrade \
@@ -238,6 +239,42 @@ assert package_center["tool"] == [{
 print("Privilege manifest validation passed.")
 PYJSON
 
+python3 - \
+    "${SIDE}/conf/PKG_DEPS" \
+    "${CENTER}/conf/PKG_DEPS" <<'PYDEPS'
+import sys
+from pathlib import Path
+
+expected = (
+    "[tailscale-netfilter-modules]\n"
+    "pkg_min_ver=1.0.0-11\n"
+    "os_min_ver=7.3-81180\n"
+)
+
+for label, value in zip(
+    ("sideload", "Package Center"),
+    sys.argv[1:],
+):
+    path = Path(value)
+
+    if not path.is_file():
+        raise RuntimeError(
+            f"{label} package is missing conf/PKG_DEPS"
+        )
+
+    actual = path.read_text(encoding="utf-8")
+
+    if actual != expected:
+        raise RuntimeError(
+            "{} PKG_DEPS has unexpected contents:\n{!r}".format(
+                label,
+                actual,
+            )
+        )
+
+print("Package dependency validation passed.")
+PYDEPS
+
 cp \
     "${CENTER}/conf/privilege" \
     "${REFERENCE_OUT}/privilege-package-center"
@@ -245,6 +282,10 @@ cp \
 cp \
     "${CENTER}/conf/resource" \
     "${REFERENCE_OUT}/resource-package-center"
+
+cp \
+    "${CENTER}/conf/PKG_DEPS" \
+    "${REFERENCE_OUT}/PKG_DEPS-package-center"
 
 cp \
     "${CENTER}/INFO" \
