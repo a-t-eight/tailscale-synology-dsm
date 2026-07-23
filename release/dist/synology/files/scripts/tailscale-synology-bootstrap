@@ -1,7 +1,7 @@
 #!/bin/bash
 set -u
 
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export PATH="/usr/syno/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 PACKAGE_NAME="Tailscale"
 PACKAGE_ROOT="${TAILSCALE_SYNOLOGY_PACKAGE_ROOT:-/var/packages/${PACKAGE_NAME}}"
@@ -17,7 +17,7 @@ STATE_FILE="${PACKAGE_VAR}/root-bootstrap.state"
 PID_FILE="${PACKAGE_VAR}/tailscaled.pid"
 BACKUP_ROOT="${PACKAGE_VAR}/bootstrap-backups"
 
-SYNO_PKG="${TAILSCALE_SYNOLOGY_SYNOPKG:-synopkg}"
+SYNO_PKG="${TAILSCALE_SYNOLOGY_SYNOPKG:-/usr/syno/bin/synopkg}"
 PROC_ROOT="/proc"
 
 if [ "${TAILSCALE_SYNOLOGY_TEST_MODE:-0}" = "1" ]; then
