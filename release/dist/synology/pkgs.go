@@ -121,6 +121,16 @@ func (t *target) buildSPK(b *dist.Build, inner *innerPkg) ([]string, error) {
 		static("scripts/preupgrade", "scripts/preupgrade", 0644),
 	)
 
+	if t.dsmMajorVersion == 7 {
+		entries = append(entries,
+			static(
+				"scripts/tailscale-synology-bootstrap",
+				"scripts/tailscale-synology-bootstrap",
+				0755,
+			),
+		)
+	}
+
 	err = writeTar(tw, b.Time, entries...)
 	if err != nil {
 		return nil, err
