@@ -127,11 +127,38 @@ bootstrap_state_value() {
     ' "${BOOTSTRAP_STATE_FILE}"
 }
 
+secure_root_path() {
+    local path="$1"
+    local uid
+    local mode
+    local mode_value
+
+    [ -e "${path}" ] || return 1
+
+    uid="$(stat -c %u -- "${path}")" ||
+        return 1
+
+    [ "${uid}" = "0" ||
+        return 1
+
+    mode="$(stat -c %a -- "${path}")" ||
+        return 1
+
+    mode_value=$((8#${mode}))
+
+    if (( mode_value & 8#022 )); then
+        return 1
+    fi
+
+    return 0
+}
+
 bootstrap_is_current() {
     local stored_binary_hash
     local stored_privilege_hash
     local current_binary_hash
     local current_privilege_hash
+    local target_real
 
     if [ "${SYNOPKG_DSM_VERSION_MAJOR}" -ne "7" ]; then
         return 0
@@ -141,6 +168,25 @@ bootstrap_is_current() {
     [ -r "${ACTIVE_PRIVILEGE_FILE}" ] || return 1
     [ -r "${ROOT_PRIVILEGE_TEMPLATE}" ] || return 1
     [ -x "${SYNOPKG_PKGDEST}/bin/tailscaled" ] || return 1
+
+    target_real="$(
+        readlink -f -- "${SYNOPKG_PKGDEST}"
+    )" || return 1
+
+    secure_root_path "${target_real}" ||
+        return 1
+
+    secure_root_path "${SYNOPKG_PKGDEST}/bin/tailscaled" ||
+        return 1
+
+    secure_root_path "${ACTIVE_PRIVILEGE_FILE}" ||
+        return 1
+
+    secure_root_path "${ROOT_PRIVILEGE_TEMPLATE}" ||
+        return 1
+
+    secure_root_path "${BOOTSTRAP_STATE_FILE}" ||
+        return 1
 
     [ "$(bootstrap_state_value schema)" = "1" ] || return 1
     [ "$(bootstrap_state_value mode)" = "root" ] || return 1
