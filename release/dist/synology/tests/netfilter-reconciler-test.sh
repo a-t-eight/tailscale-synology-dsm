@@ -71,7 +71,10 @@ case "${args}" in
 
     printf '{\n'
     printf '  "WantRunning": %s,\n' "${want}"
-    printf '  "NetfilterMode": %s\n' "${mode}"
+    printf '  "NetfilterMode": %s,\n' "${mode}"
+    printf '  "Padding": "'
+    printf '%262144s' '' | tr ' ' x
+    printf '"\n'
     printf '}\n'
     ;;
 
@@ -190,6 +193,10 @@ run_reconciler() {
         bash "${RECONCILER}" \
         >"${OUTPUT}" \
         2>&1
+
+    assert_not_contains \
+        "${OUTPUT}" \
+        'Broken pipe'
 }
 
 

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION_OVERRIDE="${TS_VERSION_OVERRIDE:-1.98.94}"
+VERSION_OVERRIDE="${TS_VERSION_OVERRIDE:-1.98.95}"
 OUT_ROOT="${1:-${REPO_ROOT}/build/synology/v1.98.9-final}"
 
 SIDELOAD_OUT="${OUT_ROOT}/sideload"
