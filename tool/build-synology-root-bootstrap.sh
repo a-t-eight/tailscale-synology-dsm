@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION_OVERRIDE="${TS_VERSION_OVERRIDE:-1.98.93}"
+VERSION_OVERRIDE="${TS_VERSION_OVERRIDE:-1.98.94}"
 OUT_ROOT="${1:-${REPO_ROOT}/build/synology/v1.98.9-final}"
 
 SIDELOAD_OUT="${OUT_ROOT}/sideload"
@@ -66,6 +66,7 @@ for file in \
     conf/resource \
     conf/PKG_DEPS \
     scripts/start-stop-status \
+    scripts/tailscale-netfilter-reconciler \
     scripts/preupgrade \
     scripts/postupgrade \
     scripts/tailscale-synology-bootstrap
@@ -201,7 +202,13 @@ if cmp -s "${SIDE}/INFO" "${CENTER}/INFO"; then
 fi
 
 bash -n "${SIDE}/scripts/start-stop-status"
+bash -n "${SIDE}/scripts/tailscale-netfilter-reconciler"
 bash -n "${SIDE}/scripts/tailscale-synology-bootstrap"
+
+if [ ! -x "${SIDE}/scripts/tailscale-netfilter-reconciler" ]; then
+    printf 'ERROR: packaged netfilter reconciler is not executable\n' >&2
+    exit 1
+fi
 
 python3 - \
     "${SIDE}/conf/privilege" \
