@@ -557,6 +557,168 @@ v6/nat/ts-postrouting -m mark --mark 0x40000/0xff0000 -j MASQUERADE
 	}
 }
 
+func TestSynologyNetfilterSelfHealing(t *testing.T) {
+	oldGetDistroFunc := getDistroFunc
+	getDistroFunc = func() distro.Distro {
+		return distro.Synology
+	}
+	t.Cleanup(func() {
+		getDistroFunc = oldGetDistroFunc
+	})
+
+	bus := eventbus.New()
+	defer bus.Close()
+
+	mon, err := netmon.New(
+		bus,
+		logger.Discard,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mon.Start()
+	defer mon.Close()
+
+	fake := NewFakeOS(t)
+	healthTracker := health.NewTracker(bus)
+
+	rtr, err := newUserspaceRouterAdvanced(
+		t.Logf,
+		"tailscale0",
+		mon,
+		fake,
+		healthTracker,
+		bus,
+	)
+	if err != nil {
+		t.Fatalf("creating router: %v", err)
+	}
+
+	linuxRouter := rtr.(*linuxRouter)
+	linuxRouter.nfr = fake.nfr
+
+	if err := rtr.Up(); err != nil {
+		t.Fatalf("bringing router up: %v", err)
+	}
+
+	cfg := &Config{
+		LocalAddrs: mustCIDRs(
+			"100.101.102.104/32",
+		),
+		SubnetRoutes: mustCIDRs(
+			"10.0.0.0/24",
+		),
+		SNATSubnetRoutes:  true,
+		StatefulFiltering: true,
+		NetfilterMode:     netfilterOn,
+	}
+
+	if err := rtr.Set(cfg); err != nil {
+		t.Fatalf("initial router Set: %v", err)
+	}
+
+	nfr := fake.nfr.(*fakeIPTablesRunner)
+
+	// Simulate DSM replacing the filter and NAT tables after tailscaled
+	// completed its initial router configuration.
+	if err := nfr.DelHooks(t.Logf); err != nil {
+		t.Fatalf("deleting hooks: %v", err)
+	}
+	if err := nfr.DelBase(); err != nil {
+		t.Fatalf("deleting base rules: %v", err)
+	}
+	if err := nfr.DelChains(); err != nil {
+		t.Fatalf("deleting chains: %v", err)
+	}
+
+	// Submit the same desired configuration. Prior to the Synology
+	// self-healing change this returned immediately because the in-memory
+	// mode was already netfilterOn.
+	if err := rtr.Set(cfg); err != nil {
+		t.Fatalf("self-healing router Set: %v", err)
+	}
+
+	assertRule := func(
+		name string,
+		rules []string,
+		want string,
+	) {
+		t.Helper()
+
+		if !slices.Contains(rules, want) {
+			t.Fatalf(
+				"%s is missing rule %q; rules=%q",
+				name,
+				want,
+				rules,
+			)
+		}
+	}
+
+	for _, check := range []struct {
+		name  string
+		rules []string
+		want  string
+	}{
+		{
+			name:  "IPv4 INPUT",
+			rules: nfr.ipt4["filter/INPUT"],
+			want:  "-j ts-input",
+		},
+		{
+			name:  "IPv4 FORWARD",
+			rules: nfr.ipt4["filter/FORWARD"],
+			want:  "-j ts-forward",
+		},
+		{
+			name:  "IPv4 POSTROUTING",
+			rules: nfr.ipt4["nat/POSTROUTING"],
+			want:  "-j ts-postrouting",
+		},
+		{
+			name:  "IPv6 INPUT",
+			rules: nfr.ipt6["filter/INPUT"],
+			want:  "-j ts-input",
+		},
+		{
+			name:  "IPv6 FORWARD",
+			rules: nfr.ipt6["filter/FORWARD"],
+			want:  "-j ts-forward",
+		},
+		{
+			name:  "IPv6 POSTROUTING",
+			rules: nfr.ipt6["nat/POSTROUTING"],
+			want:  "-j ts-postrouting",
+		},
+		{
+			name:  "IPv4 loopback",
+			rules: nfr.ipt4["filter/ts-input"],
+			want:  "-i lo -s 100.101.102.104 -j ACCEPT",
+		},
+		{
+			name:  "IPv4 subnet marking",
+			rules: nfr.ipt4["filter/ts-forward"],
+			want:  "-i tailscale0 -j MARK --set-mark 0x40000/0xff0000",
+		},
+		{
+			name:  "IPv4 stateful filtering",
+			rules: nfr.ipt4["filter/ts-forward"],
+			want:  "-o tailscale0 -m conntrack ! --ctstate ESTABLISHED,RELATED -j DROP",
+		},
+		{
+			name:  "IPv4 SNAT",
+			rules: nfr.ipt4["nat/ts-postrouting"],
+			want:  "-m mark --mark 0x40000/0xff0000 -j MASQUERADE",
+		},
+	} {
+		assertRule(
+			check.name,
+			check.rules,
+			check.want,
+		)
+	}
+}
+
 type fakeIPTablesRunner struct {
 	t    *testing.T
 	ipt4 map[string][]string
@@ -1007,6 +1169,41 @@ func (n *fakeIPTablesRunner) DelExternalCGNATRules(mode linuxfw.CGNATMode, tunna
 func (n *fakeIPTablesRunner) HasIPV6() bool       { return true }
 func (n *fakeIPTablesRunner) HasIPV6NAT() bool    { return true }
 func (n *fakeIPTablesRunner) HasIPV6Filter() bool { return true }
+
+func (n *fakeIPTablesRunner) HasTailscaleHooks() (bool, error) {
+	checks := []iptRule{
+		{
+			chain: "filter/INPUT",
+			rule:  "-j ts-input",
+		},
+		{
+			chain: "filter/FORWARD",
+			rule:  "-j ts-forward",
+		},
+		{
+			chain: "nat/POSTROUTING",
+			rule:  "-j ts-postrouting",
+		},
+	}
+
+	for _, ipt := range []map[string][]string{
+		n.ipt4,
+		n.ipt6,
+	} {
+		for _, check := range checks {
+			rules, ok := ipt[check.chain]
+			if !ok ||
+				!slices.Contains(
+					rules,
+					check.rule,
+				) {
+				return false, nil
+			}
+		}
+	}
+
+	return true, nil
+}
 
 // fakeOS implements commandRunner and provides v4 and v6
 // netfilterRunners, but captures changes without touching the OS.
