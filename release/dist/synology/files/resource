@@ -1,9 +1,8 @@
 {
-	"port-config": {
-		"protocol-file": "conf/Tailscale.sc"
-	},
 	"usr-local-linker": {
-		"bin": ["bin/tailscale"]
+		"bin": [
+			"bin/tailscale"
+		]
 	},
 	"syslog-config": {
 		"logrotate-relpath": "conf/logrotate.conf"
