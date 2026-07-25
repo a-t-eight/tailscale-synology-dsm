@@ -189,14 +189,16 @@ func (t *target) mkInfo(b *dist.Build, uncompressedSz int64) []byte {
 				f("os_min_ver", "7.0-40000")
 				f("os_max_ver", "7.2-60000")
 			case 2:
-				f("os_min_ver", "7.2-60000")
+				// This custom package depends on the DSM 7.3 netfilter
+				// module package and root-runtime integration.
+				f("os_min_ver", "7.3-81180")
 			default:
 				panic(fmt.Sprintf("unsupported DSM major.minor version %s", t.dsmVersionString()))
 			}
 		} else {
-			// We do not clamp the os_max_ver currently for non-package center builds as
-			// the binaries for 7.0 and 7.2 are identical.
-			f("os_min_ver", "7.0-40000")
+			// This custom package depends on the DSM 7.3 netfilter
+			// module package and root-runtime integration.
+			f("os_min_ver", "7.3-81180")
 			f("os_max_ver", "")
 		}
 	default:

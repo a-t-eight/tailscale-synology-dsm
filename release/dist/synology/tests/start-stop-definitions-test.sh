@@ -52,6 +52,8 @@ env \
 
         printf "%s\n" \
             "$NETFILTER_LOCALAPI_ATTEMPTS" \
+            "$TUN_WAIT_ATTEMPTS" \
+            "$TUN_WAIT_SECONDS" \
             "$RECONCILER_START_ATTEMPTS"
     ' bash "${DEFINITIONS}" \
     >"${STDOUT_FILE}" \
@@ -79,6 +81,8 @@ EXPECTED="${TEST_ROOT}/expected"
 
 printf '%s\n' \
     30 \
+    10 \
+    1 \
     10 \
     >"${EXPECTED}"
 
