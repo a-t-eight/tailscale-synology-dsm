@@ -1,0 +1,15 @@
+upstream_tag=v1.98.9
+upstream_commit=6c167d40fa37aeb51afa7ff336730670ea4762bf
+release_branch=release/v1.98.9-synology
+release_commit=cc5d96275e9dd76fd8a4f38209a2df91199a425c
+release_tree=e004b64196c89a32e2a4b71949d2aff19d133ef8
+maintenance_tree=b8ced487a68252e56e9665df1993e4b4970d87d9
+signoff_policy_start=9b7c0464a2b5561cfb3e70bf07c22a6906c88cc8
+historical_patch_count=18
+package_version=1.98.96-700098096
+release_tag=release/synology-v1.98.96
+package_arch=x86_64
+synology_platform=geminilake
+tested_model=DS920+
+minimum_dsm=7.3-81180
+netfilter_package_min_version=1.0.0-11

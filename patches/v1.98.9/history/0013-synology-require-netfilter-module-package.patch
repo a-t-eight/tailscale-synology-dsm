@@ -1,0 +1,100 @@
+From 9b7c0464a2b5561cfb3e70bf07c22a6906c88cc8 Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Fri, 24 Jul 2026 03:29:51 +1000
+Subject: [PATCH 13/18] synology: require netfilter module package
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ release/dist/synology/files/PKG_DEPS  |  3 ++
+ release/dist/synology/pkgs.go         |  1 +
+ tool/build-synology-root-bootstrap.sh | 41 +++++++++++++++++++++++++++
+ 3 files changed, 45 insertions(+)
+ create mode 100644 release/dist/synology/files/PKG_DEPS
+
+diff --git a/release/dist/synology/files/PKG_DEPS b/release/dist/synology/files/PKG_DEPS
+new file mode 100644
+index 0000000000000000000000000000000000000000..5e649e7f6178dc6c5fd5310fa192841c6fc92040
+--- /dev/null
++++ b/release/dist/synology/files/PKG_DEPS
+@@ -0,0 +1,3 @@
++[tailscale-netfilter-modules]
++pkg_min_ver=1.0.0-11
++os_min_ver=7.3-81180
+diff --git a/release/dist/synology/pkgs.go b/release/dist/synology/pkgs.go
+index 80c8d467bd8944a973403d3b04b577cfe1c2ba5c..6bb0cfc402060b576f6eef43d051dfe22cca8508 100644
+--- a/release/dist/synology/pkgs.go
++++ b/release/dist/synology/pkgs.go
+@@ -108,6 +108,7 @@ func (t *target) buildSPK(b *dist.Build, inner *innerPkg) ([]string, error) {
+ 
+ 	if t.dsmMajorVersion == 7 {
+ 		entries = append(entries,
++			static("PKG_DEPS", "conf/PKG_DEPS", 0644),
+ 			static("privilege-dsm7", "conf/privilege.bootstrap-package", 0644),
+ 			static("privilege-dsm7.root", "conf/privilege.bootstrap-root", 0644),
+ 		)
+diff --git a/tool/build-synology-root-bootstrap.sh b/tool/build-synology-root-bootstrap.sh
+index c2b8ea927f1960b20177c73f98be14ccfd94852d..b9871ad78a52a30dce89e049f5a75d9694b6d8ad 100755
+--- a/tool/build-synology-root-bootstrap.sh
++++ b/tool/build-synology-root-bootstrap.sh
+@@ -64,6 +64,7 @@ tar -xf "${PACKAGE_CENTER_SPK}" -C "${CENTER}"
+ 
+ for file in \
+     conf/resource \
++    conf/PKG_DEPS \
+     scripts/start-stop-status \
+     scripts/preupgrade \
+     scripts/postupgrade \
+@@ -238,6 +239,42 @@ assert package_center["tool"] == [{
+ print("Privilege manifest validation passed.")
+ PYJSON
+ 
++python3 - \
++    "${SIDE}/conf/PKG_DEPS" \
++    "${CENTER}/conf/PKG_DEPS" <<'PYDEPS'
++import sys
++from pathlib import Path
++
++expected = (
++    "[tailscale-netfilter-modules]\n"
++    "pkg_min_ver=1.0.0-11\n"
++    "os_min_ver=7.3-81180\n"
++)
++
++for label, value in zip(
++    ("sideload", "Package Center"),
++    sys.argv[1:],
++):
++    path = Path(value)
++
++    if not path.is_file():
++        raise RuntimeError(
++            f"{label} package is missing conf/PKG_DEPS"
++        )
++
++    actual = path.read_text(encoding="utf-8")
++
++    if actual != expected:
++        raise RuntimeError(
++            "{} PKG_DEPS has unexpected contents:\n{!r}".format(
++                label,
++                actual,
++            )
++        )
++
++print("Package dependency validation passed.")
++PYDEPS
++
+ cp \
+     "${CENTER}/conf/privilege" \
+     "${REFERENCE_OUT}/privilege-package-center"
+@@ -246,6 +283,10 @@ cp \
+     "${CENTER}/conf/resource" \
+     "${REFERENCE_OUT}/resource-package-center"
+ 
++cp \
++    "${CENTER}/conf/PKG_DEPS" \
++    "${REFERENCE_OUT}/PKG_DEPS-package-center"
++
+ cp \
+     "${CENTER}/INFO" \
+     "${REFERENCE_OUT}/INFO-package-center"

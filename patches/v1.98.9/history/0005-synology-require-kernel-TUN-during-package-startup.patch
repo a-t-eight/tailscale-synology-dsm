@@ -1,0 +1,53 @@
+From 01d9071ddceae34502978656f1f36b26906841ec Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Thu, 23 Jul 2026 03:46:31 +1000
+Subject: [PATCH 05/18] synology: require kernel TUN during package startup
+
+---
+ .../synology/files/scripts/start-stop-status  | 19 +++++++++++--------
+ 1 file changed, 11 insertions(+), 8 deletions(-)
+
+diff --git a/release/dist/synology/files/scripts/start-stop-status b/release/dist/synology/files/scripts/start-stop-status
+index e6ece04e3383eb65bd8a3b9b7b956e0bc3ef5991..8c6e5e21614c6f0f48e6dee5a3c5912af5815fd6 100755
+--- a/release/dist/synology/files/scripts/start-stop-status
++++ b/release/dist/synology/files/scripts/start-stop-status
+@@ -19,11 +19,6 @@ SERVICE_COMMAND="${SYNOPKG_PKGDEST}/bin/tailscaled \
+ --socket=${SOCKET_FILE} \
+ --port=$PORT"
+ 
+-if [ "${SYNOPKG_DSM_VERSION_MAJOR}" -eq "7" -a ! -e "/dev/net/tun" ]; then
+-    # TODO(maisem/crawshaw): Disable the tun device in DSM7 for now.
+-    SERVICE_COMMAND="${SERVICE_COMMAND} --tun=userspace-networking"
+-fi
+-
+ if [ "${SYNOPKG_DSM_VERSION_MAJOR}" -eq "6" ]; then
+     chown -R tailscale:tailscale "${PKGVAR}/"
+ fi
+@@ -74,8 +69,14 @@ wait_for_status() {
+ 
+ ensure_tun_created() {
+     if [ "${SYNOPKG_DSM_VERSION_MAJOR}" -eq "7" ]; then
+-        # TODO(maisem/crawshaw): Disable the tun device in DSM7 for now.
+-        return
++        if [ ! -c /dev/net/tun ]; then
++            local ts
++            ts=$(date --iso-8601=second)
++            echo "${ts} ERROR: /dev/net/tun is unavailable; install and load the TUN kernel module before starting Tailscale." >&2
++            echo "${ts} ERROR: /dev/net/tun is unavailable; install and load the TUN kernel module before starting Tailscale." >>"${LOG_FILE}"
++            return 1
++        fi
++        return 0
+     fi
+     # Create the necessary file structure for /dev/net/tun
+     if ([ ! -c /dev/net/tun ]); then
+@@ -97,7 +98,9 @@ start)
+     if daemon_status; then
+         exit 0
+     else
+-        ensure_tun_created
++        if ! ensure_tun_created; then
++            exit 1
++        fi
+         start_daemon
+         exit $?
+     fi

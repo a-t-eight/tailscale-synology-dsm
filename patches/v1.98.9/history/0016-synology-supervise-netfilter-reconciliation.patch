@@ -1,0 +1,1369 @@
+From c765b13f21e642b594236d2b1561cf5b519411f7 Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Sat, 25 Jul 2026 04:11:21 +1000
+Subject: [PATCH 16/18] synology: supervise netfilter reconciliation
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ .../synology/files/scripts/start-stop-status  | 333 ++++-------
+ .../scripts/tailscale-netfilter-reconciler    | 527 ++++++++++++++++++
+ release/dist/synology/pkgs.go                 |   5 +
+ .../tests/netfilter-reconciler-test.sh        | 293 ++++++++++
+ .../tests/start-stop-definitions-test.sh      |  16 +-
+ tool/build-synology-root-bootstrap.sh         |   9 +-
+ 6 files changed, 954 insertions(+), 229 deletions(-)
+ create mode 100755 release/dist/synology/files/scripts/tailscale-netfilter-reconciler
+ create mode 100755 release/dist/synology/tests/netfilter-reconciler-test.sh
+
+diff --git a/release/dist/synology/files/scripts/start-stop-status b/release/dist/synology/files/scripts/start-stop-status
+index a049217f17faf6366a6e13c1e859fb517ea3ca5d..3b03db6d0f37c041b3e64de52eae27804a72cc9a 100755
+--- a/release/dist/synology/files/scripts/start-stop-status
++++ b/release/dist/synology/files/scripts/start-stop-status
+@@ -38,13 +38,12 @@ TAILSCALE_BIN="${SYNOPKG_PKGDEST}/bin/tailscale"
+ 
+ NETFILTER_LOCALAPI_ATTEMPTS="${TAILSCALE_SYNOLOGY_LOCALAPI_ATTEMPTS:-30}"
+ 
+-NETFILTER_BACKEND_ATTEMPTS="${TAILSCALE_SYNOLOGY_BACKEND_ATTEMPTS:-45}"
++RECONCILER_SCRIPT="${PKG_ROOT}/scripts/tailscale-netfilter-reconciler"
++RECONCILER_PID_FILE="${PKGVAR}/tailscale-netfilter-reconciler.pid"
++RECONCILER_LOG_FILE="${PKGVAR}/tailscale-netfilter-reconciler.log"
++RECONCILER_PENDING_FILE="${PKGVAR}/tailscale-netfilter-repair.pending"
+ 
+-NETFILTER_REPAIR_ATTEMPTS="${TAILSCALE_SYNOLOGY_NETFILTER_REPAIR_ATTEMPTS:-15}"
+-
+-NETFILTER_SETTLE_SECONDS="${TAILSCALE_SYNOLOGY_NETFILTER_SETTLE_SECONDS:-8}"
+-
+-NETFILTER_POST_REPAIR_SETTLE_SECONDS="${TAILSCALE_SYNOLOGY_NETFILTER_POST_REPAIR_SETTLE_SECONDS:-3}"
++RECONCILER_START_ATTEMPTS="${TAILSCALE_SYNOLOGY_RECONCILER_START_ATTEMPTS:-10}"
+ 
+ SERVICE_COMMAND="${SYNOPKG_PKGDEST}/bin/tailscaled \
+ --state=${STATE_FILE} \
+@@ -736,254 +735,137 @@ wait_for_localapi() {
+ }
+ 
+ 
+-prefs_require_netfilter_reconciliation() {
+-    local output
++reconciler_status() {
++    local pid=""
+ 
+-    output="$(
+-        "${TAILSCALE_BIN}" \
+-            --socket="${SOCKET_FILE}" \
+-            debug prefs \
+-            2>/dev/null
+-    )" || return 1
+-
+-    printf '%s\n' "${output}" |
+-        grep -Eq \
+-            '"WantRunning"[[:space:]]*:[[:space:]]*true' ||
++    if [ ! -r "${RECONCILER_PID_FILE}" ]; then
+         return 1
++    fi
+ 
+-    printf '%s\n' "${output}" |
+-        grep -Eq \
+-            '"NetfilterMode"[[:space:]]*:[[:space:]]*2' ||
+-        return 1
+-
+-    return 0
+-}
+-
+-
+-wait_for_backend_running() {
+-    local counter="${NETFILTER_BACKEND_ATTEMPTS}"
+-    local output
+-    local status
++    IFS= read -r pid <"${RECONCILER_PID_FILE}" ||
++        pid=""
+ 
+-    while [ "${counter}" -gt 0 ]; do
+-        output="$(
+-            "${TAILSCALE_BIN}" \
+-                --socket="${SOCKET_FILE}" \
+-                status \
+-                --json \
+-                2>/dev/null
+-        )"
+-
+-        status=$?
+-
+-        if [ "${status}" -eq 0 ]; then
+-            if printf '%s\n' "${output}" |
+-                grep -Eq \
+-                    '"BackendState"[[:space:]]*:[[:space:]]*"Running"'
+-            then
+-                return 0
+-            fi
+-
+-            if printf '%s\n' "${output}" |
+-                grep -Eq \
+-                    '"BackendState"[[:space:]]*:[[:space:]]*"(NeedsLogin|Stopped)"'
+-            then
+-                return 2
+-            fi
+-        fi
++    case "${pid}" in
++    ''|*[!0-9]*)
++        rm -f -- "${RECONCILER_PID_FILE}"
++        return 1
++        ;;
++    esac
+ 
+-        if ! daemon_status; then
+-            log_message ERROR \
+-                "tailscaled exited while waiting for the backend"
+-            return 1
+-        fi
++    if kill -0 "${pid}" >/dev/null 2>&1; then
++        return 0
++    fi
+ 
+-        counter=$((counter - 1))
+-        sleep 1
+-    done
++    rm -f -- "${RECONCILER_PID_FILE}"
+ 
+-    return 2
++    return 1
+ }
+ 
+ 
+-netfilter_hooks_complete() {
+-    local iptables_bin="${IPTABLES_BIN:-}"
+-    local ip6tables_bin
++start_reconciler() {
++    local pid
++    local counter="${RECONCILER_START_ATTEMPTS}"
+ 
+-    if [ -z "${iptables_bin}" ]; then
+-        iptables_bin="$(
+-            command -v iptables 2>/dev/null
+-        )" || return 1
++    if reconciler_status; then
++        return 0
+     fi
+ 
+-    "${iptables_bin}" \
+-        -t filter \
+-        -C INPUT \
+-        -j ts-input \
+-        >/dev/null 2>&1 ||
+-        return 1
+-
+-    "${iptables_bin}" \
+-        -t filter \
+-        -C FORWARD \
+-        -j ts-forward \
+-        >/dev/null 2>&1 ||
++    [ -x "${RECONCILER_SCRIPT}" ] || {
++        log_message ERROR \
++            "netfilter reconciler is unavailable: ${RECONCILER_SCRIPT}"
+         return 1
++    }
+ 
+-    "${iptables_bin}" \
+-        -t nat \
+-        -C POSTROUTING \
+-        -j ts-postrouting \
+-        >/dev/null 2>&1 ||
++    secure_root_path "${RECONCILER_SCRIPT}" || {
++        log_message ERROR \
++            "netfilter reconciler ownership or mode is unsafe: ${RECONCILER_SCRIPT}"
+         return 1
++    }
+ 
+-    ip6tables_bin="$(
+-        command -v ip6tables 2>/dev/null
+-    )" || ip6tables_bin=""
+-
+-    if [ -n "${ip6tables_bin}" ] &&
+-        "${ip6tables_bin}" \
+-            -t filter \
+-            -S \
+-            >/dev/null 2>&1
+-    then
+-        "${ip6tables_bin}" \
+-            -t filter \
+-            -C INPUT \
+-            -j ts-input \
+-            >/dev/null 2>&1 ||
+-            return 1
+-
+-        "${ip6tables_bin}" \
+-            -t filter \
+-            -C FORWARD \
+-            -j ts-forward \
+-            >/dev/null 2>&1 ||
+-            return 1
+-    fi
+-
+-    return 0
+-}
+-
+-
+-reconcile_netfilter_after_start() {
+-    local output
+-    local status
+-    local counter
++    rm -f -- "${RECONCILER_PID_FILE}"
+ 
+-    if ! wait_for_localapi; then
++    touch "${RECONCILER_LOG_FILE}" ||
+         return 1
+-    fi
+-
+-    if ! prefs_require_netfilter_reconciliation; then
+-        log_message INFO             "netfilter reconciliation is not required by the current Tailscale preferences"
+-        return 0
+-    fi
+ 
+-    wait_for_backend_running
+-    status=$?
+-
+-    case "${status}" in
+-    0)
+-        ;;
+-    1)
++    chmod 0600 "${RECONCILER_LOG_FILE}" ||
+         return 1
+-        ;;
+-    2)
+-        log_message NOTICE             "Tailscale backend did not reach Running state; deferring netfilter validation to daemon self-healing"
+-        return 0
+-        ;;
+-    *)
+-        log_message ERROR             "unexpected backend readiness status: ${status}"
+-        return 1
+-        ;;
+-    esac
+ 
+-    # DSM performs delayed firewall processing after package startup.
+-    # Do not validate the transient state observed immediately after the
+-    # daemon creates its chains.
+-    sleep "${NETFILTER_SETTLE_SECONDS}"
++    TAILSCALE_RECONCILER_PKGVAR="${PKGVAR}" \
++    TAILSCALE_RECONCILER_TAILSCALE_BIN="${TAILSCALE_BIN}" \
++    TAILSCALE_RECONCILER_SOCKET_FILE="${SOCKET_FILE}" \
++    TAILSCALE_RECONCILER_PID_FILE="${RECONCILER_PID_FILE}" \
++    TAILSCALE_RECONCILER_PENDING_FILE="${RECONCILER_PENDING_FILE}" \
++        "${RECONCILER_SCRIPT}" \
++        >>"${RECONCILER_LOG_FILE}" \
++        2>&1 &
+ 
+-    if netfilter_hooks_complete; then
+-        log_message INFO \
+-            "Tailscale netfilter hooks are complete after startup"
+-        return 0
+-    fi
++    pid=$!
+ 
+-    log_message NOTICE \
+-        "Tailscale netfilter hooks are incomplete after DSM startup processing; rebuilding"
++    printf '%s\n' \
++        "${pid}" \
++        >"${RECONCILER_PID_FILE}" ||
++        return 1
+ 
+-    output="$(
+-        "${TAILSCALE_BIN}" \
+-            --socket="${SOCKET_FILE}" \
+-            set \
+-            --netfilter-mode=off \
+-            2>&1
+-    )"
++    chmod 0600 "${RECONCILER_PID_FILE}" ||
++        return 1
+ 
+-    status=$?
++    while [ "${counter}" -gt 0 ]; do
++        if reconciler_status; then
++            log_message INFO \
++                "started netfilter reconciler PID=${pid}"
++            return 0
++        fi
+ 
+-    if [ "${status}" -ne 0 ]; then
+-        log_message ERROR \
+-            "cannot disable netfilter for reconciliation: ${output}"
+-        return 1
+-    fi
++        counter=$((counter - 1))
++        sleep 1
++    done
+ 
+-    if [ -n "${output}" ]; then
+-        log_message NOTICE \
+-            "netfilter disable output: ${output}"
+-    fi
++    log_message ERROR \
++        "netfilter reconciler did not remain running"
+ 
+-    sleep 1
++    rm -f -- "${RECONCILER_PID_FILE}"
+ 
+-    output="$(
+-        "${TAILSCALE_BIN}" \
+-            --socket="${SOCKET_FILE}" \
+-            set \
+-            --netfilter-mode=on \
+-            2>&1
+-    )"
++    return 1
++}
+ 
+-    status=$?
+ 
+-    if [ "${status}" -ne 0 ]; then
+-        log_message ERROR \
+-            "cannot re-enable netfilter during reconciliation: ${output}"
+-        return 1
+-    fi
++stop_reconciler() {
++    local pid=""
++    local counter=20
+ 
+-    if [ -n "${output}" ]; then
+-        log_message INFO \
+-            "netfilter enable output: ${output}"
++    if ! reconciler_status; then
++        rm -f -- "${RECONCILER_PID_FILE}"
++        return 0
+     fi
+ 
+-    counter="${NETFILTER_REPAIR_ATTEMPTS}"
++    IFS= read -r pid <"${RECONCILER_PID_FILE}" ||
++        pid=""
+ 
+-    while [ "${counter}" -gt 0 ]; do
+-        if netfilter_hooks_complete; then
+-            # Verify that DSM does not immediately remove the reconstructed
+-            # hooks again.
+-            sleep "${NETFILTER_POST_REPAIR_SETTLE_SECONDS}"
++    log_message INFO \
++        "stopping netfilter reconciler PID=${pid}"
+ 
+-            if netfilter_hooks_complete; then
+-                log_message INFO \
+-                    "Tailscale netfilter reconciliation completed successfully"
+-                return 0
+-            fi
++    kill -TERM "${pid}" >/dev/null 2>&1 ||
++        true
+ 
+-            log_message ERROR \
+-                "DSM removed the reconstructed Tailscale hooks during the post-repair settle period"
+-            return 1
++    while [ "${counter}" -gt 0 ]; do
++        if ! kill -0 "${pid}" >/dev/null 2>&1; then
++            rm -f -- "${RECONCILER_PID_FILE}"
++            return 0
+         fi
+ 
+         counter=$((counter - 1))
+         sleep 1
+     done
+ 
+-    log_message ERROR \
+-        "Tailscale netfilter hooks remain incomplete after reconciliation"
++    log_message WARNING \
++        "netfilter reconciler did not stop after SIGTERM; sending SIGKILL"
+ 
+-    return 1
++    kill -KILL "${pid}" >/dev/null 2>&1 ||
++        true
++
++    rm -f -- "${RECONCILER_PID_FILE}"
++
++    return 0
+ }
+ 
+ 
+@@ -1018,13 +900,18 @@ start)
+         start_daemon
+ 
+         if ! wait_for_status 0; then
+-            log_message ERROR                 "tailscaled did not remain running after startup"
++            log_message ERROR \
++                "tailscaled did not remain running after startup"
++            stop_daemon
++            exit 1
++        fi
++
++        if ! wait_for_localapi; then
+             stop_daemon
+             exit 1
+         fi
+ 
+-        if ! reconcile_netfilter_after_start; then
+-            log_message ERROR                 "post-start netfilter reconciliation failed"
++        if ! start_reconciler; then
+             stop_daemon
+             exit 1
+         fi
+@@ -1033,16 +920,30 @@ start)
+     fi
+     ;;
+ stop)
++    STOP_STATUS=0
++
++    if reconciler_status; then
++        stop_reconciler ||
++            STOP_STATUS=1
++    fi
++
+     if daemon_status; then
+-        stop_daemon
+-        exit $?
+-    else
+-        exit 0
++        stop_daemon ||
++            STOP_STATUS=1
+     fi
++
++    exit "${STOP_STATUS}"
+     ;;
+ status)
+     if daemon_status; then
+         echo "${SERVICE_NAME} is running"
++
++        if reconciler_status; then
++            echo "netfilter reconciler is running"
++        else
++            echo "netfilter reconciler is not running"
++        fi
++
+         exit 0
+     else
+         if ! bootstrap_is_current; then
+diff --git a/release/dist/synology/files/scripts/tailscale-netfilter-reconciler b/release/dist/synology/files/scripts/tailscale-netfilter-reconciler
+new file mode 100755
+index 0000000000000000000000000000000000000000..9581c07ea90d1555f02e402dc7990971c04b0328
+--- /dev/null
++++ b/release/dist/synology/files/scripts/tailscale-netfilter-reconciler
+@@ -0,0 +1,527 @@
++#!/bin/bash
++
++set -u
++
++export PATH="/usr/syno/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
++
++SERVICE_NAME="tailscale-netfilter-reconciler"
++
++PKG_NAME="${SYNOPKG_PKGNAME:-Tailscale}"
++PKG_ROOT="${TAILSCALE_SYNOLOGY_PACKAGE_ROOT:-/var/packages/${PKG_NAME}}"
++
++PKGVAR="${TAILSCALE_RECONCILER_PKGVAR:-${SYNOPKG_PKGVAR:-${PKG_ROOT}/var}}"
++
++TAILSCALE_BIN="${TAILSCALE_RECONCILER_TAILSCALE_BIN:-${SYNOPKG_PKGDEST:-${PKG_ROOT}/target}/bin/tailscale}"
++SOCKET_FILE="${TAILSCALE_RECONCILER_SOCKET_FILE:-${PKGVAR}/tailscaled.sock}"
++
++IPTABLES_BIN="${TAILSCALE_RECONCILER_IPTABLES_BIN:-}"
++IP6TABLES_BIN="${TAILSCALE_RECONCILER_IP6TABLES_BIN:-}"
++
++PID_FILE="${TAILSCALE_RECONCILER_PID_FILE:-${PKGVAR}/tailscale-netfilter-reconciler.pid}"
++PENDING_FILE="${TAILSCALE_RECONCILER_PENDING_FILE:-${PKGVAR}/tailscale-netfilter-repair.pending}"
++
++BOOT_PHASE_SECONDS="${TAILSCALE_SYNOLOGY_RECONCILER_BOOT_SECONDS:-120}"
++BOOT_INTERVAL_SECONDS="${TAILSCALE_SYNOLOGY_RECONCILER_BOOT_INTERVAL:-2}"
++STEADY_INTERVAL_SECONDS="${TAILSCALE_SYNOLOGY_RECONCILER_STEADY_INTERVAL:-30}"
++REPAIR_COOLDOWN_SECONDS="${TAILSCALE_SYNOLOGY_RECONCILER_REPAIR_COOLDOWN:-5}"
++VERIFY_SECONDS="${TAILSCALE_SYNOLOGY_RECONCILER_VERIFY_SECONDS:-2}"
++
++TEST_MODE="${TAILSCALE_SYNOLOGY_TEST_MODE:-0}"
++TEST_MAX_ITERATIONS="${TAILSCALE_SYNOLOGY_RECONCILER_TEST_MAX_ITERATIONS:-0}"
++TEST_NO_SLEEP="${TAILSCALE_SYNOLOGY_RECONCILER_TEST_NO_SLEEP:-0}"
++
++STOP_REQUESTED=0
++LAST_STATE=""
++LAST_PHASE=""
++LAST_REPAIR_EPOCH=0
++
++
++log_message() {
++    local level="$1"
++    shift
++
++    local timestamp
++    timestamp="$(date --iso-8601=second)"
++
++    printf '%s %s: %s\n' \
++        "${timestamp}" \
++        "${level}" \
++        "$*"
++}
++
++
++require_positive_integer() {
++    local name="$1"
++    local value="$2"
++
++    case "${value}" in
++    ''|*[!0-9]*|0)
++        log_message ERROR \
++            "${name} must be a positive integer; received ${value}"
++        return 1
++        ;;
++    esac
++
++    return 0
++}
++
++
++require_nonnegative_integer() {
++    local name="$1"
++    local value="$2"
++
++    case "${value}" in
++    ''|*[!0-9]*)
++        log_message ERROR \
++            "${name} must be a non-negative integer; received ${value}"
++        return 1
++        ;;
++    esac
++
++    return 0
++}
++
++
++validate_configuration() {
++    require_positive_integer \
++        BOOT_PHASE_SECONDS \
++        "${BOOT_PHASE_SECONDS}" ||
++        return 1
++
++    require_positive_integer \
++        BOOT_INTERVAL_SECONDS \
++        "${BOOT_INTERVAL_SECONDS}" ||
++        return 1
++
++    require_positive_integer \
++        STEADY_INTERVAL_SECONDS \
++        "${STEADY_INTERVAL_SECONDS}" ||
++        return 1
++
++    require_positive_integer \
++        REPAIR_COOLDOWN_SECONDS \
++        "${REPAIR_COOLDOWN_SECONDS}" ||
++        return 1
++
++    require_positive_integer \
++        VERIFY_SECONDS \
++        "${VERIFY_SECONDS}" ||
++        return 1
++
++    require_nonnegative_integer \
++        TEST_MAX_ITERATIONS \
++        "${TEST_MAX_ITERATIONS}" ||
++        return 1
++
++    [ -x "${TAILSCALE_BIN}" ] || {
++        log_message ERROR \
++            "tailscale CLI is unavailable: ${TAILSCALE_BIN}"
++        return 1
++    }
++
++    return 0
++}
++
++
++handle_stop() {
++    STOP_REQUESTED=1
++}
++
++
++cleanup_pid_file() {
++    local stored_pid=""
++
++    if [ -r "${PID_FILE}" ]; then
++        IFS= read -r stored_pid <"${PID_FILE}" ||
++            stored_pid=""
++
++        if [ "${stored_pid}" = "$$" ]; then
++            rm -f -- "${PID_FILE}"
++        fi
++    fi
++}
++
++
++sleep_for() {
++    local duration="$1"
++
++    if [ "${TEST_MODE}" = "1" ] &&
++        [ "${TEST_NO_SLEEP}" = "1" ]
++    then
++        return 0
++    fi
++
++    sleep "${duration}"
++}
++
++
++tailscale_cli() {
++    "${TAILSCALE_BIN}" \
++        --socket="${SOCKET_FILE}" \
++        "$@"
++}
++
++
++prefs_require_netfilter() {
++    local output
++
++    output="$(
++        tailscale_cli \
++            debug prefs \
++            2>/dev/null
++    )" || return 1
++
++    printf '%s\n' "${output}" |
++        grep -Eq \
++            '"WantRunning"[[:space:]]*:[[:space:]]*true' ||
++        return 1
++
++    printf '%s\n' "${output}" |
++        grep -Eq \
++            '"NetfilterMode"[[:space:]]*:[[:space:]]*2' ||
++        return 1
++
++    return 0
++}
++
++
++backend_running() {
++    local output
++
++    output="$(
++        tailscale_cli \
++            status \
++            --json \
++            2>/dev/null
++    )" || return 1
++
++    printf '%s\n' "${output}" |
++        grep -Eq \
++            '"BackendState"[[:space:]]*:[[:space:]]*"Running"'
++}
++
++
++netfilter_hooks_complete() {
++    local iptables_bin="${IPTABLES_BIN}"
++    local ip6tables_bin="${IP6TABLES_BIN}"
++
++    if [ -z "${iptables_bin}" ]; then
++        iptables_bin="$(
++            command -v iptables 2>/dev/null
++        )" || return 1
++    fi
++
++    "${iptables_bin}" \
++        -t filter \
++        -C INPUT \
++        -j ts-input \
++        >/dev/null 2>&1 ||
++        return 1
++
++    "${iptables_bin}" \
++        -t filter \
++        -C FORWARD \
++        -j ts-forward \
++        >/dev/null 2>&1 ||
++        return 1
++
++    "${iptables_bin}" \
++        -t nat \
++        -C POSTROUTING \
++        -j ts-postrouting \
++        >/dev/null 2>&1 ||
++        return 1
++
++    if [ -z "${ip6tables_bin}" ]; then
++        ip6tables_bin="$(
++            command -v ip6tables 2>/dev/null
++        )" || ip6tables_bin=""
++    fi
++
++    if [ -n "${ip6tables_bin}" ] &&
++        "${ip6tables_bin}" \
++            -t filter \
++            -S \
++            >/dev/null 2>&1
++    then
++        "${ip6tables_bin}" \
++            -t filter \
++            -C INPUT \
++            -j ts-input \
++            >/dev/null 2>&1 ||
++            return 1
++
++        "${ip6tables_bin}" \
++            -t filter \
++            -C FORWARD \
++            -j ts-forward \
++            >/dev/null 2>&1 ||
++            return 1
++    fi
++
++    return 0
++}
++
++
++mark_repair_pending() {
++    local temporary="${PENDING_FILE}.tmp.$$"
++
++    umask 077
++
++    printf '%s\n' \
++        "$$" \
++        >"${temporary}" ||
++        return 1
++
++    mv -f -- \
++        "${temporary}" \
++        "${PENDING_FILE}"
++}
++
++
++clear_repair_pending() {
++    rm -f -- "${PENDING_FILE}"
++}
++
++
++restore_pending_repair() {
++    local output
++    local status
++
++    if ! backend_running; then
++        return 1
++    fi
++
++    log_message NOTICE \
++        "an interrupted netfilter repair is pending; restoring netfilter mode on"
++
++    output="$(
++        tailscale_cli \
++            set \
++            --netfilter-mode=on \
++            2>&1
++    )"
++
++    status=$?
++
++    if [ "${status}" -ne 0 ]; then
++        log_message ERROR \
++            "cannot restore netfilter mode on: ${output}"
++        return 1
++    fi
++
++    clear_repair_pending
++
++    sleep_for "${VERIFY_SECONDS}"
++
++    if netfilter_hooks_complete; then
++        log_message INFO \
++            "interrupted netfilter repair was recovered successfully"
++        return 0
++    fi
++
++    log_message WARNING \
++        "netfilter mode was restored, but required hooks remain incomplete"
++
++    return 1
++}
++
++
++repair_netfilter() {
++    local output
++    local off_status
++    local on_status
++
++    if ! mark_repair_pending; then
++        log_message ERROR \
++            "cannot create repair marker ${PENDING_FILE}"
++        return 1
++    fi
++
++    log_message NOTICE \
++        "rebuilding incomplete Tailscale netfilter state"
++
++    output="$(
++        tailscale_cli \
++            set \
++            --netfilter-mode=off \
++            2>&1
++    )"
++
++    off_status=$?
++
++    if [ "${off_status}" -ne 0 ]; then
++        log_message WARNING \
++            "netfilter disable failed; still attempting to restore mode on: ${output}"
++    else
++        sleep_for 1
++    fi
++
++    output="$(
++        tailscale_cli \
++            set \
++            --netfilter-mode=on \
++            2>&1
++    )"
++
++    on_status=$?
++
++    if [ "${on_status}" -ne 0 ]; then
++        log_message ERROR \
++            "netfilter enable failed; repair marker retained for recovery: ${output}"
++        return 1
++    fi
++
++    clear_repair_pending
++
++    sleep_for "${VERIFY_SECONDS}"
++
++    if netfilter_hooks_complete; then
++        log_message INFO \
++            "Tailscale netfilter repair completed successfully"
++        return 0
++    fi
++
++    log_message WARNING \
++        "Tailscale netfilter hooks remain incomplete after reconstruction"
++
++    return 1
++}
++
++
++set_state() {
++    local new_state="$1"
++    local level="$2"
++    shift 2
++
++    if [ "${LAST_STATE}" != "${new_state}" ]; then
++        log_message "${level}" "$@"
++        LAST_STATE="${new_state}"
++    fi
++}
++
++
++reconcile_once() {
++    local now
++    local since_last_repair
++
++    if [ -e "${PENDING_FILE}" ]; then
++        if restore_pending_repair; then
++            LAST_STATE="healthy"
++        else
++            LAST_STATE="repair-pending"
++        fi
++        return
++    fi
++
++    if ! prefs_require_netfilter; then
++        set_state \
++            inactive \
++            INFO \
++            "current Tailscale preferences do not require netfilter reconciliation"
++        return
++    fi
++
++    if ! backend_running; then
++        set_state \
++            waiting \
++            INFO \
++            "waiting for the Tailscale backend to reach Running state"
++        return
++    fi
++
++    if netfilter_hooks_complete; then
++        if [ "${LAST_STATE}" = "missing" ] ||
++            [ "${LAST_STATE}" = "repair-failed" ]
++        then
++            log_message INFO \
++                "Tailscale netfilter hooks are complete again"
++        fi
++
++        LAST_STATE="healthy"
++        return
++    fi
++
++    set_state \
++        missing \
++        NOTICE \
++        "Tailscale netfilter hooks are incomplete"
++
++    now="$(date +%s)"
++    since_last_repair=$((now - LAST_REPAIR_EPOCH))
++
++    if [ "${LAST_REPAIR_EPOCH}" -ne 0 ] &&
++        [ "${since_last_repair}" -lt "${REPAIR_COOLDOWN_SECONDS}" ]
++    then
++        return
++    fi
++
++    LAST_REPAIR_EPOCH="${now}"
++
++    if repair_netfilter; then
++        LAST_STATE="healthy"
++    else
++        LAST_STATE="repair-failed"
++    fi
++}
++
++
++main() {
++    local start_epoch
++    local now
++    local elapsed
++    local phase
++    local interval
++    local iterations=0
++
++    validate_configuration ||
++        return 1
++
++    trap handle_stop TERM INT HUP
++    trap cleanup_pid_file EXIT
++
++    start_epoch="$(date +%s)"
++
++    log_message INFO \
++        "started: boot phase ${BOOT_PHASE_SECONDS}s/${BOOT_INTERVAL_SECONDS}s, steady state ${STEADY_INTERVAL_SECONDS}s"
++
++    while [ "${STOP_REQUESTED}" -eq 0 ]; do
++        now="$(date +%s)"
++        elapsed=$((now - start_epoch))
++
++        if [ "${elapsed}" -lt "${BOOT_PHASE_SECONDS}" ]; then
++            phase="boot"
++            interval="${BOOT_INTERVAL_SECONDS}"
++        else
++            phase="steady"
++            interval="${STEADY_INTERVAL_SECONDS}"
++        fi
++
++        if [ "${phase}" != "${LAST_PHASE}" ]; then
++            log_message INFO \
++                "entered ${phase} reconciliation phase"
++            LAST_PHASE="${phase}"
++        fi
++
++        reconcile_once
++
++        iterations=$((iterations + 1))
++
++        if [ "${TEST_MODE}" = "1" ] &&
++            [ "${TEST_MAX_ITERATIONS}" -gt 0 ] &&
++            [ "${iterations}" -ge "${TEST_MAX_ITERATIONS}" ]
++        then
++            break
++        fi
++
++        sleep_for "${interval}"
++    done
++
++    log_message INFO \
++        "stopped"
++
++    return 0
++}
++
++
++main "$@"
+diff --git a/release/dist/synology/pkgs.go b/release/dist/synology/pkgs.go
+index 6bb0cfc402060b576f6eef43d051dfe22cca8508..c585968ffbccb5c62508927b10c780f556ac3424 100644
+--- a/release/dist/synology/pkgs.go
++++ b/release/dist/synology/pkgs.go
+@@ -118,6 +118,11 @@ func (t *target) buildSPK(b *dist.Build, inner *innerPkg) ([]string, error) {
+ 		file(inner.path, "package.tgz", 0644),
+ 		dir("scripts"),
+ 		static("scripts/start-stop-status", "scripts/start-stop-status", 0644),
++		static(
++			"scripts/tailscale-netfilter-reconciler",
++			"scripts/tailscale-netfilter-reconciler",
++			0755,
++		),
+ 		static("scripts/postupgrade", "scripts/postupgrade", 0644),
+ 		static("scripts/preupgrade", "scripts/preupgrade", 0644),
+ 	)
+diff --git a/release/dist/synology/tests/netfilter-reconciler-test.sh b/release/dist/synology/tests/netfilter-reconciler-test.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..b2a0dec9522514ad7437d9d9af0919a6d82d222c
+--- /dev/null
++++ b/release/dist/synology/tests/netfilter-reconciler-test.sh
+@@ -0,0 +1,293 @@
++#!/bin/bash
++
++set -euo pipefail
++
++SCRIPT_DIR="$(
++    cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &&
++        pwd
++)"
++
++REPO_ROOT="$(
++    cd -- "${SCRIPT_DIR}/../../../.." &&
++        pwd
++)"
++
++RECONCILER="${REPO_ROOT}/release/dist/synology/files/scripts/tailscale-netfilter-reconciler"
++
++TEST_ROOT="$(mktemp -d)"
++MOCK_BIN="${TEST_ROOT}/bin"
++
++PASS_COUNT=0
++FAIL_COUNT=0
++
++cleanup() {
++    rm -rf -- "${TEST_ROOT}"
++}
++
++trap cleanup EXIT
++
++mkdir -p "${MOCK_BIN}"
++
++
++fail() {
++    printf 'ERROR: %s\n' "$*" >&2
++    exit 1
++}
++
++
++assert_contains() {
++    local file="$1"
++    local wanted="$2"
++
++    grep -Fq -- "${wanted}" "${file}" ||
++        fail "${file} does not contain: ${wanted}"
++}
++
++
++assert_not_contains() {
++    local file="$1"
++    local unwanted="$2"
++
++    if grep -Fq -- "${unwanted}" "${file}"; then
++        fail "${file} unexpectedly contains: ${unwanted}"
++    fi
++}
++
++
++command cat >"${MOCK_BIN}/tailscale" <<'MOCK'
++#!/bin/bash
++
++set -u
++
++STATE="${MOCK_STATE:?}"
++COMMAND_LOG="${STATE}/commands.log"
++
++args=" $* "
++
++case "${args}" in
++*" debug prefs "*)
++    mode="$(command cat "${STATE}/netfilter-mode")"
++    want="$(command cat "${STATE}/want-running")"
++
++    printf '{\n'
++    printf '  "WantRunning": %s,\n' "${want}"
++    printf '  "NetfilterMode": %s\n' "${mode}"
++    printf '}\n'
++    ;;
++
++*" status --json "*)
++    backend="$(command cat "${STATE}/backend-state")"
++
++    printf '{\n'
++    printf '  "BackendState": "%s"\n' "${backend}"
++    printf '}\n'
++    ;;
++
++*" set --netfilter-mode=off "*)
++    printf '%s\n' \
++        'set --netfilter-mode=off' \
++        >>"${COMMAND_LOG}"
++
++    printf '%s\n' \
++        0 \
++        >"${STATE}/netfilter-mode"
++
++    rm -f -- "${STATE}/hooks-complete"
++    ;;
++
++*" set --netfilter-mode=on "*)
++    printf '%s\n' \
++        'set --netfilter-mode=on' \
++        >>"${COMMAND_LOG}"
++
++    printf '%s\n' \
++        2 \
++        >"${STATE}/netfilter-mode"
++
++    touch "${STATE}/hooks-complete"
++    ;;
++
++*)
++    printf 'unsupported mock tailscale invocation: %s\n' \
++        "$*" >&2
++    exit 1
++    ;;
++esac
++MOCK
++
++chmod 0755 \
++  "${MOCK_BIN}/tailscale"
++
++
++command cat >"${MOCK_BIN}/iptables" <<'MOCK'
++#!/bin/bash
++
++set -u
++
++STATE="${MOCK_STATE:?}"
++
++case " $* " in
++*" -t filter -S "*)
++    exit 0
++    ;;
++
++*" -t filter -C INPUT -j ts-input "*|\
++*" -t filter -C FORWARD -j ts-forward "*|\
++*" -t nat -C POSTROUTING -j ts-postrouting "*)
++    [ -e "${STATE}/hooks-complete" ]
++    exit $?
++    ;;
++
++*)
++    printf 'unsupported mock iptables invocation: %s\n' \
++        "$*" >&2
++    exit 1
++    ;;
++esac
++MOCK
++
++chmod 0755 \
++  "${MOCK_BIN}/iptables"
++
++ln -s \
++  "${MOCK_BIN}/iptables" \
++  "${MOCK_BIN}/ip6tables"
++
++
++setup_case() {
++    CASE_NAME="$1"
++    CASE_ROOT="${TEST_ROOT}/${CASE_NAME}"
++    STATE="${CASE_ROOT}/state"
++    OUTPUT="${CASE_ROOT}/output"
++
++    rm -rf -- "${CASE_ROOT}"
++
++    mkdir -p \
++        "${STATE}/pkgvar"
++
++    : >"${STATE}/commands.log"
++
++    printf '%s\n' true >"${STATE}/want-running"
++    printf '%s\n' 2 >"${STATE}/netfilter-mode"
++    printf '%s\n' Running >"${STATE}/backend-state"
++}
++
++
++run_reconciler() {
++    env \
++        PATH="${MOCK_BIN}:/usr/bin:/bin" \
++        MOCK_STATE="${STATE}" \
++        TAILSCALE_RECONCILER_PKGVAR="${STATE}/pkgvar" \
++        TAILSCALE_RECONCILER_TAILSCALE_BIN="${MOCK_BIN}/tailscale" \
++        TAILSCALE_RECONCILER_SOCKET_FILE="${STATE}/tailscaled.sock" \
++        TAILSCALE_RECONCILER_IPTABLES_BIN="${MOCK_BIN}/iptables" \
++        TAILSCALE_RECONCILER_IP6TABLES_BIN="${MOCK_BIN}/ip6tables" \
++        TAILSCALE_RECONCILER_PID_FILE="${STATE}/pkgvar/reconciler.pid" \
++        TAILSCALE_RECONCILER_PENDING_FILE="${STATE}/pkgvar/repair.pending" \
++        TAILSCALE_SYNOLOGY_TEST_MODE=1 \
++        TAILSCALE_SYNOLOGY_RECONCILER_TEST_MAX_ITERATIONS=1 \
++        TAILSCALE_SYNOLOGY_RECONCILER_TEST_NO_SLEEP=1 \
++        bash "${RECONCILER}" \
++        >"${OUTPUT}" \
++        2>&1
++}
++
++
++printf 'TEST: complete hooks do not trigger repair ... '
++
++setup_case complete
++touch "${STATE}/hooks-complete"
++
++run_reconciler
++
++assert_not_contains \
++    "${STATE}/commands.log" \
++    'set --netfilter-mode='
++
++printf 'PASS\n'
++PASS_COUNT=$((PASS_COUNT + 1))
++
++
++printf 'TEST: missing hooks trigger one off-on reconstruction ... '
++
++setup_case missing
++
++run_reconciler
++
++assert_contains \
++    "${STATE}/commands.log" \
++    'set --netfilter-mode=off'
++
++assert_contains \
++    "${STATE}/commands.log" \
++    'set --netfilter-mode=on'
++
++[ -e "${STATE}/hooks-complete" ] ||
++    fail "repair did not restore hooks"
++
++[ ! -e "${STATE}/pkgvar/repair.pending" ] ||
++    fail "successful repair left a pending marker"
++
++printf 'PASS\n'
++PASS_COUNT=$((PASS_COUNT + 1))
++
++
++printf 'TEST: netfilter off is not overridden ... '
++
++setup_case disabled
++printf '%s\n' 0 >"${STATE}/netfilter-mode"
++
++run_reconciler
++
++assert_not_contains \
++    "${STATE}/commands.log" \
++    'set --netfilter-mode='
++
++printf 'PASS\n'
++PASS_COUNT=$((PASS_COUNT + 1))
++
++
++printf 'TEST: non-running backend is not repaired ... '
++
++setup_case backend-wait
++printf '%s\n' Starting >"${STATE}/backend-state"
++
++run_reconciler
++
++assert_not_contains \
++    "${STATE}/commands.log" \
++    'set --netfilter-mode='
++
++printf 'PASS\n'
++PASS_COUNT=$((PASS_COUNT + 1))
++
++
++printf 'TEST: interrupted repair restores netfilter mode on ... '
++
++setup_case pending
++printf '%s\n' 0 >"${STATE}/netfilter-mode"
++touch "${STATE}/pkgvar/repair.pending"
++
++run_reconciler
++
++assert_contains \
++    "${STATE}/commands.log" \
++    'set --netfilter-mode=on'
++
++assert_not_contains \
++    "${STATE}/commands.log" \
++    'set --netfilter-mode=off'
++
++[ -e "${STATE}/hooks-complete" ] ||
++    fail "pending repair did not restore hooks"
++
++[ ! -e "${STATE}/pkgvar/repair.pending" ] ||
++    fail "pending repair marker was not removed"
++
++printf 'PASS\n'
++PASS_COUNT=$((PASS_COUNT + 1))
++
++
++printf '\nResults: %d passed, %d failed\n' \
++    "${PASS_COUNT}" \
++    "${FAIL_COUNT}"
+diff --git a/release/dist/synology/tests/start-stop-definitions-test.sh b/release/dist/synology/tests/start-stop-definitions-test.sh
+index 28ed10a74926bdaa05c84175d8ab3ce2014766b8..242dbb0288da3d4f70a99d7e52a8961c1c8c7a60 100755
+--- a/release/dist/synology/tests/start-stop-definitions-test.sh
++++ b/release/dist/synology/tests/start-stop-definitions-test.sh
+@@ -14,9 +14,7 @@ REPO_ROOT="$(
+ 
+ START_STOP_SOURCE="${REPO_ROOT}/release/dist/synology/files/scripts/start-stop-status"
+ 
+-TEST_ROOT="$(
+-    mktemp -d
+-)"
++TEST_ROOT="$(mktemp -d)"
+ 
+ cleanup() {
+     rm -rf -- "${TEST_ROOT}"
+@@ -54,10 +52,7 @@ env \
+ 
+         printf "%s\n" \
+             "$NETFILTER_LOCALAPI_ATTEMPTS" \
+-            "$NETFILTER_BACKEND_ATTEMPTS" \
+-            "$NETFILTER_REPAIR_ATTEMPTS" \
+-            "$NETFILTER_SETTLE_SECONDS" \
+-            "$NETFILTER_POST_REPAIR_SETTLE_SECONDS"
++            "$RECONCILER_START_ATTEMPTS"
+     ' bash "${DEFINITIONS}" \
+     >"${STDOUT_FILE}" \
+     2>"${STDERR_FILE}"
+@@ -84,17 +79,14 @@ EXPECTED="${TEST_ROOT}/expected"
+ 
+ printf '%s\n' \
+     30 \
+-    45 \
+-    15 \
+-    8 \
+-    3 \
++    10 \
+     >"${EXPECTED}"
+ 
+ if ! cmp -s \
+     "${EXPECTED}" \
+     "${STDOUT_FILE}"
+ then
+-    printf 'ERROR: unexpected reconciliation defaults\n' >&2
++    printf 'ERROR: unexpected package startup defaults\n' >&2
+ 
+     printf 'Expected:\n' >&2
+     sed -n '1,20p' "${EXPECTED}" >&2
+diff --git a/tool/build-synology-root-bootstrap.sh b/tool/build-synology-root-bootstrap.sh
+index 077ebaa1b578b8f6eed05bf867972d4ec675b8bc..36ec4ea96a3200df96ce885763163645e183af2e 100755
+--- a/tool/build-synology-root-bootstrap.sh
++++ b/tool/build-synology-root-bootstrap.sh
+@@ -2,7 +2,7 @@
+ set -euo pipefail
+ 
+ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+-VERSION_OVERRIDE="${TS_VERSION_OVERRIDE:-1.98.93}"
++VERSION_OVERRIDE="${TS_VERSION_OVERRIDE:-1.98.94}"
+ OUT_ROOT="${1:-${REPO_ROOT}/build/synology/v1.98.9-final}"
+ 
+ SIDELOAD_OUT="${OUT_ROOT}/sideload"
+@@ -66,6 +66,7 @@ for file in \
+     conf/resource \
+     conf/PKG_DEPS \
+     scripts/start-stop-status \
++    scripts/tailscale-netfilter-reconciler \
+     scripts/preupgrade \
+     scripts/postupgrade \
+     scripts/tailscale-synology-bootstrap
+@@ -201,8 +202,14 @@ if cmp -s "${SIDE}/INFO" "${CENTER}/INFO"; then
+ fi
+ 
+ bash -n "${SIDE}/scripts/start-stop-status"
++bash -n "${SIDE}/scripts/tailscale-netfilter-reconciler"
+ bash -n "${SIDE}/scripts/tailscale-synology-bootstrap"
+ 
++if [ ! -x "${SIDE}/scripts/tailscale-netfilter-reconciler" ]; then
++    printf 'ERROR: packaged netfilter reconciler is not executable\n' >&2
++    exit 1
++fi
++
+ python3 - \
+     "${SIDE}/conf/privilege" \
+     "${SIDE}/conf/privilege.bootstrap-package" \

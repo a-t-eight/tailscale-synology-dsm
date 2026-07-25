@@ -1,0 +1,184 @@
+{
+  "artifacts": {
+    "history": {
+      "expected_tree": "e004b64196c89a32e2a4b71949d2aff19d133ef8",
+      "patch_count": 18,
+      "patches": [
+        {
+          "filename": "0001-synology-permit-routing-and-netfilter-preferences.patch",
+          "order": 1,
+          "sha256": "51fbbed32474560abc5d300b9855e3d4eb650119999beca41a0099d898d4f950",
+          "source_commit": "8a2204fa027bd56bb27d1e7f6af696e4eefa8c1a",
+          "subject": "synology: permit routing and netfilter preferences"
+        },
+        {
+          "filename": "0002-synology-use-kernel-TUN-and-subnet-routing.patch",
+          "order": 2,
+          "sha256": "9c60472532e40299727001c1866de64ffce216c451f2f6d01b109c1d8471f8fe",
+          "source_commit": "1c5dcbe5cc7f6c1b237e74ca721bc10f2548506a",
+          "subject": "synology: use kernel TUN and subnet routing"
+        },
+        {
+          "filename": "0003-synology-enable-the-Linux-netfilter-backend.patch",
+          "order": 3,
+          "sha256": "18986c6014ecb8ecb3ad5c2fc81629252631a6e6953608375d3790d61185cd25",
+          "source_commit": "46c6f760abf06370ce5b4cfc0e878e2c854c4522",
+          "subject": "synology: enable the Linux netfilter backend"
+        },
+        {
+          "filename": "0004-build-add-v1.98.9-Synology-netfilter-patch.patch",
+          "order": 4,
+          "sha256": "374f5b023b53a2cd0ec42f7963e35cffede6b52eca038a0b373bf78214b6ef31",
+          "source_commit": "a2ac2a275f4b2f0d7f786ca670d8040c83a6ae73",
+          "subject": "build: add v1.98.9 Synology netfilter patch"
+        },
+        {
+          "filename": "0005-synology-require-kernel-TUN-during-package-startup.patch",
+          "order": 5,
+          "sha256": "5e55883c6be3359e3f89c7838e911324e3865439ad082757692a0c5ebf2de512",
+          "source_commit": "01d9071ddceae34502978656f1f36b26906841ec",
+          "subject": "synology: require kernel TUN during package startup"
+        },
+        {
+          "filename": "0006-synology-force-kernel-networking-in-the-SPK-launcher.patch",
+          "order": 6,
+          "sha256": "ac7701537224bdcdff796c76e517167ec96495b1fce0f78b6dbcd5403e1d6bdd",
+          "source_commit": "4d7586ff0238a41fc627cf905af0bdcae1c67d0e",
+          "subject": "synology: force kernel networking in the SPK launcher"
+        },
+        {
+          "filename": "0007-synology-package-safe-and-root-privilege-manifests.patch",
+          "order": 7,
+          "sha256": "9807b8c677ae335c9ba07918a2c47ba35c343d9b629c88450a27de5fd82fa8d3",
+          "source_commit": "456f90c5bf5c383f37ab2f0ca6b7f0531730a140",
+          "subject": "synology: package safe and root privilege manifests"
+        },
+        {
+          "filename": "0008-synology-add-administrator-root-runtime-bootstrap.patch",
+          "order": 8,
+          "sha256": "e7427d88263c8cceeb4c9c1c68bdb1d3437e4ccae40aac73d7a6f5c563825e10",
+          "source_commit": "f7f177695b8d5ade4107536afb2e0f164cde3b7e",
+          "subject": "synology: add administrator root runtime bootstrap"
+        },
+        {
+          "filename": "0009-synology-gate-startup-on-administrator-bootstrap.patch",
+          "order": 9,
+          "sha256": "abdd7ac18b14e04cea4c4e34154467a2424524acf240a7e878330dc05f54a779",
+          "source_commit": "a471b0eb42e8487b47aa051b1198ba536e250669",
+          "subject": "synology: gate startup on administrator bootstrap"
+        },
+        {
+          "filename": "0010-synology-verify-root-runtime-prerequisites.patch",
+          "order": 10,
+          "sha256": "dbfcd929db313084d601f34a2df45847f21b948c05fcb59529e75e790232f5a5",
+          "source_commit": "a106ddb72822c61cefd068fef64ea1a473c47fae",
+          "subject": "synology: verify root runtime prerequisites"
+        },
+        {
+          "filename": "0011-build-produce-and-compare-Synology-package-variants.patch",
+          "order": 11,
+          "sha256": "22cfd9816a581a3ab7102fa1a63b611c5f8ee47cc98fd17e8f62eaf65f8df67a",
+          "source_commit": "ffcabae3653570468ce490d7e77403e9576b904c",
+          "subject": "build: produce and compare Synology package variants"
+        },
+        {
+          "filename": "0012-test-cover-Synology-root-runtime-bootstrap.patch",
+          "order": 12,
+          "sha256": "e70a4114f464091e521ac71a848b8a3214ee1ad830592f177942eb7ce63243fd",
+          "source_commit": "6c9b329bc322f39c29be89b89408c65bfccea545",
+          "subject": "test: cover Synology root runtime bootstrap"
+        },
+        {
+          "filename": "0013-synology-require-netfilter-module-package.patch",
+          "order": 13,
+          "sha256": "b2953c04194ad3ec98614185318f940143188271bf1c9ea9770d7862c3ab8baf",
+          "source_commit": "9b7c0464a2b5561cfb3e70bf07c22a6906c88cc8",
+          "subject": "synology: require netfilter module package"
+        },
+        {
+          "filename": "0014-synology-rebuild-missing-netfilter-hooks.patch",
+          "order": 14,
+          "sha256": "f72eeb463db42676a5e014c09c8e77b1f5e76171ac35a3a5c2c9c73ecdad655d",
+          "source_commit": "bcd28b33dcf62320b069562f017885ad0d4077be",
+          "subject": "synology: rebuild missing netfilter hooks"
+        },
+        {
+          "filename": "0015-synology-reconcile-netfilter-after-startup.patch",
+          "order": 15,
+          "sha256": "417fb4ce6226a5a11b572fec94ca49385da440206c4af588a4cf65d1fa2082ce",
+          "source_commit": "e310e762b4919cad36a6e06fa8608da00660dc9d",
+          "subject": "synology: reconcile netfilter after startup"
+        },
+        {
+          "filename": "0016-synology-supervise-netfilter-reconciliation.patch",
+          "order": 16,
+          "sha256": "5a82df0edac4da6563a0511e23524aeadee4ac257e5264dc7fc417a1d8c772a6",
+          "source_commit": "c765b13f21e642b594236d2b1561cf5b519411f7",
+          "subject": "synology: supervise netfilter reconciliation"
+        },
+        {
+          "filename": "0017-synology-avoid-reconciler-broken-pipe-diagnostics.patch",
+          "order": 17,
+          "sha256": "9554273f72a673cb4881a0fc7691a94c2c7b8327ad148b788b2e7169b9af1cf2",
+          "source_commit": "c5ba81b3386ca96c5e0c4630addbb94b4eb7d4cf",
+          "subject": "synology: avoid reconciler broken pipe diagnostics"
+        },
+        {
+          "filename": "0018-synology-harden-boot-networking-startup.patch",
+          "order": 18,
+          "sha256": "f3c3d117a40c13699de7cca4d8204186fe7fbdaad0016d0d03bf8ef06eee6ca4",
+          "source_commit": "cc5d96275e9dd76fd8a4f38209a2df91199a425c",
+          "subject": "synology: harden boot networking startup"
+        }
+      ],
+      "series": "history/series"
+    },
+    "maintenance_patch": {
+      "excluded_inactive_paths": [
+        "patches/v1.98.9/synology-netfilter.patch",
+        "patches/v1.98.9/synology-netfilter.patch.sha256"
+      ],
+      "expected_tree": "b8ced487a68252e56e9665df1993e4b4970d87d9",
+      "filename": "maintenance.patch",
+      "sha256": "944a24b051d5b43da271337426506a5a9fdcff921317d53127326da5554136ac"
+    },
+    "release_tree_patch": {
+      "expected_tree": "e004b64196c89a32e2a4b71949d2aff19d133ef8",
+      "filename": "release-tree.patch",
+      "sha256": "f1af70d943fd127489af074862c30b1a491c8cb08222d090aa27d28098d017ce"
+    }
+  },
+  "commit_policy": {
+    "legacy_commit_count": 12,
+    "required_signoff_commit_count": 6,
+    "signoff_required_from_commit": "9b7c0464a2b5561cfb3e70bf07c22a6906c88cc8",
+    "valid_signature_required_for_all": true
+  },
+  "embedded_artifact_audit": {
+    "initial_netfilter_tip": "46c6f760abf06370ce5b4cfc0e878e2c854c4522",
+    "initial_netfilter_tree": "a318a16fa84a705c1218a6e0dc88e1a1f8580afd",
+    "reconstructs_initial_netfilter_tree": true,
+    "referenced_by_build_or_runtime": false,
+    "stored_checksum_valid": true
+  },
+  "project": "tailscale-synology-dsm",
+  "release": {
+    "branch": "release/v1.98.9-synology",
+    "commit": "cc5d96275e9dd76fd8a4f38209a2df91199a425c",
+    "package_version": "1.98.96-700098096",
+    "tag": "release/synology-v1.98.96",
+    "tree": "e004b64196c89a32e2a4b71949d2aff19d133ef8"
+  },
+  "schema_version": 1,
+  "support": {
+    "minimum_dsm": "7.3-81180",
+    "netfilter_package_min_version": "1.0.0-11",
+    "package_arch": "x86_64",
+    "synology_platform": "geminilake",
+    "tested_model": "DS920+"
+  },
+  "upstream": {
+    "commit": "6c167d40fa37aeb51afa7ff336730670ea4762bf",
+    "tag": "v1.98.9"
+  }
+}

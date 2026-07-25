@@ -1,0 +1,1226 @@
+From 6c9b329bc322f39c29be89b89408c65bfccea545 Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Thu, 23 Jul 2026 16:58:19 +1000
+Subject: [PATCH 12/18] test: cover Synology root runtime bootstrap
+
+---
+ .../tests/bootstrap-synopkg-path-test.sh      |  93 +++
+ .../tests/netfilter-rule-support-test.sh      | 428 +++++++++++
+ .../synology/tests/root-bootstrap-test.sh     | 673 ++++++++++++++++++
+ 3 files changed, 1194 insertions(+)
+ create mode 100755 release/dist/synology/tests/bootstrap-synopkg-path-test.sh
+ create mode 100755 release/dist/synology/tests/netfilter-rule-support-test.sh
+ create mode 100755 release/dist/synology/tests/root-bootstrap-test.sh
+
+diff --git a/release/dist/synology/tests/bootstrap-synopkg-path-test.sh b/release/dist/synology/tests/bootstrap-synopkg-path-test.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..0a0b8229a841c55cea0cb2a489416550f6ab150d
+--- /dev/null
++++ b/release/dist/synology/tests/bootstrap-synopkg-path-test.sh
+@@ -0,0 +1,93 @@
++#!/bin/bash
++
++set -euo pipefail
++
++SCRIPT_DIR="$(
++    cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &&
++        pwd
++)"
++
++REPO_ROOT="$(
++    cd -- "${SCRIPT_DIR}/../../../.." &&
++        pwd
++)"
++
++BOOTSTRAP_SOURCE="${REPO_ROOT}/release/dist/synology/files/scripts/tailscale-synology-bootstrap"
++
++PASS_COUNT=0
++FAIL_COUNT=0
++
++fail() {
++    printf 'ERROR: %s\n' "$*" >&2
++    exit 1
++}
++
++test_default_synopkg_path() {
++    local actual
++
++    actual="$(
++        unset TAILSCALE_SYNOLOGY_SYNOPKG
++
++        export TAILSCALE_SYNOLOGY_PACKAGE_ROOT="/tmp/tailscale-bootstrap-path-test"
++
++        # shellcheck disable=SC1090
++        source "${BOOTSTRAP_SOURCE}"
++
++        printf '%s\n' "${SYNO_PKG}"
++    )"
++
++    [ "${actual}" = "/usr/syno/bin/synopkg" ] ||
++        fail "unexpected default synopkg path: ${actual}"
++}
++
++test_synopkg_override() {
++    local expected="/tmp/mock-synopkg"
++    local actual
++
++    actual="$(
++        export TAILSCALE_SYNOLOGY_PACKAGE_ROOT="/tmp/tailscale-bootstrap-path-test"
++        export TAILSCALE_SYNOLOGY_SYNOPKG="${expected}"
++
++        # shellcheck disable=SC1090
++        source "${BOOTSTRAP_SOURCE}"
++
++        printf '%s\n' "${SYNO_PKG}"
++    )"
++
++    [ "${actual}" = "${expected}" ] ||
++        fail "synopkg override was not preserved: ${actual}"
++}
++
++run_case() {
++    local name="$1"
++    local function_name="$2"
++
++    printf 'TEST: %s ... ' "${name}"
++
++    if (
++        set -euo pipefail
++        "${function_name}"
++    ); then
++        printf 'PASS\n'
++        PASS_COUNT=$((PASS_COUNT + 1))
++    else
++        printf 'FAIL\n'
++        FAIL_COUNT=$((FAIL_COUNT + 1))
++    fi
++}
++
++run_case \
++    "bootstrap defaults to DSM synopkg path" \
++    test_default_synopkg_path
++
++run_case \
++    "bootstrap preserves explicit synopkg override" \
++    test_synopkg_override
++
++printf '\nResults: %s passed, %s failed\n' \
++    "${PASS_COUNT}" \
++    "${FAIL_COUNT}"
++
++if [ "${FAIL_COUNT}" -ne 0 ]; then
++    exit 1
++fi
+diff --git a/release/dist/synology/tests/netfilter-rule-support-test.sh b/release/dist/synology/tests/netfilter-rule-support-test.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..1394fa0b795d938d97645dd483a7026bd387ccfc
+--- /dev/null
++++ b/release/dist/synology/tests/netfilter-rule-support-test.sh
+@@ -0,0 +1,428 @@
++#!/bin/bash
++
++set -euo pipefail
++
++SCRIPT_DIR="$(
++    cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &&
++        pwd
++)"
++
++REPO_ROOT="$(
++    cd -- "${SCRIPT_DIR}/../../../.." &&
++        pwd
++)"
++
++START_STOP_SOURCE="${REPO_ROOT}/release/dist/synology/files/scripts/start-stop-status"
++TEST_ROOT="$(mktemp -d)"
++
++PASS_COUNT=0
++FAIL_COUNT=0
++
++cleanup() {
++    rm -rf -- "${TEST_ROOT}"
++}
++
++trap cleanup EXIT
++
++fail() {
++    printf 'ERROR: %s\n' "$*" >&2
++    exit 1
++}
++
++assert_nonzero_status() {
++    local status="$1"
++
++    if [ "${status}" -eq 0 ]; then
++        fail "expected command failure, but it succeeded"
++    fi
++}
++
++assert_contains() {
++    local value="$1"
++    local expected="$2"
++
++    case "${value}" in
++    *"${expected}"*)
++        ;;
++    *)
++        printf 'ERROR: expected output to contain:\n  %s\n' \
++            "${expected}" >&2
++        printf 'Actual output:\n%s\n' \
++            "${value}" >&2
++        exit 1
++        ;;
++    esac
++}
++
++assert_probe_state_clean() {
++    if [ -s "${MOCK_CHAINS}" ]; then
++        printf 'ERROR: temporary chains remain:\n' >&2
++        command cat "${MOCK_CHAINS}" >&2
++        exit 1
++    fi
++
++    if [ -s "${MOCK_RULES}" ]; then
++        printf 'ERROR: temporary rules remain:\n' >&2
++        command cat "${MOCK_RULES}" >&2
++        exit 1
++    fi
++}
++
++setup_case() {
++    CASE_ROOT="${TEST_ROOT}/case"
++
++    rm -rf -- "${CASE_ROOT}"
++
++    PACKAGE_ROOT="${CASE_ROOT}/package"
++    PACKAGE_VAR="${PACKAGE_ROOT}/var"
++    PACKAGE_TARGET="${CASE_ROOT}/target"
++    MOCK_BIN="${CASE_ROOT}/mock-bin"
++    MOCK_IPTABLES="${MOCK_BIN}/iptables"
++    MOCK_STATE="${CASE_ROOT}/iptables-state"
++    MOCK_COMMANDS="${MOCK_STATE}/commands"
++    MOCK_CHAINS="${MOCK_STATE}/chains"
++    MOCK_RULES="${MOCK_STATE}/rules"
++    DEFINITIONS="${CASE_ROOT}/start-stop-definitions.sh"
++
++    mkdir -p \
++        "${PACKAGE_VAR}" \
++        "${PACKAGE_TARGET}/bin" \
++        "${MOCK_BIN}" \
++        "${MOCK_STATE}"
++
++    : >"${MOCK_COMMANDS}"
++    : >"${MOCK_CHAINS}"
++    : >"${MOCK_RULES}"
++
++    awk '
++        /^case \$1 in/ {
++            exit
++        }
++
++        {
++            print
++        }
++    ' "${START_STOP_SOURCE}" >"${DEFINITIONS}"
++
++    command cat >"${MOCK_IPTABLES}" <<'IPTABLES'
++#!/bin/bash
++
++set -u
++
++STATE="${MOCK_IPTABLES_STATE:?}"
++COMMANDS="${STATE}/commands"
++CHAINS="${STATE}/chains"
++RULES="${STATE}/rules"
++
++printf '%s\n' "$*" >>"${COMMANDS}"
++
++iptables_error() {
++    printf 'iptables: No chain/target/match by that name.\n' >&2
++    exit 1
++}
++
++contains_line() {
++    local value="$1"
++    local file="$2"
++
++    grep -Fxq -- "${value}" "${file}" 2>/dev/null
++}
++
++add_line() {
++    local value="$1"
++    local file="$2"
++
++    if ! contains_line "${value}" "${file}"; then
++        printf '%s\n' "${value}" >>"${file}"
++    fi
++}
++
++remove_line() {
++    local value="$1"
++    local file="$2"
++    local temporary="${file}.new.$$"
++
++    contains_line "${value}" "${file}" ||
++        return 1
++
++    grep -Fvx -- "${value}" "${file}" \
++        >"${temporary}" ||
++        true
++
++    mv -f -- "${temporary}" "${file}"
++}
++
++remove_rule_prefix() {
++    local prefix="$1"
++    local temporary="${RULES}.new.$$"
++
++    awk -v prefix="${prefix}" '
++        index($0, prefix) != 1 {
++            print
++        }
++    ' "${RULES}" >"${temporary}"
++
++    mv -f -- "${temporary}" "${RULES}"
++}
++
++[ "${1:-}" = "-t" ] ||
++    iptables_error
++
++table="${2:-}"
++shift 2
++
++operation="${1:-}"
++shift || true
++
++case "${operation}" in
++-N)
++    chain="${1:-}"
++    key="${table}|${chain}"
++
++    [ -n "${chain}" ] ||
++        iptables_error
++
++    if contains_line "${key}" "${CHAINS}"; then
++        iptables_error
++    fi
++
++    add_line "${key}" "${CHAINS}"
++    ;;
++
++-A)
++    chain="${1:-}"
++    shift || true
++
++    key="${table}|${chain}"
++    rule="${key}|$*"
++
++    contains_line "${key}" "${CHAINS}" ||
++        iptables_error
++
++    if [ "${MOCK_IPTABLES_FAIL_APPEND:-0}" = "1" ]; then
++        iptables_error
++    fi
++
++    add_line "${rule}" "${RULES}"
++    ;;
++
++-C)
++    chain="${1:-}"
++    shift || true
++
++    case "${chain}" in
++    INPUT|FORWARD|OUTPUT|PREROUTING|POSTROUTING)
++        # Reproduce DSM's built-in-chain check failure.
++        iptables_error
++        ;;
++    esac
++
++    key="${table}|${chain}"
++    rule="${key}|$*"
++
++    contains_line "${key}" "${CHAINS}" ||
++        iptables_error
++
++    if [ "${MOCK_IPTABLES_FAIL_VERIFY:-0}" = "1" ]; then
++        iptables_error
++    fi
++
++    contains_line "${rule}" "${RULES}" ||
++        iptables_error
++    ;;
++
++-F)
++    chain="${1:-}"
++    key="${table}|${chain}"
++
++    contains_line "${key}" "${CHAINS}" ||
++        iptables_error
++
++    remove_rule_prefix "${key}|"
++    ;;
++
++-X)
++    chain="${1:-}"
++    key="${table}|${chain}"
++
++    contains_line "${key}" "${CHAINS}" ||
++        iptables_error
++
++    if grep -Fq -- "${key}|" "${RULES}"; then
++        iptables_error
++    fi
++
++    remove_line "${key}" "${CHAINS}" ||
++        iptables_error
++    ;;
++
++*)
++    iptables_error
++    ;;
++esac
++
++exit 0
++IPTABLES
++
++    chmod 0755 "${MOCK_IPTABLES}"
++
++    export SYNOPKG_DSM_VERSION_MAJOR=7
++    export SYNOPKG_PKGVAR="${PACKAGE_VAR}"
++    export SYNOPKG_PKGDEST="${PACKAGE_TARGET}"
++    export SYNOPKG_PKGNAME="Tailscale"
++    export TAILSCALE_SYNOLOGY_PACKAGE_ROOT="${PACKAGE_ROOT}"
++
++    export MOCK_IPTABLES_STATE="${MOCK_STATE}"
++    export MOCK_IPTABLES_FAIL_APPEND=0
++    export MOCK_IPTABLES_FAIL_VERIFY=0
++
++    # shellcheck disable=SC1090
++    source "${DEFINITIONS}"
++
++    IPTABLES_BIN="${MOCK_IPTABLES}"
++}
++
++run_connmark_restore_probe() {
++    check_iptables_rule_support \
++        "CONNMARK restore target" \
++        mangle \
++        PREROUTING \
++        -m conntrack \
++        --ctstate ESTABLISHED,RELATED \
++        -j CONNMARK \
++        --restore-mark \
++        --nfmask 0xff0000 \
++        --ctmask 0xff0000
++}
++
++test_builtin_failure_temporary_chain_success() {
++    setup_case
++
++    if "${IPTABLES_BIN}" \
++        -t mangle \
++        -C PREROUTING \
++        -m conntrack \
++        --ctstate ESTABLISHED,RELATED \
++        -j CONNMARK \
++        --restore-mark \
++        --nfmask 0xff0000 \
++        --ctmask 0xff0000 \
++        >/dev/null 2>&1
++    then
++        fail "mock unexpectedly accepted built-in PREROUTING check"
++    fi
++
++    : >"${MOCK_COMMANDS}"
++
++    run_connmark_restore_probe
++
++    assert_probe_state_clean
++
++    grep -F -- \
++        "-t mangle -N ts-pf-rule-" \
++        "${MOCK_COMMANDS}" >/dev/null ||
++        fail "temporary mangle chain was not created"
++
++    grep -F -- \
++        "-t mangle -A ts-pf-rule-" \
++        "${MOCK_COMMANDS}" >/dev/null ||
++        fail "candidate rule was not appended to the temporary chain"
++
++    grep -F -- \
++        "-t mangle -C ts-pf-rule-" \
++        "${MOCK_COMMANDS}" >/dev/null ||
++        fail "candidate rule was not verified in the temporary chain"
++
++    if grep -Fq -- \
++        "-t mangle -C PREROUTING" \
++        "${MOCK_COMMANDS}"
++    then
++        fail "generic probe still checked built-in PREROUTING"
++    fi
++}
++
++test_append_failure_cleanup() {
++    local output
++    local status
++
++    setup_case
++
++    export MOCK_IPTABLES_FAIL_APPEND=1
++
++    set +e
++    output="$(
++        run_connmark_restore_probe 2>&1
++    )"
++    status=$?
++    set -e
++
++    assert_nonzero_status "${status}"
++
++    assert_contains \
++        "${output}" \
++        "iptables prerequisite CONNMARK restore target for mangle/PREROUTING failed"
++
++    assert_probe_state_clean
++}
++
++test_verify_failure_cleanup() {
++    local output
++    local status
++
++    setup_case
++
++    export MOCK_IPTABLES_FAIL_VERIFY=1
++
++    set +e
++    output="$(
++        run_connmark_restore_probe 2>&1
++    )"
++    status=$?
++    set -e
++
++    assert_nonzero_status "${status}"
++
++    assert_contains \
++        "${output}" \
++        "cannot verify iptables prerequisite CONNMARK restore target"
++
++    assert_probe_state_clean
++}
++
++run_case() {
++    local name="$1"
++    local function_name="$2"
++
++    printf 'TEST: %s ... ' "${name}"
++
++    if (
++        set -euo pipefail
++        "${function_name}"
++    ); then
++        printf 'PASS\n'
++        PASS_COUNT=$((PASS_COUNT + 1))
++    else
++        printf 'FAIL\n'
++        FAIL_COUNT=$((FAIL_COUNT + 1))
++    fi
++}
++
++run_case \
++    "built-in check fails but temporary-chain probe succeeds" \
++    test_builtin_failure_temporary_chain_success
++
++run_case \
++    "temporary-chain append failure cleans up" \
++    test_append_failure_cleanup
++
++run_case \
++    "temporary-chain verification failure cleans up" \
++    test_verify_failure_cleanup
++
++printf '\nResults: %s passed, %s failed\n' \
++    "${PASS_COUNT}" \
++    "${FAIL_COUNT}"
++
++if [ "${FAIL_COUNT}" -ne 0 ]; then
++    exit 1
++fi
+diff --git a/release/dist/synology/tests/root-bootstrap-test.sh b/release/dist/synology/tests/root-bootstrap-test.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..4ae608626ccff489f32879a2482406a0416ed131
+--- /dev/null
++++ b/release/dist/synology/tests/root-bootstrap-test.sh
+@@ -0,0 +1,673 @@
++#!/bin/bash
++
++set -euo pipefail
++SCRIPT_DIR="$(
++  cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &&
++    pwd
++)"
++
++REPO_ROOT="$(
++  cd -- "${SCRIPT_DIR}/../../../.." &&
++    pwd
++)"
++
++BOOTSTRAP_SOURCE="${REPO_ROOT}/release/dist/synology/files/scripts/tailscale-synology-bootstrap"
++START_STOP_SOURCE="${REPO_ROOT}/release/dist/synology/files/scripts/start-stop-status"
++SAFE_SOURCE="${REPO_ROOT}/release/dist/synology/files/privilege-dsm7"
++ROOT_SOURCE="${REPO_ROOT}/release/dist/synology/files/privilege-dsm7.root"
++TEST_ROOT="$(mktemp -d)"
++PASS_COUNT=0
++FAIL_COUNT=0
++
++cleanup() {
++  rm -rf -- "${TEST_ROOT}"
++}
++
++trap cleanup EXIT
++
++for required_file in \
++  "${BOOTSTRAP_SOURCE}" \
++  "${START_STOP_SOURCE}" \
++  "${SAFE_SOURCE}" \
++  "${ROOT_SOURCE}"; do
++
++  if [ ! -f "${required_file}" ]; then
++    printf 'ERROR: required test input is missing: %s\n' \
++      "${required_file}" >&2
++    exit 1
++  fi
++done
++
++fail() {
++  printf 'ERROR: %s\n' "$*" >&2
++  exit 1
++}
++
++assert_status() {
++  local expected="$1"
++  local actual="$2"
++
++  if [ "${actual}" -ne "${expected}" ]; then
++    fail "expected status ${expected}, received ${actual}"
++  fi
++}
++
++assert_nonzero_status() {
++  local actual="$1"
++
++  if [ "${actual}" -eq 0 ]; then
++    fail "expected command failure, but it succeeded"
++  fi
++}
++
++assert_contains() {
++  local value="$1"
++  local expected="$2"
++  case "${value}" in
++  *"${expected}"*)
++    ;;
++  *)
++
++    printf 'ERROR: expected output to contain:\n  %s\n' \
++      "${expected}" >&2
++    printf 'Actual output:\n%s\n' "${value}" >&2
++    exit 1
++    ;;
++  esac
++}
++
++assert_file_absent() {
++  local path="$1"
++
++  if [ -e "${path}" ]; then
++    fail "expected file to be absent: ${path}"
++  fi
++}
++
++assert_files_equal() {
++  local first="$1"
++  local second="$2"
++
++  cmp -s -- "${first}" "${second}" ||
++    fail "files differ: ${first} and ${second}"
++}
++
++setup_fixture() {
++  CASE_ROOT="${TEST_ROOT}/case"
++
++  rm -rf -- "${CASE_ROOT}"
++
++  PACKAGE_ROOT="${CASE_ROOT}/package"
++  TARGET_REAL="${CASE_ROOT}/target-real"
++  FAKE_PROC_ROOT="${CASE_ROOT}/proc"
++  MOCK_BIN="${CASE_ROOT}/mock-bin"
++  MOCK_SYNOPKG="${MOCK_BIN}/synopkg"
++  CHOWN_LOG="${CASE_ROOT}/chown.log"
++
++  mkdir -p \
++    "${PACKAGE_ROOT}/conf" \
++    "${PACKAGE_ROOT}/scripts" \
++    "${PACKAGE_ROOT}/var" \
++    "${TARGET_REAL}/bin" \
++    "${FAKE_PROC_ROOT}" \
++    "${MOCK_BIN}"
++
++  ln -s "${TARGET_REAL}" "${PACKAGE_ROOT}/target"
++
++  cp -- \
++    "${SAFE_SOURCE}" \
++    "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
++
++  cp -- \
++    "${ROOT_SOURCE}" \
++    "${PACKAGE_ROOT}/conf/privilege.bootstrap-root"
++
++  cp -- \
++    "${SAFE_SOURCE}" \
++    "${PACKAGE_ROOT}/conf/privilege"
++
++  cp -- \
++    "${BOOTSTRAP_SOURCE}" \
++    "${PACKAGE_ROOT}/scripts/tailscale-synology-bootstrap"
++
++  cat >"${TARGET_REAL}/bin/tailscaled" <<'TAILSCALED'
++#!/bin/sh
++exit 0
++TAILSCALED
++
++  chmod 0644 \
++    "${PACKAGE_ROOT}/conf/privilege" \
++    "${PACKAGE_ROOT}/conf/privilege.bootstrap-package" \
++    "${PACKAGE_ROOT}/conf/privilege.bootstrap-root"
++
++  chmod 0700 \
++    "${PACKAGE_ROOT}/scripts/tailscale-synology-bootstrap"
++
++  chmod 0755 \
++    "${TARGET_REAL}/bin/tailscaled"
++
++  : >"${CHOWN_LOG}"
++
++  cat >"${MOCK_SYNOPKG}" <<'SYNOPKG'
++#!/bin/sh
++
++set -eu
++
++action="${1:-}"
++
++case "${action}" in
++stop)
++    rm -f -- \
++        "${MOCK_PACKAGE_ROOT}/var/tailscaled.pid"
++
++    rm -rf -- \
++        "${MOCK_PROC_ROOT}/${MOCK_PID}"
++
++    exit 0
++    ;;
++start)
++    if [ "${MOCK_START_FAIL:-0}" = "1" ]; then
++        exit 1
++    fi
++
++    mkdir -p \
++        "${MOCK_PROC_ROOT}/${MOCK_PID}"
++
++    printf '%s\n' \
++        "${MOCK_PID}" \
++        >"${MOCK_PACKAGE_ROOT}/var/tailscaled.pid"
++
++    {
++        printf 'Name:\ttailscaled\n'
++        printf 'Uid:\t%s\t%s\t%s\t%s\n' \
++            "${MOCK_DAEMON_UID}" \
++            "${MOCK_DAEMON_UID}" \
++            "${MOCK_DAEMON_UID}" \
++            "${MOCK_DAEMON_UID}"
++    } >"${MOCK_PROC_ROOT}/${MOCK_PID}/status"
++
++    exit 0
++    ;;
++status)
++    if [ -d "${MOCK_PROC_ROOT}/${MOCK_PID}" ]; then
++        exit 0
++    fi
++
++    exit 3
++    ;;
++*)
++    exit 0
++    ;;
++
++esac
++SYNOPKG
++
++  chmod 0755 "${MOCK_SYNOPKG}"
++
++  MOCK_ID_UID=0
++  MOCK_STAT_UID=0
++  MOCK_DAEMON_UID=0
++  MOCK_START_FAIL=0
++  MOCK_PID=4242
++
++  export MOCK_PACKAGE_ROOT="${PACKAGE_ROOT}"
++  export MOCK_PROC_ROOT="${FAKE_PROC_ROOT}"
++  export MOCK_DAEMON_UID
++  export MOCK_START_FAIL
++  export MOCK_PID
++  export TAILSCALE_SYNOLOGY_PACKAGE_ROOT="${PACKAGE_ROOT}"
++  export TAILSCALE_SYNOLOGY_SYNOPKG="${MOCK_SYNOPKG}"
++  export TAILSCALE_SYNOLOGY_TEST_MODE=1
++  export TAILSCALE_SYNOLOGY_PROC_ROOT="${FAKE_PROC_ROOT}"
++}
++
++install_command_mocks() {
++  id() {
++    if [ "${1:-}" = "-u" ]; then
++      printf '%s\n' "${MOCK_ID_UID}"
++      return 0
++    fi
++
++    command id "$@"
++  }
++
++  stat() {
++    if [ "${1:-}" = "-c" ] &&
++      [ "${2:-}" = "%u" ]; then
++      printf '%s\n' "${MOCK_STAT_UID}"
++      return 0
++    fi
++
++    command stat "$@"
++  }
++
++  chown() {
++    printf '%s\n' "$*" >>"${CHOWN_LOG}"
++    return 0
++  }
++}
++
++load_bootstrap() {
++  # shellcheck disable=SC1090
++  source \
++    "${PACKAGE_ROOT}/scripts/tailscale-synology-bootstrap"
++
++  install_command_mocks
++}
++
++load_start_stop_definitions() {
++  local definitions="${CASE_ROOT}/start-stop-definitions.sh"
++
++  awk '
++        /^case \$1 in/ {
++            exit
++        }
++        {
++            print
++        }
++    ' "${START_STOP_SOURCE}" >"${definitions}"
++
++  export SYNOPKG_DSM_VERSION_MAJOR=7
++  export SYNOPKG_PKGVAR="${PACKAGE_ROOT}/var"
++  export SYNOPKG_PKGDEST="${PACKAGE_ROOT}/target"
++  export SYNOPKG_PKGNAME="Tailscale"
++  export TAILSCALE_SYNOLOGY_PACKAGE_ROOT="${PACKAGE_ROOT}"
++
++  # shellcheck disable=SC1090
++  source "${definitions}"
++}
++
++capture_main() {
++  set +e
++
++  CAPTURED_OUTPUT="$(
++    (
++      main "$@"
++    ) 2>&1
++  )"
++  CAPTURED_STATUS=$?
++
++  set -e
++}
++
++perform_successful_install() {
++  setup_fixture
++  load_bootstrap
++
++  MOCK_ID_UID=0
++  MOCK_DAEMON_UID=0
++  MOCK_START_FAIL=0
++
++  export MOCK_DAEMON_UID
++  export MOCK_START_FAIL
++
++  capture_main install
++
++  assert_status 0 "${CAPTURED_STATUS}"
++
++  assert_files_equal \
++    "${PACKAGE_ROOT}/conf/privilege" \
++    "${PACKAGE_ROOT}/conf/privilege.bootstrap-root"
++
++  if [ ! -f "${PACKAGE_ROOT}/var/root-bootstrap.state" ]; then
++    fail "bootstrap state was not created"
++  fi
++}
++
++test_process_override_guard() {
++  setup_fixture
++
++  export TAILSCALE_SYNOLOGY_TEST_MODE=0
++  export TAILSCALE_SYNOLOGY_PROC_ROOT="${FAKE_PROC_ROOT}"
++
++  # shellcheck disable=SC1090
++  source \
++    "${PACKAGE_ROOT}/scripts/tailscale-synology-bootstrap"
++
++  if [ "${PROC_ROOT}" != "/proc" ]; then
++    fail "process-root override was accepted outside test mode"
++  fi
++}
++
++test_status_before_bootstrap() {
++  setup_fixture
++  load_bootstrap
++
++  capture_main status
++
++  assert_status 0 "${CAPTURED_STATUS}"
++  assert_contains "${CAPTURED_OUTPUT}" "Privilege mode: package"
++  assert_contains "${CAPTURED_OUTPUT}" "Bootstrap state: absent"
++  assert_contains "${CAPTURED_OUTPUT}" "Runtime: stopped"
++}
++
++test_non_root_install_rejected() {
++  setup_fixture
++  load_bootstrap
++
++  MOCK_ID_UID=1024
++
++  capture_main install
++
++  assert_nonzero_status "${CAPTURED_STATUS}"
++  assert_contains \
++    "${CAPTURED_OUTPUT}" \
++    "this operation must be run as root"
++
++  assert_files_equal \
++    "${PACKAGE_ROOT}/conf/privilege" \
++    "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
++
++  assert_file_absent \
++    "${PACKAGE_ROOT}/var/root-bootstrap.state"
++}
++
++test_invalid_root_template_rejected() {
++  setup_fixture
++  load_bootstrap
++
++  cat >"${PACKAGE_ROOT}/conf/privilege.bootstrap-root" <<'INVALID'
++{
++  "defaults": {
++    "run-as": "package"
++  }
++}
++
++INVALID
++
++  capture_main install
++
++  assert_nonzero_status "${CAPTURED_STATUS}"
++
++  assert_files_equal \
++    "${PACKAGE_ROOT}/conf/privilege" \
++    "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
++
++  assert_file_absent \
++    "${PACKAGE_ROOT}/var/root-bootstrap.state"
++}
++
++test_insecure_bootstrap_script_rejected() {
++  setup_fixture
++
++  chmod 0777 \
++    "${PACKAGE_ROOT}/scripts/tailscale-synology-bootstrap"
++
++  load_bootstrap
++  capture_main install
++
++  assert_nonzero_status "${CAPTURED_STATUS}"
++
++  assert_files_equal \
++    "${PACKAGE_ROOT}/conf/privilege" \
++    "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
++}
++
++test_successful_root_install() {
++  perform_successful_install
++
++  capture_main status
++
++  assert_status 0 "${CAPTURED_STATUS}"
++  assert_contains "${CAPTURED_OUTPUT}" "Privilege mode: root"
++  assert_contains "${CAPTURED_OUTPUT}" "Bootstrap state: current"
++  assert_contains "${CAPTURED_OUTPUT}" "Runtime: running, UID=0"
++}
++
++test_state_hashes() {
++  local state_binary_hash
++  local state_privilege_hash
++  local expected_binary_hash
++  local expected_privilege_hash
++
++  perform_successful_install
++
++  state_binary_hash="$(
++    awk -F= '
++            $1 == "tailscaled_sha256" {
++                print $2
++                exit
++            }
++        ' "${PACKAGE_ROOT}/var/root-bootstrap.state"
++  )"
++
++  state_privilege_hash="$(
++    awk -F= '
++            $1 == "privilege_sha256" {
++                print $2
++                exit
++            }
++        ' "${PACKAGE_ROOT}/var/root-bootstrap.state"
++  )"
++
++  expected_binary_hash="$(
++    sha256sum "${TARGET_REAL}/bin/tailscaled" |
++      awk '{print $1}'
++  )"
++
++  expected_privilege_hash="$(
++    sha256sum \
++      "${PACKAGE_ROOT}/conf/privilege.bootstrap-root" |
++      awk '{print $1}'
++  )"
++
++  if [ "${state_binary_hash}" != "${expected_binary_hash}" ]; then
++    fail "stored tailscaled hash is incorrect"
++  fi
++
++  if [ "${state_privilege_hash}" != "${expected_privilege_hash}" ]; then
++    fail "stored root privilege hash is incorrect"
++  fi
++}
++
++test_stale_binary_rejected_by_startup_gate() {
++  perform_successful_install
++  load_start_stop_definitions
++
++  printf '\nstale-binary-change\n' \
++    >>"${TARGET_REAL}/bin/tailscaled"
++
++  if bootstrap_is_current; then
++    fail "startup gate accepted a stale tailscaled binary"
++  fi
++
++}
++
++test_stale_privilege_rejected_by_startup_gate() {
++  perform_successful_install
++  load_start_stop_definitions
++
++  printf '\n' \
++    >>"${PACKAGE_ROOT}/conf/privilege.bootstrap-root"
++
++  if bootstrap_is_current; then
++    fail "startup gate accepted a stale root privilege template"
++  fi
++}
++
++test_safe_manifest_with_old_state_rejected() {
++  perform_successful_install
++  load_start_stop_definitions
++
++  cp -- \
++    "${PACKAGE_ROOT}/conf/privilege.bootstrap-package" \
++    "${PACKAGE_ROOT}/conf/privilege"
++
++  chmod 0644 \
++    "${PACKAGE_ROOT}/conf/privilege"
++
++  if bootstrap_is_current; then
++    fail "startup gate accepted the safe manifest with old root state"
++  fi
++}
++
++test_insecure_ownership_rejected_by_startup_gate() {
++  perform_successful_install
++  load_start_stop_definitions
++
++  MOCK_STAT_UID=1024
++
++  if bootstrap_is_current; then
++    fail "startup gate accepted non-root ownership"
++  fi
++
++  MOCK_STAT_UID=0
++
++  chmod 0664 \
++    "${PACKAGE_ROOT}/conf/privilege.bootstrap-root"
++
++  if bootstrap_is_current; then
++    fail "startup gate accepted a group-writable root template"
++  fi
++}
++
++test_non_root_daemon_rolls_back() {
++  setup_fixture
++  load_bootstrap
++
++  MOCK_DAEMON_UID=1024
++  export MOCK_DAEMON_UID
++
++  capture_main install
++
++  assert_nonzero_status "${CAPTURED_STATUS}"
++
++  assert_files_equal \
++    "${PACKAGE_ROOT}/conf/privilege" \
++    "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
++
++  assert_file_absent \
++    "${PACKAGE_ROOT}/var/root-bootstrap.state"
++
++  assert_file_absent \
++    "${PACKAGE_ROOT}/var/tailscaled.pid"
++}
++
++test_failed_start_rolls_back() {
++  setup_fixture
++  load_bootstrap
++
++  MOCK_START_FAIL=1
++  export MOCK_START_FAIL
++
++  capture_main install
++
++  assert_nonzero_status "${CAPTURED_STATUS}"
++
++  assert_files_equal \
++    "${PACKAGE_ROOT}/conf/privilege" \
++    "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
++
++  assert_file_absent \
++    "${PACKAGE_ROOT}/var/root-bootstrap.state"
++}
++
++test_remove_restores_safe_state() {
++  perform_successful_install
++
++  sleep 1
++
++  : >"${CHOWN_LOG}"
++
++  capture_main remove
++
++  assert_status 0 "${CAPTURED_STATUS}"
++
++  assert_files_equal \
++    "${PACKAGE_ROOT}/conf/privilege" \
++    "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
++
++  assert_file_absent \
++    "${PACKAGE_ROOT}/var/root-bootstrap.state"
++
++  assert_file_absent \
++    "${PACKAGE_ROOT}/var/tailscaled.pid"
++
++  grep -F -- \
++    "-R tailscale:tailscale" \
++    "${CHOWN_LOG}" >/dev/null ||
++    fail "remove did not request restoration to tailscale ownership"
++
++}
++
++run_case() {
++  local name="$1"
++  local function_name="$2"
++
++  printf 'TEST: %s ... ' "${name}"
++
++  if (
++    set -euo pipefail
++    "${function_name}"
++  ); then
++    printf 'PASS\n'
++    PASS_COUNT=$((PASS_COUNT + 1))
++  else
++    printf 'FAIL\n'
++    FAIL_COUNT=$((FAIL_COUNT + 1))
++  fi
++}
++
++run_case \
++  "process override requires explicit test mode" \
++  test_process_override_guard
++
++run_case \
++  "status before bootstrap" \
++  test_status_before_bootstrap
++
++run_case \
++  "non-root install is rejected" \
++  test_non_root_install_rejected
++
++run_case \
++  "invalid root template is rejected" \
++  test_invalid_root_template_rejected
++
++run_case \
++  "insecure bootstrap script is rejected" \
++  test_insecure_bootstrap_script_rejected
++
++run_case \
++  "successful root runtime bootstrap" \
++  test_successful_root_install
++
++run_case \
++  "state hashes match installed artifacts" \
++  test_state_hashes
++
++run_case \
++  "stale binary is rejected by startup gate" \
++  test_stale_binary_rejected_by_startup_gate
++
++run_case \
++  "stale privilege template is rejected by startup gate" \
++  test_stale_privilege_rejected_by_startup_gate
++
++run_case \
++  "safe manifest with old state is rejected" \
++  test_safe_manifest_with_old_state_rejected
++
++run_case \
++  "unsafe ownership and modes are rejected" \
++  test_insecure_ownership_rejected_by_startup_gate
++
++run_case \
++  "non-root daemon causes rollback" \
++  test_non_root_daemon_rolls_back
++
++run_case \
++  "failed package start causes rollback" \
++  test_failed_start_rolls_back
++
++run_case \
++  "remove restores safe package state" \
++  test_remove_restores_safe_state
++
++printf '\nResults: %s passed, %s failed\n' \
++  "${PASS_COUNT}" \
++  "${FAIL_COUNT}"
++
++if [ "${FAIL_COUNT}" -ne 0 ]; then
++  exit 1
++fi
