@@ -1,0 +1,24 @@
+schema_version: 1
+
+platforms:
+  - status: production
+    model: DS920+
+    synology_platform: geminilake
+    package_arch: x86_64
+    dsm_min_version: 7.3-81180
+    upstream_version: v1.98.9
+    downstream_package_version: 1.98.96-700098096
+    release_branch: release/v1.98.9-synology
+    downstream_commit: cc5d96275e9dd76fd8a4f38209a2df91199a425c
+    netfilter_package_min_version: 1.0.0-11
+    validation:
+      upgrade: passed
+      controlled_restart: passed
+      tun_reconstruction: passed
+      reboot: passed
+      ipv4_netfilter: passed
+      ipv6_netfilter: passed
+
+  - status: unsupported
+    package_arch: armv8
+    reason: No matching netfilter-module build and hardware acceptance report.

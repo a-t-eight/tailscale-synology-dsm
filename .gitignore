@@ -1,0 +1,20 @@
+# Build artifacts
+*.spk
+*.spk.sig
+build/
+dist/
+out/
+
+# Diagnostics and local state
+*.log
+*.bundle
+*.reflog
+*.worktree-status
+.tmp/
+tmp/
+
+# Editor and operating-system files
+.DS_Store
+*.swp
+*.swo
+*~
