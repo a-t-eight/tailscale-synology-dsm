@@ -1,0 +1,4 @@
+TEST: bootstrap defaults to DSM synopkg path ... PASS
+TEST: bootstrap preserves explicit synopkg override ... PASS
+
+Results: 2 passed, 0 failed

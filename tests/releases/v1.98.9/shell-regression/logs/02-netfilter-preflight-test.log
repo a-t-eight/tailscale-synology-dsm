@@ -1,0 +1,5 @@
+TEST: DSM table-wide chain detection ... PASS
+TEST: Tailscale NAT topology succeeds and cleans up ... PASS
+TEST: Tailscale NAT failure cleans up temporary state ... PASS
+
+Results: 3 passed, 0 failed

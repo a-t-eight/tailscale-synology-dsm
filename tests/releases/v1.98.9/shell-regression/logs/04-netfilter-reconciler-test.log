@@ -1,0 +1,7 @@
+TEST: complete hooks do not trigger repair ... PASS
+TEST: missing hooks trigger one off-on reconstruction ... PASS
+TEST: netfilter off is not overridden ... PASS
+TEST: non-running backend is not repaired ... PASS
+TEST: interrupted repair restores netfilter mode on ... PASS
+
+Results: 5 passed, 0 failed

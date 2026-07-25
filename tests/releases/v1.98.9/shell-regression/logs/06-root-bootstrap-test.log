@@ -1,0 +1,16 @@
+TEST: process override requires explicit test mode ... PASS
+TEST: status before bootstrap ... PASS
+TEST: non-root install is rejected ... PASS
+TEST: invalid root template is rejected ... PASS
+TEST: insecure bootstrap script is rejected ... PASS
+TEST: successful root runtime bootstrap ... PASS
+TEST: state hashes match installed artifacts ... PASS
+TEST: stale binary is rejected by startup gate ... PASS
+TEST: stale privilege template is rejected by startup gate ... PASS
+TEST: safe manifest with old state is rejected ... PASS
+TEST: unsafe ownership and modes are rejected ... PASS
+TEST: non-root daemon causes rollback ... PASS
+TEST: failed package start causes rollback ... PASS
+TEST: remove restores safe package state ... PASS
+
+Results: 14 passed, 0 failed

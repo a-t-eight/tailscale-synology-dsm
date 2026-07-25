@@ -18,3 +18,5 @@ tmp/
 *.swp
 *.swo
 *~
+# Retained release-validation evidence
+!tests/releases/*/shell-regression/logs/*.log

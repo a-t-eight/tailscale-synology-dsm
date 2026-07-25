@@ -1,0 +1,3 @@
+TEST: SIGTERM interrupts one long reconciler sleep ... PASS
+
+Results: 1 passed, 0 failed

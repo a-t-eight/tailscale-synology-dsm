@@ -1,0 +1,5 @@
+TEST: built-in check fails but temporary-chain probe succeeds ... PASS
+TEST: temporary-chain append failure cleans up ... PASS
+TEST: temporary-chain verification failure cleans up ... PASS
+
+Results: 3 passed, 0 failed

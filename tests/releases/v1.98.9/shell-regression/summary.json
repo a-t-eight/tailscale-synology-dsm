@@ -1,0 +1,66 @@
+[
+  {
+    "order": 1,
+    "test": "release/dist/synology/tests/bootstrap-synopkg-path-test.sh",
+    "return_code": 0,
+    "worktree_clean": true,
+    "log": "shell-regression/logs/01-bootstrap-synopkg-path-test.log",
+    "passed": true
+  },
+  {
+    "order": 2,
+    "test": "release/dist/synology/tests/netfilter-preflight-test.sh",
+    "return_code": 0,
+    "worktree_clean": true,
+    "log": "shell-regression/logs/02-netfilter-preflight-test.log",
+    "passed": true
+  },
+  {
+    "order": 3,
+    "test": "release/dist/synology/tests/netfilter-reconciler-shutdown-test.sh",
+    "return_code": 0,
+    "worktree_clean": true,
+    "log": "shell-regression/logs/03-netfilter-reconciler-shutdown-test.log",
+    "passed": true
+  },
+  {
+    "order": 4,
+    "test": "release/dist/synology/tests/netfilter-reconciler-test.sh",
+    "return_code": 0,
+    "worktree_clean": true,
+    "log": "shell-regression/logs/04-netfilter-reconciler-test.log",
+    "passed": true
+  },
+  {
+    "order": 5,
+    "test": "release/dist/synology/tests/netfilter-rule-support-test.sh",
+    "return_code": 0,
+    "worktree_clean": true,
+    "log": "shell-regression/logs/05-netfilter-rule-support-test.log",
+    "passed": true
+  },
+  {
+    "order": 6,
+    "test": "release/dist/synology/tests/root-bootstrap-test.sh",
+    "return_code": 0,
+    "worktree_clean": true,
+    "log": "shell-regression/logs/06-root-bootstrap-test.log",
+    "passed": true
+  },
+  {
+    "order": 7,
+    "test": "release/dist/synology/tests/start-stop-definitions-test.sh",
+    "return_code": 0,
+    "worktree_clean": true,
+    "log": "shell-regression/logs/07-start-stop-definitions-test.log",
+    "passed": true
+  },
+  {
+    "order": 8,
+    "test": "release/dist/synology/tests/tun-device-test.sh",
+    "return_code": 0,
+    "worktree_clean": true,
+    "log": "shell-regression/logs/08-tun-device-test.log",
+    "passed": true
+  }
+]

@@ -1,0 +1,5 @@
+TEST: existing TUN device is accepted ... PASS
+TEST: missing TUN node is created with major 10 minor 200 ... PASS
+TEST: unavailable TUN driver fails clearly ... PASS
+
+Results: 3 passed, 0 failed
