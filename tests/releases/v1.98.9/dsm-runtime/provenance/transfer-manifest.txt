@@ -1,0 +1,10 @@
+archive_filename=20260726-193014.tar.gz
+archive_sha256=a645abb45209fac4cecfdce22d12e91a6b2c9bc9aa77fc8803d75e3f513bd0b0
+source_manifest_entries=43
+release_commit=20c86229955a3d03de01901aee1499cab87c571d
+package_version=1.98.96-700098096
+candidate_spk_filename=tailscale-x86_64-1.98.96-700098096-dsm7.spk
+candidate_spk_sha256=bed218b4d0099102e9c3be18456d8a94be9a92b4a29295a9dab33932570cbce0
+transfer_checksum_verified=true
+source_manifest_verified=true
+acceptance=PASS

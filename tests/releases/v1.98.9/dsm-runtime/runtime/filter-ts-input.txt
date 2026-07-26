@@ -1,0 +1,6 @@
+-N ts-input
+-A ts-input -s <REDACTED_TAILSCALE_IPV4>/32 -i lo -j ACCEPT
+-A ts-input -i tailscale0 -j ACCEPT
+-A ts-input -p udp -m udp --dport 41641 -j ACCEPT
+-A ts-input -s 100.115.92.0/23 ! -i tailscale0 -j RETURN
+-A ts-input -s 100.64.0.0/10 ! -i tailscale0 -j DROP

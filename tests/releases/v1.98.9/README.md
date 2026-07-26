@@ -57,5 +57,20 @@ identical packages.
 `reproducible-build/source/` preserves the original local build logs,
 environment record, manifest and checksums.
 
+## DSM runtime acceptance
+
+Production runtime acceptance on a Synology DS920+ running DSM 7.3.2
+passed for the final release commit.
+
+- DSM accepted the exact same package version as an upgrade.
+- Persistent identity, addressing, state and preferences were preserved.
+- The required post-upgrade administrator bootstrap refresh passed.
+- tailscaled and the netfilter reconciler were validated through PID files
+  and /proc command lines.
+- Required Tailscale filter and NAT chains were present.
+
+Portable evidence and source-archive provenance are retained under
+`dsm-runtime/`.
+
 These evidence files do not replace the signed release branch or canonical
 patch artefacts. The release commit remains authoritative.

@@ -1,0 +1,3 @@
+Privilege mode: root
+Bootstrap state: current
+Runtime: running, UID=0

@@ -1,0 +1,1 @@
+/volume1/@appstore/Tailscale/bin/tailscaled --state=/volume1/@appdata/Tailscale/tailscaled.state --socket=/volume1/@appdata/Tailscale/tailscaled.sock --port=41641 --tun=tailscale0

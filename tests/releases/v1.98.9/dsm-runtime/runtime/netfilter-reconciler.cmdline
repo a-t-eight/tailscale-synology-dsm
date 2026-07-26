@@ -1,0 +1,1 @@
+/bin/bash /var/packages/Tailscale/scripts/tailscale-netfilter-reconciler
