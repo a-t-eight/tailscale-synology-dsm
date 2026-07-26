@@ -5,6 +5,8 @@
     "return_code": 0,
     "worktree_clean": true,
     "log": "shell-regression/logs/01-bootstrap-synopkg-path-test.log",
+    "assertion_count": 2,
+    "timed_out": false,
     "passed": true
   },
   {
@@ -13,6 +15,8 @@
     "return_code": 0,
     "worktree_clean": true,
     "log": "shell-regression/logs/02-netfilter-preflight-test.log",
+    "assertion_count": 3,
+    "timed_out": false,
     "passed": true
   },
   {
@@ -21,6 +25,8 @@
     "return_code": 0,
     "worktree_clean": true,
     "log": "shell-regression/logs/03-netfilter-reconciler-shutdown-test.log",
+    "assertion_count": 1,
+    "timed_out": false,
     "passed": true
   },
   {
@@ -29,6 +35,8 @@
     "return_code": 0,
     "worktree_clean": true,
     "log": "shell-regression/logs/04-netfilter-reconciler-test.log",
+    "assertion_count": 5,
+    "timed_out": false,
     "passed": true
   },
   {
@@ -37,6 +45,8 @@
     "return_code": 0,
     "worktree_clean": true,
     "log": "shell-regression/logs/05-netfilter-rule-support-test.log",
+    "assertion_count": 3,
+    "timed_out": false,
     "passed": true
   },
   {
@@ -45,6 +55,8 @@
     "return_code": 0,
     "worktree_clean": true,
     "log": "shell-regression/logs/06-root-bootstrap-test.log",
+    "assertion_count": 14,
+    "timed_out": false,
     "passed": true
   },
   {
@@ -53,6 +65,8 @@
     "return_code": 0,
     "worktree_clean": true,
     "log": "shell-regression/logs/07-start-stop-definitions-test.log",
+    "assertion_count": 1,
+    "timed_out": false,
     "passed": true
   },
   {
@@ -61,6 +75,8 @@
     "return_code": 0,
     "worktree_clean": true,
     "log": "shell-regression/logs/08-tun-device-test.log",
+    "assertion_count": 3,
+    "timed_out": false,
     "passed": true
   }
 ]

@@ -1,7 +1,7 @@
 From bcd28b33dcf62320b069562f017885ad0d4077be Mon Sep 17 00:00:00 2001
 From: a-t-eight <andreeww.trieu@gmail.com>
 Date: Fri, 24 Jul 2026 16:18:25 +1000
-Subject: [PATCH 14/18] synology: rebuild missing netfilter hooks
+Subject: [PATCH 14/19] synology: rebuild missing netfilter hooks
 
 Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
 ---
@@ -11,7 +11,7 @@ Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
  3 files changed, 320 insertions(+), 1 deletion(-)
 
 diff --git a/util/linuxfw/iptables_runner.go b/util/linuxfw/iptables_runner.go
-index ace23a235380330ba3329731b5f0343eb68ac08e..03d9b87a8c0c35d655e60b4456ba136116b6afd2 100644
+index ace23a235..03d9b87a8 100644
 --- a/util/linuxfw/iptables_runner.go
 +++ b/util/linuxfw/iptables_runner.go
 @@ -122,6 +122,74 @@ func (i *iptablesRunner) getNATTables() []iptablesInterface {
@@ -90,7 +90,7 @@ index ace23a235380330ba3329731b5f0343eb68ac08e..03d9b87a8c0c35d655e60b4456ba1361
  // the relevant main netfilter chains. The tailscale chains must
  // already exist. If they do not, an error is returned.
 diff --git a/wgengine/router/osrouter/router_linux.go b/wgengine/router/osrouter/router_linux.go
-index cdd99d62a5512155f4f77ba8778db000cbfc6cf1..c48749734c5618bfe3973afbb2d00f75b34e0d13 100644
+index cdd99d62a..c48749734 100644
 --- a/wgengine/router/osrouter/router_linux.go
 +++ b/wgengine/router/osrouter/router_linux.go
 @@ -678,6 +678,50 @@ func (r *linuxRouter) updateMagicsockPort(port uint16, network string) error {
@@ -164,7 +164,7 @@ index cdd99d62a5512155f4f77ba8778db000cbfc6cf1..c48749734c5618bfe3973afbb2d00f75
  
  	// Depending on the netfilter mode we switch from and to, we may
 diff --git a/wgengine/router/osrouter/router_linux_test.go b/wgengine/router/osrouter/router_linux_test.go
-index 340ebb1486a0f2564e5f0a9cfd0a993801e4770f..a68bd61e5f22dc017f8b0f0f0cf5671783219ef6 100644
+index 340ebb148..a68bd61e5 100644
 --- a/wgengine/router/osrouter/router_linux_test.go
 +++ b/wgengine/router/osrouter/router_linux_test.go
 @@ -557,6 +557,168 @@ func TestRouterStates(t *testing.T) {
@@ -378,3 +378,6 @@ index 340ebb1486a0f2564e5f0a9cfd0a993801e4770f..a68bd61e5f22dc017f8b0f0f0cf56717
  // fakeOS implements commandRunner and provides v4 and v6
  // netfilterRunners, but captures changes without touching the OS.
  type fakeOS struct {
+-- 
+2.55.0
+

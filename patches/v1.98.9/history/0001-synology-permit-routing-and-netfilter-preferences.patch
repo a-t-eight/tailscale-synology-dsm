@@ -1,7 +1,7 @@
 From 8a2204fa027bd56bb27d1e7f6af696e4eefa8c1a Mon Sep 17 00:00:00 2001
 From: a-t-eight <andreeww.trieu@gmail.com>
 Date: Thu, 23 Jul 2026 02:39:24 +1000
-Subject: [PATCH 01/18] synology: permit routing and netfilter preferences
+Subject: [PATCH 01/19] synology: permit routing and netfilter preferences
 
 ---
  cmd/tailscale/cli/cli_test.go | 10 +++++-----
@@ -9,7 +9,7 @@ Subject: [PATCH 01/18] synology: permit routing and netfilter preferences
  2 files changed, 5 insertions(+), 34 deletions(-)
 
 diff --git a/cmd/tailscale/cli/cli_test.go b/cmd/tailscale/cli/cli_test.go
-index d2df825d3786b24bf9c3bb761f44a74883df9c97..5122dd39d3a889a30b2cf0aabfcd1629af3b746d 100644
+index d2df825d3..5122dd39d 100644
 --- a/cmd/tailscale/cli/cli_test.go
 +++ b/cmd/tailscale/cli/cli_test.go
 @@ -587,9 +587,9 @@ func TestCheckForAccidentalSettingReverts(t *testing.T) {
@@ -39,7 +39,7 @@ index d2df825d3786b24bf9c3bb761f44a74883df9c97..5122dd39d3a889a30b2cf0aabfcd1629
  			name:  "not_synology_dont_permit_omit_accept_routes",
  			flags: []string{"--hostname=foo"},
 diff --git a/cmd/tailscale/cli/up.go b/cmd/tailscale/cli/up.go
-index fed7de9ae7e01117efe08d3c695e1f66f584564d..ace6ac3dbdcc42f18e3dadfacbc65cee1b1df311 100644
+index fed7de9ae..ace6ac3db 100644
 --- a/cmd/tailscale/cli/up.go
 +++ b/cmd/tailscale/cli/up.go
 @@ -164,9 +164,6 @@ func (notFalseVar) Set(v string) error {
@@ -99,3 +99,6 @@ index fed7de9ae7e01117efe08d3c695e1f66f584564d..ace6ac3dbdcc42f18e3dadfacbc65cee
  		if flagName == "stateful-filtering" && valCur == true && valNew == false && env.goos == "linux" {
  			// See https://github.com/tailscale/tailscale/issues/12307
  			// Stateful filtering was on by default in tailscale 1.66.0-1.66.3, then off in 1.66.4.
+-- 
+2.55.0
+

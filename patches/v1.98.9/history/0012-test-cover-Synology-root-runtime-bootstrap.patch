@@ -1,7 +1,7 @@
 From 6c9b329bc322f39c29be89b89408c65bfccea545 Mon Sep 17 00:00:00 2001
 From: a-t-eight <andreeww.trieu@gmail.com>
 Date: Thu, 23 Jul 2026 16:58:19 +1000
-Subject: [PATCH 12/18] test: cover Synology root runtime bootstrap
+Subject: [PATCH 12/19] test: cover Synology root runtime bootstrap
 
 ---
  .../tests/bootstrap-synopkg-path-test.sh      |  93 +++
@@ -14,7 +14,7 @@ Subject: [PATCH 12/18] test: cover Synology root runtime bootstrap
 
 diff --git a/release/dist/synology/tests/bootstrap-synopkg-path-test.sh b/release/dist/synology/tests/bootstrap-synopkg-path-test.sh
 new file mode 100755
-index 0000000000000000000000000000000000000000..0a0b8229a841c55cea0cb2a489416550f6ab150d
+index 000000000..0a0b8229a
 --- /dev/null
 +++ b/release/dist/synology/tests/bootstrap-synopkg-path-test.sh
 @@ -0,0 +1,93 @@
@@ -113,7 +113,7 @@ index 0000000000000000000000000000000000000000..0a0b8229a841c55cea0cb2a489416550
 +fi
 diff --git a/release/dist/synology/tests/netfilter-rule-support-test.sh b/release/dist/synology/tests/netfilter-rule-support-test.sh
 new file mode 100755
-index 0000000000000000000000000000000000000000..1394fa0b795d938d97645dd483a7026bd387ccfc
+index 000000000..1394fa0b7
 --- /dev/null
 +++ b/release/dist/synology/tests/netfilter-rule-support-test.sh
 @@ -0,0 +1,428 @@
@@ -547,7 +547,7 @@ index 0000000000000000000000000000000000000000..1394fa0b795d938d97645dd483a7026b
 +fi
 diff --git a/release/dist/synology/tests/root-bootstrap-test.sh b/release/dist/synology/tests/root-bootstrap-test.sh
 new file mode 100755
-index 0000000000000000000000000000000000000000..4ae608626ccff489f32879a2482406a0416ed131
+index 000000000..4ae608626
 --- /dev/null
 +++ b/release/dist/synology/tests/root-bootstrap-test.sh
 @@ -0,0 +1,673 @@
@@ -1224,3 +1224,6 @@ index 0000000000000000000000000000000000000000..4ae608626ccff489f32879a2482406a0
 +if [ "${FAIL_COUNT}" -ne 0 ]; then
 +  exit 1
 +fi
+-- 
+2.55.0
+

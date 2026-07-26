@@ -1,7 +1,7 @@
 From f7f177695b8d5ade4107536afb2e0f164cde3b7e Mon Sep 17 00:00:00 2001
 From: a-t-eight <andreeww.trieu@gmail.com>
 Date: Thu, 23 Jul 2026 14:50:44 +1000
-Subject: [PATCH 08/18] synology: add administrator root runtime bootstrap
+Subject: [PATCH 08/19] synology: add administrator root runtime bootstrap
 
 ---
  .../scripts/tailscale-synology-bootstrap      | 545 ++++++++++++++++++
@@ -11,7 +11,7 @@ Subject: [PATCH 08/18] synology: add administrator root runtime bootstrap
 
 diff --git a/release/dist/synology/files/scripts/tailscale-synology-bootstrap b/release/dist/synology/files/scripts/tailscale-synology-bootstrap
 new file mode 100755
-index 0000000000000000000000000000000000000000..912df9a4de1d4da97262e3788f33a045c08b19a2
+index 000000000..912df9a4d
 --- /dev/null
 +++ b/release/dist/synology/files/scripts/tailscale-synology-bootstrap
 @@ -0,0 +1,545 @@
@@ -561,7 +561,7 @@ index 0000000000000000000000000000000000000000..912df9a4de1d4da97262e3788f33a045
 +    main "$@"
 +fi
 diff --git a/release/dist/synology/pkgs.go b/release/dist/synology/pkgs.go
-index c501c12e1a3c20d57e5445df1901a5fe3775b0b3..80c8d467bd8944a973403d3b04b577cfe1c2ba5c 100644
+index c501c12e1..80c8d467b 100644
 --- a/release/dist/synology/pkgs.go
 +++ b/release/dist/synology/pkgs.go
 @@ -121,6 +121,16 @@ func (t *target) buildSPK(b *dist.Build, inner *innerPkg) ([]string, error) {
@@ -581,3 +581,6 @@ index c501c12e1a3c20d57e5445df1901a5fe3775b0b3..80c8d467bd8944a973403d3b04b577cf
  	err = writeTar(tw, b.Time, entries...)
  	if err != nil {
  		return nil, err
+-- 
+2.55.0
+

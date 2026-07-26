@@ -1,7 +1,7 @@
 From c765b13f21e642b594236d2b1561cf5b519411f7 Mon Sep 17 00:00:00 2001
 From: a-t-eight <andreeww.trieu@gmail.com>
 Date: Sat, 25 Jul 2026 04:11:21 +1000
-Subject: [PATCH 16/18] synology: supervise netfilter reconciliation
+Subject: [PATCH 16/19] synology: supervise netfilter reconciliation
 
 Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
 ---
@@ -16,7 +16,7 @@ Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
  create mode 100755 release/dist/synology/tests/netfilter-reconciler-test.sh
 
 diff --git a/release/dist/synology/files/scripts/start-stop-status b/release/dist/synology/files/scripts/start-stop-status
-index a049217f17faf6366a6e13c1e859fb517ea3ca5d..3b03db6d0f37c041b3e64de52eae27804a72cc9a 100755
+index a049217f1..3b03db6d0 100755
 --- a/release/dist/synology/files/scripts/start-stop-status
 +++ b/release/dist/synology/files/scripts/start-stop-status
 @@ -38,13 +38,12 @@ TAILSCALE_BIN="${SYNOPKG_PKGDEST}/bin/tailscale"
@@ -438,7 +438,7 @@ index a049217f17faf6366a6e13c1e859fb517ea3ca5d..3b03db6d0f37c041b3e64de52eae2780
          if ! bootstrap_is_current; then
 diff --git a/release/dist/synology/files/scripts/tailscale-netfilter-reconciler b/release/dist/synology/files/scripts/tailscale-netfilter-reconciler
 new file mode 100755
-index 0000000000000000000000000000000000000000..9581c07ea90d1555f02e402dc7990971c04b0328
+index 000000000..9581c07ea
 --- /dev/null
 +++ b/release/dist/synology/files/scripts/tailscale-netfilter-reconciler
 @@ -0,0 +1,527 @@
@@ -970,7 +970,7 @@ index 0000000000000000000000000000000000000000..9581c07ea90d1555f02e402dc7990971
 +
 +main "$@"
 diff --git a/release/dist/synology/pkgs.go b/release/dist/synology/pkgs.go
-index 6bb0cfc402060b576f6eef43d051dfe22cca8508..c585968ffbccb5c62508927b10c780f556ac3424 100644
+index 6bb0cfc40..c585968ff 100644
 --- a/release/dist/synology/pkgs.go
 +++ b/release/dist/synology/pkgs.go
 @@ -118,6 +118,11 @@ func (t *target) buildSPK(b *dist.Build, inner *innerPkg) ([]string, error) {
@@ -987,7 +987,7 @@ index 6bb0cfc402060b576f6eef43d051dfe22cca8508..c585968ffbccb5c62508927b10c780f5
  	)
 diff --git a/release/dist/synology/tests/netfilter-reconciler-test.sh b/release/dist/synology/tests/netfilter-reconciler-test.sh
 new file mode 100755
-index 0000000000000000000000000000000000000000..b2a0dec9522514ad7437d9d9af0919a6d82d222c
+index 000000000..b2a0dec95
 --- /dev/null
 +++ b/release/dist/synology/tests/netfilter-reconciler-test.sh
 @@ -0,0 +1,293 @@
@@ -1285,7 +1285,7 @@ index 0000000000000000000000000000000000000000..b2a0dec9522514ad7437d9d9af0919a6
 +    "${PASS_COUNT}" \
 +    "${FAIL_COUNT}"
 diff --git a/release/dist/synology/tests/start-stop-definitions-test.sh b/release/dist/synology/tests/start-stop-definitions-test.sh
-index 28ed10a74926bdaa05c84175d8ab3ce2014766b8..242dbb0288da3d4f70a99d7e52a8961c1c8c7a60 100755
+index 28ed10a74..242dbb028 100755
 --- a/release/dist/synology/tests/start-stop-definitions-test.sh
 +++ b/release/dist/synology/tests/start-stop-definitions-test.sh
 @@ -14,9 +14,7 @@ REPO_ROOT="$(
@@ -1332,7 +1332,7 @@ index 28ed10a74926bdaa05c84175d8ab3ce2014766b8..242dbb0288da3d4f70a99d7e52a8961c
      printf 'Expected:\n' >&2
      sed -n '1,20p' "${EXPECTED}" >&2
 diff --git a/tool/build-synology-root-bootstrap.sh b/tool/build-synology-root-bootstrap.sh
-index 077ebaa1b578b8f6eed05bf867972d4ec675b8bc..36ec4ea96a3200df96ce885763163645e183af2e 100755
+index 077ebaa1b..36ec4ea96 100755
 --- a/tool/build-synology-root-bootstrap.sh
 +++ b/tool/build-synology-root-bootstrap.sh
 @@ -2,7 +2,7 @@
@@ -1367,3 +1367,6 @@ index 077ebaa1b578b8f6eed05bf867972d4ec675b8bc..36ec4ea96a3200df96ce885763163645
  python3 - \
      "${SIDE}/conf/privilege" \
      "${SIDE}/conf/privilege.bootstrap-package" \
+-- 
+2.55.0
+

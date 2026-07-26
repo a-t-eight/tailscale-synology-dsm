@@ -1,7 +1,7 @@
 From c5ba81b3386ca96c5e0c4630addbb94b4eb7d4cf Mon Sep 17 00:00:00 2001
 From: a-t-eight <andreeww.trieu@gmail.com>
 Date: Sat, 25 Jul 2026 04:28:51 +1000
-Subject: [PATCH 17/18] synology: avoid reconciler broken pipe diagnostics
+Subject: [PATCH 17/19] synology: avoid reconciler broken pipe diagnostics
 
 Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
 ---
@@ -11,7 +11,7 @@ Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
  3 files changed, 18 insertions(+), 11 deletions(-)
 
 diff --git a/release/dist/synology/files/scripts/tailscale-netfilter-reconciler b/release/dist/synology/files/scripts/tailscale-netfilter-reconciler
-index 9581c07ea90d1555f02e402dc7990971c04b0328..6840c6cd341600be4b3dcc93b5048e2d831c1cc3 100755
+index 9581c07ea..6840c6cd3 100755
 --- a/release/dist/synology/files/scripts/tailscale-netfilter-reconciler
 +++ b/release/dist/synology/files/scripts/tailscale-netfilter-reconciler
 @@ -171,14 +171,14 @@ prefs_require_netfilter() {
@@ -49,7 +49,7 @@ index 9581c07ea90d1555f02e402dc7990971c04b0328..6840c6cd341600be4b3dcc93b5048e2d
  
  
 diff --git a/release/dist/synology/tests/netfilter-reconciler-test.sh b/release/dist/synology/tests/netfilter-reconciler-test.sh
-index b2a0dec9522514ad7437d9d9af0919a6d82d222c..00ef18f4d5a2b2058750f27a98b47c016832637e 100755
+index b2a0dec95..00ef18f4d 100755
 --- a/release/dist/synology/tests/netfilter-reconciler-test.sh
 +++ b/release/dist/synology/tests/netfilter-reconciler-test.sh
 @@ -71,7 +71,10 @@ case "${args}" in
@@ -76,7 +76,7 @@ index b2a0dec9522514ad7437d9d9af0919a6d82d222c..00ef18f4d5a2b2058750f27a98b47c01
  
  
 diff --git a/tool/build-synology-root-bootstrap.sh b/tool/build-synology-root-bootstrap.sh
-index 36ec4ea96a3200df96ce885763163645e183af2e..bfb33c8f56feb6a2eac87009122ba005c79e46a7 100755
+index 36ec4ea96..bfb33c8f5 100755
 --- a/tool/build-synology-root-bootstrap.sh
 +++ b/tool/build-synology-root-bootstrap.sh
 @@ -2,7 +2,7 @@
@@ -88,3 +88,6 @@ index 36ec4ea96a3200df96ce885763163645e183af2e..bfb33c8f56feb6a2eac87009122ba005
  OUT_ROOT="${1:-${REPO_ROOT}/build/synology/v1.98.9-final}"
  
  SIDELOAD_OUT="${OUT_ROOT}/sideload"
+-- 
+2.55.0
+

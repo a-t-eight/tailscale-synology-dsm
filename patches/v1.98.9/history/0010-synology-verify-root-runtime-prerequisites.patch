@@ -1,7 +1,7 @@
 From a106ddb72822c61cefd068fef64ea1a473c47fae Mon Sep 17 00:00:00 2001
 From: a-t-eight <andreeww.trieu@gmail.com>
 Date: Thu, 23 Jul 2026 14:55:50 +1000
-Subject: [PATCH 10/18] synology: verify root runtime prerequisites
+Subject: [PATCH 10/19] synology: verify root runtime prerequisites
 
 ---
  .../synology/files/scripts/start-stop-status  | 386 ++++++++++++
@@ -10,7 +10,7 @@ Subject: [PATCH 10/18] synology: verify root runtime prerequisites
  create mode 100755 release/dist/synology/tests/netfilter-preflight-test.sh
 
 diff --git a/release/dist/synology/files/scripts/start-stop-status b/release/dist/synology/files/scripts/start-stop-status
-index caedd5d500b7ffcece97acf270871944b7bcecab..769a378f6a17de87a8dcebace9afcd443800ea8e 100755
+index caedd5d50..769a378f6 100755
 --- a/release/dist/synology/files/scripts/start-stop-status
 +++ b/release/dist/synology/files/scripts/start-stop-status
 @@ -232,6 +232,388 @@ log_bootstrap_required() {
@@ -415,7 +415,7 @@ index caedd5d500b7ffcece97acf270871944b7bcecab..769a378f6a17de87a8dcebace9afcd44
      fi
 diff --git a/release/dist/synology/tests/netfilter-preflight-test.sh b/release/dist/synology/tests/netfilter-preflight-test.sh
 new file mode 100755
-index 0000000000000000000000000000000000000000..0ec26d6fff0172dd97fbf1f9ad4b5bd21097541f
+index 000000000..0ec26d6ff
 --- /dev/null
 +++ b/release/dist/synology/tests/netfilter-preflight-test.sh
 @@ -0,0 +1,560 @@
@@ -980,3 +980,6 @@ index 0000000000000000000000000000000000000000..0ec26d6fff0172dd97fbf1f9ad4b5bd2
 +    exit 1
 +fi
 \ No newline at end of file
+-- 
+2.55.0
+

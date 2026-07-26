@@ -1,7 +1,7 @@
 From cc5d96275e9dd76fd8a4f38209a2df91199a425c Mon Sep 17 00:00:00 2001
 From: a-t-eight <andreeww.trieu@gmail.com>
 Date: Sat, 25 Jul 2026 10:39:20 +1000
-Subject: [PATCH 18/18] synology: harden boot networking startup
+Subject: [PATCH 18/19] synology: harden boot networking startup
 
 Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
 ---
@@ -18,7 +18,7 @@ Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
  create mode 100755 release/dist/synology/tests/tun-device-test.sh
 
 diff --git a/release/dist/synology/files/scripts/start-stop-status b/release/dist/synology/files/scripts/start-stop-status
-index 3b03db6d0f37c041b3e64de52eae27804a72cc9a..1faec81574a2b1313ca855d0b9757033aac233fe 100755
+index 3b03db6d0..1faec8157 100755
 --- a/release/dist/synology/files/scripts/start-stop-status
 +++ b/release/dist/synology/files/scripts/start-stop-status
 @@ -38,6 +38,11 @@ TAILSCALE_BIN="${SYNOPKG_PKGDEST}/bin/tailscale"
@@ -189,7 +189,7 @@ index 3b03db6d0f37c041b3e64de52eae27804a72cc9a..1faec81574a2b1313ca855d0b9757033
  
  set_sysctl_value() {
 diff --git a/release/dist/synology/files/scripts/tailscale-netfilter-reconciler b/release/dist/synology/files/scripts/tailscale-netfilter-reconciler
-index 6840c6cd341600be4b3dcc93b5048e2d831c1cc3..9647b7bec4b4c4046968a8e92cc0a2e7c85abe17 100755
+index 6840c6cd3..9647b7bec 100755
 --- a/release/dist/synology/files/scripts/tailscale-netfilter-reconciler
 +++ b/release/dist/synology/files/scripts/tailscale-netfilter-reconciler
 @@ -31,6 +31,7 @@ TEST_MAX_ITERATIONS="${TAILSCALE_SYNOLOGY_RECONCILER_TEST_MAX_ITERATIONS:-0}"
@@ -314,7 +314,7 @@ index 6840c6cd341600be4b3dcc93b5048e2d831c1cc3..9647b7bec4b4c4046968a8e92cc0a2e7
      fi
  
 diff --git a/release/dist/synology/pkgs.go b/release/dist/synology/pkgs.go
-index c585968ffbccb5c62508927b10c780f556ac3424..7d2f05d59318b41ac303f816f2344afd79363064 100644
+index c585968ff..7d2f05d59 100644
 --- a/release/dist/synology/pkgs.go
 +++ b/release/dist/synology/pkgs.go
 @@ -189,14 +189,16 @@ func (t *target) mkInfo(b *dist.Build, uncompressedSz int64) []byte {
@@ -340,7 +340,7 @@ index c585968ffbccb5c62508927b10c780f556ac3424..7d2f05d59318b41ac303f816f2344afd
  	default:
 diff --git a/release/dist/synology/tests/netfilter-reconciler-shutdown-test.sh b/release/dist/synology/tests/netfilter-reconciler-shutdown-test.sh
 new file mode 100755
-index 0000000000000000000000000000000000000000..db8076070086c943538857e346e86cc2d1855be0
+index 000000000..db8076070
 --- /dev/null
 +++ b/release/dist/synology/tests/netfilter-reconciler-shutdown-test.sh
 @@ -0,0 +1,193 @@
@@ -538,7 +538,7 @@ index 0000000000000000000000000000000000000000..db8076070086c943538857e346e86cc2
 +printf 'PASS\n'
 +printf '\nResults: 1 passed, 0 failed\n'
 diff --git a/release/dist/synology/tests/netfilter-reconciler-test.sh b/release/dist/synology/tests/netfilter-reconciler-test.sh
-index 00ef18f4d5a2b2058750f27a98b47c016832637e..4bba9e00aebc4a291c9afc4397d97f5086cc4212 100755
+index 00ef18f4d..4bba9e00a 100755
 --- a/release/dist/synology/tests/netfilter-reconciler-test.sh
 +++ b/release/dist/synology/tests/netfilter-reconciler-test.sh
 @@ -207,6 +207,14 @@ touch "${STATE}/hooks-complete"
@@ -557,7 +557,7 @@ index 00ef18f4d5a2b2058750f27a98b47c016832637e..4bba9e00aebc4a291c9afc4397d97f50
      "${STATE}/commands.log" \
      'set --netfilter-mode='
 diff --git a/release/dist/synology/tests/start-stop-definitions-test.sh b/release/dist/synology/tests/start-stop-definitions-test.sh
-index 242dbb0288da3d4f70a99d7e52a8961c1c8c7a60..f732551bf1a3b03a27ab1fb94fc29912eed0803d 100755
+index 242dbb028..f732551bf 100755
 --- a/release/dist/synology/tests/start-stop-definitions-test.sh
 +++ b/release/dist/synology/tests/start-stop-definitions-test.sh
 @@ -52,6 +52,8 @@ env \
@@ -580,7 +580,7 @@ index 242dbb0288da3d4f70a99d7e52a8961c1c8c7a60..f732551bf1a3b03a27ab1fb94fc29912
  if ! cmp -s \
 diff --git a/release/dist/synology/tests/tun-device-test.sh b/release/dist/synology/tests/tun-device-test.sh
 new file mode 100755
-index 0000000000000000000000000000000000000000..f4ac48c01048cf8d9914f576d57f3e25100595f7
+index 000000000..f4ac48c01
 --- /dev/null
 +++ b/release/dist/synology/tests/tun-device-test.sh
 @@ -0,0 +1,186 @@
@@ -771,7 +771,7 @@ index 0000000000000000000000000000000000000000..f4ac48c01048cf8d9914f576d57f3e25
 +printf '\nResults: %d passed, 0 failed\n' \
 +    "${PASS_COUNT}"
 diff --git a/tool/build-synology-root-bootstrap.sh b/tool/build-synology-root-bootstrap.sh
-index bfb33c8f56feb6a2eac87009122ba005c79e46a7..01234e7aa6823892409a0ac1c4187764c4baede2 100755
+index bfb33c8f5..01234e7aa 100755
 --- a/tool/build-synology-root-bootstrap.sh
 +++ b/tool/build-synology-root-bootstrap.sh
 @@ -2,7 +2,7 @@
@@ -833,3 +833,6 @@ index bfb33c8f56feb6a2eac87009122ba005c79e46a7..01234e7aa6823892409a0ac1c4187764
  bash -n "${SIDE}/scripts/start-stop-status"
  bash -n "${SIDE}/scripts/tailscale-netfilter-reconciler"
  bash -n "${SIDE}/scripts/tailscale-synology-bootstrap"
+-- 
+2.55.0
+

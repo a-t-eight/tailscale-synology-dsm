@@ -1,14 +1,14 @@
 From 01d9071ddceae34502978656f1f36b26906841ec Mon Sep 17 00:00:00 2001
 From: a-t-eight <andreeww.trieu@gmail.com>
 Date: Thu, 23 Jul 2026 03:46:31 +1000
-Subject: [PATCH 05/18] synology: require kernel TUN during package startup
+Subject: [PATCH 05/19] synology: require kernel TUN during package startup
 
 ---
  .../synology/files/scripts/start-stop-status  | 19 +++++++++++--------
  1 file changed, 11 insertions(+), 8 deletions(-)
 
 diff --git a/release/dist/synology/files/scripts/start-stop-status b/release/dist/synology/files/scripts/start-stop-status
-index e6ece04e3383eb65bd8a3b9b7b956e0bc3ef5991..8c6e5e21614c6f0f48e6dee5a3c5912af5815fd6 100755
+index e6ece04e3..8c6e5e216 100755
 --- a/release/dist/synology/files/scripts/start-stop-status
 +++ b/release/dist/synology/files/scripts/start-stop-status
 @@ -19,11 +19,6 @@ SERVICE_COMMAND="${SYNOPKG_PKGDEST}/bin/tailscaled \
@@ -51,3 +51,6 @@ index e6ece04e3383eb65bd8a3b9b7b956e0bc3ef5991..8c6e5e21614c6f0f48e6dee5a3c5912a
          start_daemon
          exit $?
      fi
+-- 
+2.55.0
+

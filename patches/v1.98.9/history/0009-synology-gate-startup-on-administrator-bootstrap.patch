@@ -1,14 +1,14 @@
 From a471b0eb42e8487b47aa051b1198ba536e250669 Mon Sep 17 00:00:00 2001
 From: a-t-eight <andreeww.trieu@gmail.com>
 Date: Thu, 23 Jul 2026 14:53:20 +1000
-Subject: [PATCH 09/18] synology: gate startup on administrator bootstrap
+Subject: [PATCH 09/19] synology: gate startup on administrator bootstrap
 
 ---
  .../synology/files/scripts/start-stop-status  | 180 +++++++++++++++++-
  1 file changed, 176 insertions(+), 4 deletions(-)
 
 diff --git a/release/dist/synology/files/scripts/start-stop-status b/release/dist/synology/files/scripts/start-stop-status
-index 64e911513163a6e2c2449cf73e29e9161d26be17..caedd5d500b7ffcece97acf270871944b7bcecab 100755
+index 64e911513..caedd5d50 100755
 --- a/release/dist/synology/files/scripts/start-stop-status
 +++ b/release/dist/synology/files/scripts/start-stop-status
 @@ -15,6 +15,14 @@ else
@@ -225,3 +225,6 @@ index 64e911513163a6e2c2449cf73e29e9161d26be17..caedd5d500b7ffcece97acf270871944
          echo "${SERVICE_NAME} is not running"
          exit 3
      fi
+-- 
+2.55.0
+

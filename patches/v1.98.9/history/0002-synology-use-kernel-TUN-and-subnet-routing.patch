@@ -1,14 +1,14 @@
 From 1c5dcbe5cc7f6c1b237e74ca721bc10f2548506a Mon Sep 17 00:00:00 2001
 From: a-t-eight <andreeww.trieu@gmail.com>
 Date: Thu, 23 Jul 2026 02:40:22 +1000
-Subject: [PATCH 02/18] synology: use kernel TUN and subnet routing
+Subject: [PATCH 02/19] synology: use kernel TUN and subnet routing
 
 ---
  cmd/tailscaled/tailscaled.go | 9 +++------
  1 file changed, 3 insertions(+), 6 deletions(-)
 
 diff --git a/cmd/tailscaled/tailscaled.go b/cmd/tailscaled/tailscaled.go
-index fe18731ae09a12ee0e14c4076b5d8950466231af..6f0dcede86551dfb142f5a2a6944de92c1ecd756 100644
+index fe18731ae..6f0dcede8 100644
 --- a/cmd/tailscaled/tailscaled.go
 +++ b/cmd/tailscaled/tailscaled.go
 @@ -83,9 +83,9 @@ func defaultTunName() string {
@@ -34,3 +34,6 @@ index fe18731ae09a12ee0e14c4076b5d8950466231af..6f0dcede86551dfb142f5a2a6944de92
  	switch runtime.GOOS {
  	case "windows", "darwin", "freebsd", "openbsd", "solaris", "illumos":
  		// Enable on Windows and tailscaled-on-macOS (this doesn't
+-- 
+2.55.0
+

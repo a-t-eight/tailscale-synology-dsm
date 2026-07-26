@@ -1,14 +1,14 @@
 From 4d7586ff0238a41fc627cf905af0bdcae1c67d0e Mon Sep 17 00:00:00 2001
 From: a-t-eight <andreeww.trieu@gmail.com>
 Date: Thu, 23 Jul 2026 03:53:12 +1000
-Subject: [PATCH 06/18] synology: force kernel networking in the SPK launcher
+Subject: [PATCH 06/19] synology: force kernel networking in the SPK launcher
 
 ---
  release/dist/synology/files/scripts/start-stop-status | 10 +++++++++-
  1 file changed, 9 insertions(+), 1 deletion(-)
 
 diff --git a/release/dist/synology/files/scripts/start-stop-status b/release/dist/synology/files/scripts/start-stop-status
-index 8c6e5e21614c6f0f48e6dee5a3c5912af5815fd6..64e911513163a6e2c2449cf73e29e9161d26be17 100755
+index 8c6e5e216..64e911513 100755
 --- a/release/dist/synology/files/scripts/start-stop-status
 +++ b/release/dist/synology/files/scripts/start-stop-status
 @@ -2,6 +2,13 @@
@@ -35,3 +35,6 @@ index 8c6e5e21614c6f0f48e6dee5a3c5912af5815fd6..64e911513163a6e2c2449cf73e29e916
  
  if [ "${SYNOPKG_DSM_VERSION_MAJOR}" -eq "6" ]; then
      chown -R tailscale:tailscale "${PKGVAR}/"
+-- 
+2.55.0
+

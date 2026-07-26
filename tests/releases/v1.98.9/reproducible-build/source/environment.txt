@@ -1,0 +1,19 @@
+release_commit=20c86229955a3d03de01901aee1499cab87c571d
+release_tree=6d022c18f27a42aab553697c69c852bebd8594b8
+source_date_epoch=1785030856
+info_create_time=20260726-01:54:16
+build_worktree=/home/ateight/development/tailscale-synology-dsm-final-build-20260726-115834
+build_output_a=/home/ateight/development/tailscale-synology-build-output/v1.98.9-final-20260726-115834-a
+build_output_b=/home/ateight/development/tailscale-synology-build-output/v1.98.9-final-20260726-115834-b
+uname=Linux trieulabs-razer-wsl2 6.18.33.2-microsoft-standard-WSL2 #1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026 x86_64 GNU/Linux
+go_version=go version go1.26.5 linux/amd64
+go_environment_begin
+go1.26.5
+auto
+linux
+amd64
+v1
+1
+/home/ateight/.cache/go-build
+/home/ateight/go/pkg/mod
+go_environment_end

@@ -20,3 +20,6 @@ tmp/
 *~
 # Retained release-validation evidence
 !tests/releases/*/shell-regression/logs/*.log
+!tests/releases/*/reproducible-build/source/build-a.log
+!tests/releases/*/reproducible-build/source/build-b.log
+!tests/releases/*/source-validation/go-test.log

@@ -1,7 +1,7 @@
 From 9b7c0464a2b5561cfb3e70bf07c22a6906c88cc8 Mon Sep 17 00:00:00 2001
 From: a-t-eight <andreeww.trieu@gmail.com>
 Date: Fri, 24 Jul 2026 03:29:51 +1000
-Subject: [PATCH 13/18] synology: require netfilter module package
+Subject: [PATCH 13/19] synology: require netfilter module package
 
 Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
 ---
@@ -13,7 +13,7 @@ Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
 
 diff --git a/release/dist/synology/files/PKG_DEPS b/release/dist/synology/files/PKG_DEPS
 new file mode 100644
-index 0000000000000000000000000000000000000000..5e649e7f6178dc6c5fd5310fa192841c6fc92040
+index 000000000..5e649e7f6
 --- /dev/null
 +++ b/release/dist/synology/files/PKG_DEPS
 @@ -0,0 +1,3 @@
@@ -21,7 +21,7 @@ index 0000000000000000000000000000000000000000..5e649e7f6178dc6c5fd5310fa192841c
 +pkg_min_ver=1.0.0-11
 +os_min_ver=7.3-81180
 diff --git a/release/dist/synology/pkgs.go b/release/dist/synology/pkgs.go
-index 80c8d467bd8944a973403d3b04b577cfe1c2ba5c..6bb0cfc402060b576f6eef43d051dfe22cca8508 100644
+index 80c8d467b..6bb0cfc40 100644
 --- a/release/dist/synology/pkgs.go
 +++ b/release/dist/synology/pkgs.go
 @@ -108,6 +108,7 @@ func (t *target) buildSPK(b *dist.Build, inner *innerPkg) ([]string, error) {
@@ -33,7 +33,7 @@ index 80c8d467bd8944a973403d3b04b577cfe1c2ba5c..6bb0cfc402060b576f6eef43d051dfe2
  			static("privilege-dsm7.root", "conf/privilege.bootstrap-root", 0644),
  		)
 diff --git a/tool/build-synology-root-bootstrap.sh b/tool/build-synology-root-bootstrap.sh
-index c2b8ea927f1960b20177c73f98be14ccfd94852d..b9871ad78a52a30dce89e049f5a75d9694b6d8ad 100755
+index c2b8ea927..b9871ad78 100755
 --- a/tool/build-synology-root-bootstrap.sh
 +++ b/tool/build-synology-root-bootstrap.sh
 @@ -64,6 +64,7 @@ tar -xf "${PACKAGE_CENTER_SPK}" -C "${CENTER}"
@@ -98,3 +98,6 @@ index c2b8ea927f1960b20177c73f98be14ccfd94852d..b9871ad78a52a30dce89e049f5a75d96
  cp \
      "${CENTER}/INFO" \
      "${REFERENCE_OUT}/INFO-package-center"
+-- 
+2.55.0
+

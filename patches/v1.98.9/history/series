@@ -16,3 +16,4 @@
 0016-synology-supervise-netfilter-reconciliation.patch
 0017-synology-avoid-reconciler-broken-pipe-diagnostics.patch
 0018-synology-harden-boot-networking-startup.patch
+0019-build-make-release-artifacts-reproducible.patch

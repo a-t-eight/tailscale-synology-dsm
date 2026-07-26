@@ -6,8 +6,8 @@ The signed downstream commit stack on
 `release/v1.98.9-synology` is authoritative.
 
 - Upstream base: `6c167d40fa37aeb51afa7ff336730670ea4762bf`
-- Production tip: `cc5d96275e9dd76fd8a4f38209a2df91199a425c`
-- Production tree: `e004b64196c89a32e2a4b71949d2aff19d133ef8`
+- Production tip: `20c86229955a3d03de01901aee1499cab87c571d`
+- Production tree: `6d022c18f27a42aab553697c69c852bebd8594b8`
 
 ## Artifacts
 
@@ -24,7 +24,7 @@ or runtime:
 
 Expected resulting tree:
 
-`b8ced487a68252e56e9665df1993e4b4970d87d9`
+`11877662819d8c8276fd7fa9df2dbf28434494c4`
 
 ### `release-tree.patch`
 
@@ -32,11 +32,32 @@ Exact cumulative diff from upstream `v1.98.9` to the accepted production
 release tree. It includes the two inactive historical artifacts and
 reconstructs the production tree byte-for-byte.
 
+Expected resulting tree:
+
+`6d022c18f27a42aab553697c69c852bebd8594b8`
+
 ### `history/`
 
-Exact 18-commit `git format-patch` export of the signed development history.
+Exact 19-commit `git format-patch` export of the signed development history.
 Applying `history/series` with `git am` reconstructs the production tree and
 preserves the logical commit sequence.
+
+## Reproducible packages
+
+Two independent builds from the signed production tip produced byte-identical
+packages.
+
+- Sideload SHA-256:
+  `bed218b4d0099102e9c3be18456d8a94be9a92b4a29295a9dab33932570cbce0`
+- Package Center reference SHA-256:
+  `6e01fb115dd15cd922d89bafb5d516d87533d33dda3bd4c0e70cd45f4d77c817`
+- SOURCE_DATE_EPOCH:
+  `1785030856`
+- INFO create time:
+  `20260726-01:54:16` UTC
+
+Complete build and validation evidence is retained under
+`tests/releases/v1.98.9/`.
 
 ## Commit policy
 
@@ -47,7 +68,9 @@ trailers. Exactly one valid `Signed-off-by` trailer is required beginning at:
 
 `9b7c0464a2b5561cfb3e70bf07c22a6906c88cc8`
 
+Seven commits are governed by that sign-off requirement.
+
 ## Generated files
 
-Patch files must not be manually edited. Correct the source commit stack or
-generation process and regenerate the complete artifact set.
+Patch files and manifests must not be manually edited. Correct the source
+commit stack or generation process and regenerate the complete artifact set.

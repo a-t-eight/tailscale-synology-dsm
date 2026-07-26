@@ -1,7 +1,7 @@
 From e310e762b4919cad36a6e06fa8608da00660dc9d Mon Sep 17 00:00:00 2001
 From: a-t-eight <andreeww.trieu@gmail.com>
 Date: Fri, 24 Jul 2026 16:30:37 +1000
-Subject: [PATCH 15/18] synology: reconcile netfilter after startup
+Subject: [PATCH 15/19] synology: reconcile netfilter after startup
 
 Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
 ---
@@ -12,7 +12,7 @@ Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
  create mode 100755 release/dist/synology/tests/start-stop-definitions-test.sh
 
 diff --git a/release/dist/synology/files/scripts/start-stop-status b/release/dist/synology/files/scripts/start-stop-status
-index 769a378f6a17de87a8dcebace9afcd443800ea8e..a049217f17faf6366a6e13c1e859fb517ea3ca5d 100755
+index 769a378f6..a049217f1 100755
 --- a/release/dist/synology/files/scripts/start-stop-status
 +++ b/release/dist/synology/files/scripts/start-stop-status
 @@ -9,6 +9,11 @@ export PATH="${SYNOPKG_PKGDEST}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/us
@@ -418,7 +418,7 @@ index 769a378f6a17de87a8dcebace9afcd443800ea8e..a049217f17faf6366a6e13c1e859fb51
  stop)
 diff --git a/release/dist/synology/tests/start-stop-definitions-test.sh b/release/dist/synology/tests/start-stop-definitions-test.sh
 new file mode 100755
-index 0000000000000000000000000000000000000000..28ed10a74926bdaa05c84175d8ab3ce2014766b8
+index 000000000..28ed10a74
 --- /dev/null
 +++ b/release/dist/synology/tests/start-stop-definitions-test.sh
 @@ -0,0 +1,108 @@
@@ -531,7 +531,7 @@ index 0000000000000000000000000000000000000000..28ed10a74926bdaa05c84175d8ab3ce2
 +
 +printf 'TEST: start-stop definitions load cleanly ... PASS\n'
 diff --git a/tool/build-synology-root-bootstrap.sh b/tool/build-synology-root-bootstrap.sh
-index b9871ad78a52a30dce89e049f5a75d9694b6d8ad..077ebaa1b578b8f6eed05bf867972d4ec675b8bc 100755
+index b9871ad78..077ebaa1b 100755
 --- a/tool/build-synology-root-bootstrap.sh
 +++ b/tool/build-synology-root-bootstrap.sh
 @@ -2,7 +2,7 @@
@@ -543,3 +543,6 @@ index b9871ad78a52a30dce89e049f5a75d9694b6d8ad..077ebaa1b578b8f6eed05bf867972d4e
  OUT_ROOT="${1:-${REPO_ROOT}/build/synology/v1.98.9-final}"
  
  SIDELOAD_OUT="${OUT_ROOT}/sideload"
+-- 
+2.55.0
+

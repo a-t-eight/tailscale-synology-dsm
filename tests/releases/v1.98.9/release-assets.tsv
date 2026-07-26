@@ -1,15 +1,15 @@
 category	mode	bytes	lines	sha256	shebang	path
-runtime	100644	17	3	f4b3fc65e4888cf6aaec6c16f423dec116661fa0858c62286406d5986f3a7a18	#!/bin/sh	release/dist/synology/files/scripts/postupgrade
-runtime	100644	17	3	f4b3fc65e4888cf6aaec6c16f423dec116661fa0858c62286406d5986f3a7a18	#!/bin/sh	release/dist/synology/files/scripts/preupgrade
+runtime	100644	17	2	f4b3fc65e4888cf6aaec6c16f423dec116661fa0858c62286406d5986f3a7a18	#!/bin/sh	release/dist/synology/files/scripts/postupgrade
+runtime	100644	17	2	f4b3fc65e4888cf6aaec6c16f423dec116661fa0858c62286406d5986f3a7a18	#!/bin/sh	release/dist/synology/files/scripts/preupgrade
 runtime	100755	24181	1079	9c0b25cd85a1e2810c4d6f76c98b951def7ce2402c8ec55c28fba943445aebac	#!/bin/bash	release/dist/synology/files/scripts/start-stop-status
 runtime	100755	11773	570	2e62b33b77a2ad4d2e03a5df26b10cacd8264a749cc7330543547fc82bd620c9	#!/bin/bash	release/dist/synology/files/scripts/tailscale-netfilter-reconciler
 runtime	100755	12369	545	b9a5e064e469a7962d6e9963b4f71b3a621f4236c15ca3ed03941856145052aa	#!/bin/bash	release/dist/synology/files/scripts/tailscale-synology-bootstrap
 test	100755	1881	93	6cb4b7b7627a5959d120ab5386ea8d3517580f633cac2c887eb9d32f3fedc993	#!/bin/bash	release/dist/synology/tests/bootstrap-synopkg-path-test.sh
-test	100755	10916	560	bc9da1c07048172d54c60c8a2b45cc94c496f3e540f7af3ab13d75c9e00d8070	#!/bin/bash	release/dist/synology/tests/netfilter-preflight-test.sh
+test	100755	10916	559	bc9da1c07048172d54c60c8a2b45cc94c496f3e540f7af3ab13d75c9e00d8070	#!/bin/bash	release/dist/synology/tests/netfilter-preflight-test.sh
 test	100755	3455	193	68f2da092714f05a7240e2e9277ef5ad3ed76db47b51613c4733c9e9717295f2	#!/bin/bash	release/dist/synology/tests/netfilter-reconciler-shutdown-test.sh
 test	100755	6039	308	2005e2752ec4daf5bd445aafaf6f88eac80af4e81eeea1677b33caea83d56d4f	#!/bin/bash	release/dist/synology/tests/netfilter-reconciler-test.sh
 test	100755	8377	428	f1233c7ea4dcc7e4a2b0726a2c15f52104fb0b737009c40bcb0e7605a56ddbcd	#!/bin/bash	release/dist/synology/tests/netfilter-rule-support-test.sh
 test	100755	13851	673	a4d6b5dde7b9068afe344e415511695f01119906c6b3095e1ebb45fe40262c87	#!/bin/bash	release/dist/synology/tests/root-bootstrap-test.sh
 test	100755	1944	104	a2633f5ba43a097138ade466139b1c3f0173a8866100d7c635c2bce84e4a0f94	#!/bin/bash	release/dist/synology/tests/start-stop-definitions-test.sh
 test	100755	3117	186	936bc785981356c64603368d88eb8f3c6f2c03181759d2e82656f64ce24d63ed	#!/bin/bash	release/dist/synology/tests/tun-device-test.sh
-build-helper	100755	8352	353	f8bab97e5b364264f68dadc47cda7dc619de4612773cd1e4a8a8f3bd020c73a4	#!/usr/bin/env bash	tool/build-synology-root-bootstrap.sh
+build-helper	100755	8985	382	6b439c833c5524f66551b609b8e8008c1def1e9c3e6b7e2af946793faaedc55a	#!/usr/bin/env bash	tool/build-synology-root-bootstrap.sh

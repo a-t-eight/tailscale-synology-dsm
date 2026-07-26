@@ -1,0 +1,28 @@
+SOURCE_DATE_EPOCH=1785030856
+2026/07/26 12:00:14 Building 1 targets: [synology/dsm7/x86_64]
+2026/07/26 12:00:14 Initializing Go toolchain
+2026/07/26 12:00:15 Building tailscale.com/cmd/tailscale (with env GOARCH=amd64 GOOS=linux)
+2026/07/26 12:00:17 Building tailscale.com/cmd/tailscaled (with env GOARCH=amd64 GOOS=linux)
+2026/07/26 12:00:22 Building tailscale-x86_64-1.98.96-700098096-dsm7.spk (for sideloading)
+Done! Took 7.682114879s
+2026/07/26 12:00:22 Building 1 targets: [synology/dsm7-2/x86_64]
+2026/07/26 12:00:22 Initializing Go toolchain
+2026/07/26 12:00:22 Building tailscale.com/cmd/tailscale (with env GOARCH=amd64 GOOS=linux)
+2026/07/26 12:00:23 Building tailscale.com/cmd/tailscaled (with env GOARCH=amd64 GOOS=linux)
+2026/07/26 12:00:26 Building tailscale-x86_64-1.98.96-720098096-dsm7-2.spk (for package center)
+Done! Took 4.202564012s
+Inner package payload validation passed.
+Outer package metadata validation passed.
+Privilege manifest validation passed.
+Package dependency validation passed.
+./tailscale-x86_64-1.98.96-700098096-dsm7.spk: OK
+./tailscale-x86_64-1.98.96-720098096-dsm7-2.spk: OK
+
+Sideload package:
+  /home/ateight/development/tailscale-synology-build-output/v1.98.9-final-20260726-115834-a/sideload/tailscale-x86_64-1.98.96-700098096-dsm7.spk
+
+Package Center reference:
+  /home/ateight/development/tailscale-synology-build-output/v1.98.9-final-20260726-115834-a/package-center-reference/tailscale-x86_64-1.98.96-720098096-dsm7-2.spk
+
+Reference metadata:
+  /home/ateight/development/tailscale-synology-build-output/v1.98.9-final-20260726-115834-a/reference-metadata

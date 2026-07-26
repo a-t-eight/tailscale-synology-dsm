@@ -1,7 +1,7 @@
 From a2ac2a275f4b2f0d7f786ca670d8040c83a6ae73 Mon Sep 17 00:00:00 2001
 From: a-t-eight <andreeww.trieu@gmail.com>
 Date: Thu, 23 Jul 2026 03:39:32 +1000
-Subject: [PATCH 04/18] build: add v1.98.9 Synology netfilter patch
+Subject: [PATCH 04/19] build: add v1.98.9 Synology netfilter patch
 
 ---
  patches/v1.98.9/synology-netfilter.patch      | 162 ++++++++++++++++++
@@ -12,7 +12,7 @@ Subject: [PATCH 04/18] build: add v1.98.9 Synology netfilter patch
 
 diff --git a/patches/v1.98.9/synology-netfilter.patch b/patches/v1.98.9/synology-netfilter.patch
 new file mode 100644
-index 0000000000000000000000000000000000000000..b0a9474448b0f5bac5b24229ffe6827c4eebe897
+index 000000000..b0a947444
 --- /dev/null
 +++ b/patches/v1.98.9/synology-netfilter.patch
 @@ -0,0 +1,162 @@
@@ -180,8 +180,11 @@ index 0000000000000000000000000000000000000000..b0a9474448b0f5bac5b24229ffe6827c
 + 
 diff --git a/patches/v1.98.9/synology-netfilter.patch.sha256 b/patches/v1.98.9/synology-netfilter.patch.sha256
 new file mode 100644
-index 0000000000000000000000000000000000000000..5b88bba7a6ac4b8cea5d307bee5cdc9769e70ad4
+index 000000000..5b88bba7a
 --- /dev/null
 +++ b/patches/v1.98.9/synology-netfilter.patch.sha256
 @@ -0,0 +1 @@
 +ad577d4032e3c14fa37b284b7e5116c364122471b1d9fdc2c906bf8ae198920f  synology-netfilter.patch
+-- 
+2.55.0
+
