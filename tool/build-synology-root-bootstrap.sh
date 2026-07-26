@@ -5,6 +5,35 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION_OVERRIDE="${TS_VERSION_OVERRIDE:-1.98.96}"
 OUT_ROOT="${1:-${REPO_ROOT}/build/synology/v1.98.9-final}"
 
+SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-}"
+
+if [ -z "${SOURCE_DATE_EPOCH}" ]; then
+    if ! SOURCE_DATE_EPOCH="$(
+        git -C "${REPO_ROOT}" \
+            show \
+            -s \
+            --format='%ct' \
+            HEAD
+    )"
+    then
+        printf 'ERROR: unable to derive SOURCE_DATE_EPOCH from HEAD\n' >&2
+        exit 1
+    fi
+fi
+
+case "${SOURCE_DATE_EPOCH}" in
+    ''|*[!0-9]*)
+        printf 'ERROR: SOURCE_DATE_EPOCH must be a non-negative integer: %s\n' \
+            "${SOURCE_DATE_EPOCH}" >&2
+        exit 1
+        ;;
+esac
+
+export SOURCE_DATE_EPOCH
+
+printf 'SOURCE_DATE_EPOCH=%s\n' \
+    "${SOURCE_DATE_EPOCH}"
+
 SIDELOAD_OUT="${OUT_ROOT}/sideload"
 PACKAGE_CENTER_OUT="${OUT_ROOT}/package-center-reference"
 REFERENCE_OUT="${OUT_ROOT}/reference-metadata"

@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -91,8 +92,29 @@ type Build struct {
 	onCloseFuncs []func() error // funcs to be called when Builder is closed
 }
 
+func buildTimestamp() (time.Time, error) {
+	value, ok := os.LookupEnv("SOURCE_DATE_EPOCH")
+	if !ok {
+		return time.Now().UTC(), nil
+	}
+
+	seconds, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || seconds < 0 {
+		return time.Time{}, fmt.Errorf(
+			"invalid SOURCE_DATE_EPOCH %q: must be a non-negative base-10 integer",
+			value,
+		)
+	}
+
+	return time.Unix(seconds, 0).UTC(), nil
+}
+
 // NewBuild creates a new Build rooted at repo, and writing artifacts to out.
 func NewBuild(repo, out string) (*Build, error) {
+	timestamp, err := buildTimestamp()
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(out, 0750); err != nil {
 		return nil, fmt.Errorf("creating out dir: %w", err)
 	}
@@ -119,7 +141,7 @@ func NewBuild(repo, out string) (*Build, error) {
 		Go:           goTool,
 		Yarn:         yarnTool,
 		Version:      mkversion.Info(),
-		Time:         time.Now().UTC(),
+		Time:         timestamp,
 		extra:        map[any]any{},
 		goBuildLimit: make(chan struct{}, runtime.NumCPU()),
 	}
