@@ -76,3 +76,38 @@ bootstrap command to recreate it.
 
 A future phase may add complete transitive dependency locks, SBOM generation
 and provenance attestations.
+
+<!-- BEGIN RELEASE WORKTREE TOOLING -->
+
+## Release worktree tooling
+
+Use:
+
+```text
+bash scripts/setup-worktree.sh \
+  --worktree /path/to/worktree \
+  --control-worktree /path/to/control-worktree \
+  --role control|accepted|work|release
+```
+
+The setup command enables Git worktree-specific configuration. Control
+worktrees use their committed `.githooks`; source, work and release worktrees
+use generated wrappers stored in the common Git directory.
+
+This avoids a common `core.hooksPath=.githooks` value resolving to an absent
+directory on upstream-derived source branches.
+
+Release entrypoints are under `scripts/release/` and consume
+`release/manifest.yaml`. They use Python only for standard-library manifest
+parsing and use the selected source worktree's `./tool/go` for all Go
+operations.
+
+<!-- END RELEASE WORKTREE TOOLING -->
+
+## Allowed-signers bootstrap
+
+`.github/allowed_signers` contains public key material and is intentionally
+committed. It is not a secret. The one-time repository variable
+`RELEASE_ALLOWED_SIGNERS_SHA256` contains only the file SHA-256 and is used only while
+the protected base is `c08cb5af27701615f6180d79182d2c8559c601bf` and lacks the file. Future CI reads
+the signer file directly from the protected base checkout.

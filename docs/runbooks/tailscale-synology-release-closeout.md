@@ -484,3 +484,28 @@ Open limitations:
 
 A closeout is complete only when every applicable field is populated and the
 post-closeout invariants have passed.
+
+<!-- BEGIN RELEASE MANIFEST RELATIONSHIP -->
+
+## Release manifest relationship
+
+Future releases begin with `release/manifest.yaml` and the version-update
+runbook. At closeout, treat the manifest as an input index rather than proof.
+
+Every closeout value must still be verified against the accepted package bytes,
+signed release commit and tree, canonical patches, checksums and retained
+evidence.
+
+The manifest must identify:
+
+- upstream tag and full commit;
+- final downstream release commit and tree;
+- downstream revision and signed release tag;
+- complete package identity and checksum;
+- canonical release branch;
+- canonical patch, build-output, evidence and release-record paths.
+
+A closed release record is immutable even after `release/manifest.yaml` moves
+to the next release.
+
+<!-- END RELEASE MANIFEST RELATIONSHIP -->

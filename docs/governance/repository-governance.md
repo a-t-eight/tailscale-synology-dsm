@@ -101,3 +101,39 @@ The intended ruleset requires:
 - administrator enforcement where operationally viable.
 
 Rules must preserve the existing guarded exact fast-forward integration model.
+
+<!-- BEGIN MANIFEST-DRIVEN RELEASE OPERATIONS -->
+
+## Manifest-driven release operations
+
+`release/manifest.yaml` is the single operational source for a downstream
+release's upstream identity, downstream revision, package identity, branch
+names, build entrypoint and evidence paths.
+
+Release operations use three branch classes:
+
+- `operations/*` changes control-plane release tooling;
+- `work/<upstream>-synology` adapts the downstream source stack;
+- `release/<upstream>-synology` contains the validated signed source stack.
+
+The `release-operations` CI check validates manifest and source coherence. It
+does not replace the required `repository-governance` check and is not
+authorised to publish a stable release.
+
+Candidate automation may build artefacts only after exact source, patch and
+toolchain validation. Production DSM installation, root bootstrap, firewall
+mutation, reboot and stable publication remain explicit human gates.
+
+<!-- END MANIFEST-DRIVEN RELEASE OPERATIONS -->
+
+## Protected SSH signer trust
+
+Release validation stores public SSH trust in `.github/allowed_signers`.
+Pull-request CI checks out the protected base separately and reads the signer
+file from that checkout, rather than treating the pull-request head as the
+normal trust root.
+
+The bootstrap PR is the sole exception because protected base
+`c08cb5af27701615f6180d79182d2c8559c601bf` predates the signer file. During that PR,
+`RELEASE_ALLOWED_SIGNERS_SHA256` must equal the signer file SHA-256. Remove the
+repository variable immediately after the bootstrap commit is integrated.

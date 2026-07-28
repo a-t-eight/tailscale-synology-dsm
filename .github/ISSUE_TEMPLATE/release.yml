@@ -1,0 +1,85 @@
+name: Downstream release
+description: Track one pinned Tailscale Synology DSM release from selection to closeout.
+title: "release: "
+labels:
+  - release
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This issue tracks a human-controlled downstream release. It does not
+        authorise automatic production installation or stable publication.
+
+  - type: input
+    id: upstream_tag
+    attributes:
+      label: Upstream tag
+      description: Exact Tailscale release tag.
+      placeholder: v1.98.9
+    validations:
+      required: true
+
+  - type: input
+    id: upstream_commit
+    attributes:
+      label: Upstream commit
+      description: Full 40-character upstream commit SHA.
+    validations:
+      required: true
+
+  - type: input
+    id: downstream_revision
+    attributes:
+      label: Downstream revision
+      placeholder: r1
+    validations:
+      required: true
+
+  - type: input
+    id: work_branch
+    attributes:
+      label: Work branch
+      placeholder: work/v1.98.9-synology
+    validations:
+      required: true
+
+  - type: input
+    id: release_branch
+    attributes:
+      label: Release branch
+      placeholder: release/v1.98.9-synology
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: validation
+    attributes:
+      label: Validation gates
+      options:
+        - label: Manifest audit passed.
+        - label: Patch adaptation and range-diff review completed.
+        - label: Canonical patch round-trip passed.
+        - label: Repository-pinned Go tests passed.
+        - label: Candidate package inspection passed.
+        - label: Reproducibility comparison passed.
+        - label: DSM hardware acceptance passed.
+        - label: Runtime evidence was sanitised and reviewed.
+        - label: Rollback instructions were validated.
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety confirmations
+      options:
+        - label: No production credential is stored in GitHub Actions.
+          required: true
+        - label: Stable publication requires a separate explicit human action.
+          required: true
+        - label: Production installation, firewall mutation and reboot remain manual.
+          required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence and release decision
+      description: Record exact paths, checksums, commits and unresolved limitations.

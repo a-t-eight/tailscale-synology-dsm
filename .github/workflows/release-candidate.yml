@@ -1,0 +1,119 @@
+name: Validate release candidate
+
+on:
+  pull_request:
+    paths:
+      - "release/**"
+      - "scripts/release/**"
+      - "scripts/setup-worktree.sh"
+      - "patches/**"
+      - "build-environment/**"
+      - "docs/runbooks/tailscale-synology-*.md"
+      - ".github/allowed_signers"
+      - ".github/workflows/release-candidate.yml"
+  workflow_dispatch:
+    inputs:
+      run_candidate_build:
+        description: Build an unpublished candidate after full validation
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-candidate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release-operations:
+    name: release-operations
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_PROTECTED_BASE_WORKTREE: ${{ github.workspace }}/.build-environment/protected-base
+      RELEASE_ALLOWED_SIGNERS_SHA256: ${{ vars.RELEASE_ALLOWED_SIGNERS_SHA256 }}
+    steps:
+      - name: Check out proposed control tree
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out protected control base
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.base.sha || 'synology/main' }}
+          path: .build-environment/protected-base
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Read pinned source identity
+        id: manifest
+        shell: bash
+        run: |
+          printf 'release_commit=%s\n' \
+            "$(jq -r '.downstream.release_commit' release/manifest.yaml)" \
+            >>"$GITHUB_OUTPUT"
+
+      - name: Check out exact downstream source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ steps.manifest.outputs.release_commit }}
+          path: .build-environment/tailscale-source
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate repository governance
+        shell: bash
+        run: |
+          bash scripts/validate-repository.sh \
+            --source-environment \
+            "$GITHUB_WORKSPACE/.build-environment/tailscale-source" \
+            --bootstrap
+
+      - name: Audit release inputs
+        shell: bash
+        run: |
+          bash scripts/release/audit-inputs.sh \
+            --control-worktree \
+            "$GITHUB_WORKSPACE" \
+            --source-repo \
+            "$GITHUB_WORKSPACE/.build-environment/tailscale-source"
+
+      - name: Validate accepted release baseline
+        shell: bash
+        run: |
+          bash scripts/release/validate-release.sh \
+            --control-worktree \
+            "$GITHUB_WORKSPACE" \
+            --source-worktree \
+            "$GITHUB_WORKSPACE/.build-environment/tailscale-source" \
+            --role \
+            accepted \
+            --round-trip
+
+      - name: Build non-production candidate
+        if: github.event_name == 'workflow_dispatch' && inputs.run_candidate_build
+        shell: bash
+        run: |
+          bash scripts/release/build-candidate.sh \
+            --control-worktree \
+            "$GITHUB_WORKSPACE" \
+            --source-worktree \
+            "$GITHUB_WORKSPACE/.build-environment/tailscale-source" \
+            --role \
+            accepted \
+            --output-root \
+            "$RUNNER_TEMP/tailscale-candidate" \
+            --confirm-build
+
+      - name: Summarise candidate checksums
+        if: github.event_name == 'workflow_dispatch' && inputs.run_candidate_build
+        shell: bash
+        run: |
+          sed -n \
+            '1,200p' \
+            "$RUNNER_TEMP/tailscale-candidate/candidate-SHA256SUMS"
