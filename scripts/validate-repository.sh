@@ -1,0 +1,1022 @@
+#!/usr/bin/env bash
+set -u
+
+SOURCE_ENV_COMMIT="20c86229955a3d03de01901aee1499cab87c571d"
+SOURCE_ENV_TREE="6d022c18f27a42aab553697c69c852bebd8594b8"
+
+SHELLCHECK_VERSION="v0.11.0"
+SHFMT_VERSION="v3.13.1"
+ACTIONLINT_VERSION="v1.7.12"
+
+REPO_ROOT="$(
+  cd \
+    "$(dirname "${BASH_SOURCE[0]}")/.." &&
+    pwd
+)"
+
+SOURCE_ENV_ROOT="${TAILSCALE_SOURCE_ENVIRONMENT:-}"
+
+CACHE_ROOT="${XDG_CACHE_HOME:-${HOME}/.cache}/tailscale-synology-dsm/governance-tools"
+TOOLSET_ID="go-${SOURCE_ENV_COMMIT}-shellcheck-${SHELLCHECK_VERSION#v}-shfmt-${SHFMT_VERSION#v}-actionlint-${ACTIONLINT_VERSION#v}"
+BIN_ROOT="${CACHE_ROOT}/${TOOLSET_ID}/bin"
+TEXT_VALIDATOR="${CACHE_ROOT}/${TOOLSET_ID}/validate-text.go"
+
+BOOTSTRAP=0
+FAST=0
+FORMAT_MANAGED=0
+FAILURES=0
+
+usage() {
+  cat << 'USAGE'
+Usage:
+  bash scripts/validate-repository.sh \
+    [--source-environment /path/to/exact-release-worktree] \
+    [--bootstrap] \
+    [--fast] \
+    [--format-managed]
+
+Options:
+  --source-environment
+      Exact Tailscale release worktree that provides the repository-pinned
+      ./tool/go entry point. When omitted, discover exactly one clean registered
+      worktree at the pinned release commit and tree.
+
+  --bootstrap
+      Install missing pinned validators into the user cache. Every Go tool is
+      built through the supplied source environment's ./tool/go.
+
+  --fast
+      Perform no network access. Require all validators to be cached.
+
+  --format-managed
+      Format only governance-owned shell scripts before validation.
+USAGE
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --source-environment)
+      if [ "$#" -lt 2 ]; then
+        echo "FAIL: --source-environment requires a path." >&2
+        exit 2
+      fi
+
+      SOURCE_ENV_ROOT="$2"
+      shift
+      ;;
+    --bootstrap)
+      BOOTSTRAP=1
+      ;;
+    --fast)
+      FAST=1
+      ;;
+    --format-managed)
+      FORMAT_MANAGED=1
+      ;;
+    --help | -h)
+      usage
+      exit 0
+      ;;
+    *)
+      printf 'FAIL: unsupported option: %s\n' "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+
+  shift
+done
+
+if [ "$BOOTSTRAP" -eq 1 ] &&
+  [ "$FAST" -eq 1 ]; then
+  echo "FAIL: --bootstrap and --fast are mutually exclusive." >&2
+  exit 2
+fi
+
+fail_check() {
+  printf 'FAIL: %s\n' "$1"
+  FAILURES=$((FAILURES + 1))
+}
+
+pass_check() {
+  printf 'PASS: %s\n' "$1"
+}
+
+require_command() {
+  command_name="$1"
+
+  if command \
+    -v \
+    "$command_name" \
+    > /dev/null \
+    2>&1; then
+    return 0
+  fi
+
+  fail_check "required command is unavailable: ${command_name}"
+  return 1
+}
+
+clean_git() {
+  (
+    variable=""
+
+    while IFS= read -r variable; do
+      unset "$variable"
+    done < <(
+      git \
+        rev-parse \
+        --local-env-vars
+    )
+
+    command \
+      git \
+      "$@"
+  )
+}
+
+discover_source_environment() {
+  candidates=()
+  current_path=""
+  current_head=""
+
+  while IFS= read -r line; do
+    case "$line" in
+      worktree\ *)
+        current_path="${line#worktree }"
+        ;;
+      HEAD\ *)
+        current_head="${line#HEAD }"
+        ;;
+      '')
+        if [ "$current_head" = "$SOURCE_ENV_COMMIT" ] &&
+          [ -n "$current_path" ] &&
+          [ -x "${current_path}/tool/go" ]; then
+          candidate_tree="$(
+            clean_git \
+              -C "$current_path" \
+              rev-parse \
+              'HEAD^{tree}' \
+              2> /dev/null ||
+              true
+          )"
+
+          candidate_status="$(
+            clean_git \
+              -C "$current_path" \
+              status \
+              --short \
+              --untracked-files=all \
+              2> /dev/null ||
+              true
+          )"
+
+          if [ "$candidate_tree" = "$SOURCE_ENV_TREE" ] &&
+            [ -z "$candidate_status" ]; then
+            candidates+=("$current_path")
+          fi
+        fi
+
+        current_path=""
+        current_head=""
+        ;;
+    esac
+  done < <(
+    clean_git \
+      -C "$REPO_ROOT" \
+      worktree \
+      list \
+      --porcelain
+
+    printf '\n'
+  )
+
+  if [ "${#candidates[@]}" -eq 1 ]; then
+    SOURCE_ENV_ROOT="${candidates[0]}"
+    printf 'Auto-discovered source environment: %s\n' "$SOURCE_ENV_ROOT"
+    return 0
+  fi
+
+  if [ "${#candidates[@]}" -eq 0 ]; then
+    echo \
+      "FAIL: no clean registered worktree matches the pinned source commit and tree." \
+      >&2
+    return 1
+  fi
+
+  printf \
+    'FAIL: %s clean registered worktrees match the pinned source environment; pass --source-environment explicitly.\n' \
+    "${#candidates[@]}" \
+    >&2
+  printf 'Candidates:\n' >&2
+  printf '  %s\n' "${candidates[@]}" >&2
+  return 1
+}
+
+if [ -z "$SOURCE_ENV_ROOT" ]; then
+  if ! discover_source_environment; then
+    usage >&2
+    exit 1
+  fi
+fi
+
+if [ ! -d "$SOURCE_ENV_ROOT/.git" ] &&
+  [ ! -f "$SOURCE_ENV_ROOT/.git" ]; then
+  echo "FAIL: source environment is not a Git worktree: ${SOURCE_ENV_ROOT}" >&2
+  exit 1
+fi
+
+PINNED_GO="${SOURCE_ENV_ROOT}/tool/go"
+
+if [ ! -x "$PINNED_GO" ]; then
+  echo "FAIL: repository-pinned Go entry point is unavailable: ${PINNED_GO}" >&2
+  exit 1
+fi
+
+SOURCE_ENV_HEAD="$(
+  clean_git \
+    -C "$SOURCE_ENV_ROOT" \
+    rev-parse \
+    HEAD
+)"
+
+SOURCE_ENV_TREE_ACTUAL="$(
+  clean_git \
+    -C "$SOURCE_ENV_ROOT" \
+    rev-parse \
+    'HEAD^{tree}'
+)"
+
+SOURCE_ENV_STATUS="$(
+  clean_git \
+    -C "$SOURCE_ENV_ROOT" \
+    status \
+    --short \
+    --untracked-files=all
+)"
+
+if [ "$SOURCE_ENV_HEAD" != "$SOURCE_ENV_COMMIT" ]; then
+  echo \
+    "FAIL: source environment HEAD is ${SOURCE_ENV_HEAD}, expected ${SOURCE_ENV_COMMIT}." \
+    >&2
+  exit 1
+fi
+
+if [ "$SOURCE_ENV_TREE_ACTUAL" != "$SOURCE_ENV_TREE" ]; then
+  echo \
+    "FAIL: source environment tree is ${SOURCE_ENV_TREE_ACTUAL}, expected ${SOURCE_ENV_TREE}." \
+    >&2
+  exit 1
+fi
+
+if [ -n "$SOURCE_ENV_STATUS" ]; then
+  printf 'Observed source-environment status:\n%s\n' "$SOURCE_ENV_STATUS" >&2
+  echo "FAIL: source environment is not clean." >&2
+  exit 1
+fi
+
+printf '=== Repository-pinned build environment ===\n'
+printf 'Source environment: %s\n' "$SOURCE_ENV_ROOT"
+printf 'Source commit:      %s\n' "$SOURCE_ENV_HEAD"
+printf 'Source tree:        %s\n' "$SOURCE_ENV_TREE_ACTUAL"
+printf 'Pinned Go:          %s\n' "$PINNED_GO"
+printf 'Pinned Go version:  %s\n' "$("$PINNED_GO" version)"
+
+github_api() {
+  api_path="$1"
+
+  if [ -n "${GH_TOKEN:-}" ]; then
+    GH_TOKEN="$GH_TOKEN" \
+      gh \
+      api \
+      "$api_path"
+  else
+    gh \
+      api \
+      "$api_path"
+  fi
+}
+
+install_shellcheck() {
+  mkdir -p \
+    "$BIN_ROOT"
+
+  target="${BIN_ROOT}/shellcheck"
+
+  if [ -x "$target" ] &&
+    "$target" \
+      --version |
+    grep \
+      -Fq \
+      "version: ${SHELLCHECK_VERSION#v}"; then
+    return 0
+  fi
+
+  require_command gh || return 1
+  require_command curl || return 1
+  require_command python3 || return 1
+  require_command sha256sum || return 1
+
+  case "$(uname -m)" in
+    x86_64 | amd64)
+      release_arch="x86_64"
+      ;;
+    aarch64 | arm64)
+      release_arch="aarch64"
+      ;;
+    *)
+      fail_check "unsupported ShellCheck bootstrap architecture: $(uname -m)"
+      return 1
+      ;;
+  esac
+
+  release_json="$(
+    mktemp \
+      "${TMPDIR:-/tmp}/shellcheck-release.XXXXXX"
+  )"
+
+  archive="$(
+    mktemp \
+      "${TMPDIR:-/tmp}/shellcheck-archive.XXXXXX"
+  )"
+
+  extract_root="$(
+    mktemp \
+      -d \
+      "${TMPDIR:-/tmp}/shellcheck-extract.XXXXXX"
+  )"
+
+  if ! github_api \
+    "repos/koalaman/shellcheck/releases/tags/${SHELLCHECK_VERSION}" \
+    > "$release_json"; then
+    rm -f \
+      "$release_json" \
+      "$archive"
+    rm -rf \
+      "$extract_root"
+    fail_check "unable to retrieve ShellCheck release metadata"
+    return 1
+  fi
+
+  asset_data="$(
+    python3 \
+      - \
+      "$release_json" \
+      "$SHELLCHECK_VERSION" \
+      "$release_arch" << 'PY'
+import json
+import sys
+from pathlib import Path
+
+data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+version = sys.argv[2]
+arch = sys.argv[3]
+expected = f"shellcheck-{version}.linux.{arch}.tar.xz"
+
+matches = [
+    asset
+    for asset in data.get("assets", [])
+    if asset.get("name") == expected
+]
+
+if len(matches) != 1:
+    raise SystemExit(
+        f"expected exactly one ShellCheck asset named {expected}, "
+        f"found {len(matches)}"
+    )
+
+asset = matches[0]
+digest = asset.get("digest") or ""
+
+if not digest.startswith("sha256:"):
+    raise SystemExit("ShellCheck release asset lacks a SHA-256 digest")
+
+print(asset["browser_download_url"])
+print(digest.removeprefix("sha256:"))
+PY
+  )"
+
+  asset_rc=$?
+
+  if [ "$asset_rc" -ne 0 ]; then
+    rm -f \
+      "$release_json" \
+      "$archive"
+    rm -rf \
+      "$extract_root"
+    fail_check "unable to select a checksum-bearing ShellCheck asset"
+    return 1
+  fi
+
+  asset_url="$(
+    printf '%s\n' \
+      "$asset_data" |
+      sed \
+        -n \
+        '1p'
+  )"
+
+  asset_sha="$(
+    printf '%s\n' \
+      "$asset_data" |
+      sed \
+        -n \
+        '2p'
+  )"
+
+  if ! curl \
+    --fail \
+    --location \
+    --silent \
+    --show-error \
+    "$asset_url" \
+    --output \
+    "$archive"; then
+    rm -f \
+      "$release_json" \
+      "$archive"
+    rm -rf \
+      "$extract_root"
+    fail_check "unable to download ShellCheck release asset"
+    return 1
+  fi
+
+  observed_sha="$(
+    sha256sum \
+      "$archive" |
+      awk \
+        '{ print $1 }'
+  )"
+
+  if [ "$observed_sha" != "$asset_sha" ]; then
+    rm -f \
+      "$release_json" \
+      "$archive"
+    rm -rf \
+      "$extract_root"
+    fail_check "ShellCheck release asset checksum mismatch"
+    return 1
+  fi
+
+  if ! python3 \
+    - \
+    "$archive" \
+    "$extract_root" << 'PY'; then
+import sys
+import tarfile
+from pathlib import Path
+
+archive = Path(sys.argv[1])
+root = Path(sys.argv[2]).resolve()
+
+with tarfile.open(archive, "r:xz") as handle:
+    for member in handle.getmembers():
+        destination = (root / member.name).resolve()
+
+        if root not in destination.parents and destination != root:
+            raise SystemExit("unsafe path in ShellCheck archive")
+
+    handle.extractall(root)
+PY
+    rm -f \
+      "$release_json" \
+      "$archive"
+    rm -rf \
+      "$extract_root"
+    fail_check "unable to extract ShellCheck release asset"
+    return 1
+  fi
+
+  extracted="$(
+    find \
+      "$extract_root" \
+      -type f \
+      -name shellcheck \
+      -print \
+      -quit
+  )"
+
+  if [ -z "$extracted" ]; then
+    rm -f \
+      "$release_json" \
+      "$archive"
+    rm -rf \
+      "$extract_root"
+    fail_check "ShellCheck binary is absent from the release asset"
+    return 1
+  fi
+
+  install \
+    -m \
+    0755 \
+    "$extracted" \
+    "$target"
+
+  rm -f \
+    "$release_json" \
+    "$archive"
+  rm -rf \
+    "$extract_root"
+
+  "$target" \
+    --version \
+    > /dev/null
+}
+
+install_go_tool() {
+  binary="$1"
+  module="$2"
+  version="$3"
+
+  mkdir -p \
+    "$BIN_ROOT"
+
+  target="${BIN_ROOT}/${binary}"
+
+  if [ -x "$target" ]; then
+    return 0
+  fi
+
+  GOBIN="$BIN_ROOT" \
+    "$PINNED_GO" \
+    install \
+    "${module}@${version}"
+}
+
+write_text_validator() {
+  mkdir -p \
+    "$(dirname "$TEXT_VALIDATOR")"
+
+  cat > "$TEXT_VALIDATOR" << 'GO'
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"unicode/utf8"
+
+	yaml "go.yaml.in/yaml/v3"
+)
+
+var excluded = map[string]bool{
+	".git":               true,
+	".build-environment": true,
+	"build":              true,
+	"dist":               true,
+	"node_modules":       true,
+	"out":                true,
+}
+
+func main() {
+	if len(os.Args) != 2 {
+		fmt.Fprintln(os.Stderr, "usage: validate-text REPOSITORY_ROOT")
+		os.Exit(2)
+	}
+
+	root, err := filepath.Abs(os.Args[1])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	failures := 0
+
+	err = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+
+		if entry.IsDir() {
+			if path != root && excluded[entry.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		extension := strings.ToLower(filepath.Ext(path))
+
+		switch extension {
+		case ".md":
+			failures += validateText(path, false)
+		case ".yaml", ".yml":
+			fileFailures := validateText(path, true)
+			failures += fileFailures
+
+			if fileFailures == 0 {
+				failures += validateYAML(path)
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	if failures != 0 {
+		fmt.Fprintf(os.Stderr, "text-validation failures: %d\n", failures)
+		os.Exit(1)
+	}
+
+	fmt.Println("text-validation failures: 0")
+}
+
+func validateText(path string, rejectTabs bool) int {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Printf("%s: read failure: %v\n", path, err)
+		return 1
+	}
+
+	failures := 0
+
+	if !utf8.Valid(data) {
+		fmt.Printf("%s: invalid UTF-8\n", path)
+		failures++
+	}
+
+	if bytes.Contains(data, []byte{'\r'}) {
+		fmt.Printf("%s: contains carriage returns\n", path)
+		failures++
+	}
+
+	if len(data) == 0 || data[len(data)-1] != '\n' {
+		fmt.Printf("%s: missing final newline\n", path)
+		failures++
+	}
+
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	lineNumber := 0
+	blankRun := 0
+
+	for scanner.Scan() {
+		lineNumber++
+		line := scanner.Text()
+
+		if strings.TrimRight(line, " \t") != line {
+			fmt.Printf("%s:%d: trailing whitespace\n", path, lineNumber)
+			failures++
+		}
+
+		if rejectTabs && strings.ContainsRune(line, '\t') {
+			fmt.Printf("%s:%d: YAML contains a tab character\n", path, lineNumber)
+			failures++
+		}
+
+		if line == "" {
+			blankRun++
+			if blankRun > 2 {
+				fmt.Printf("%s:%d: more than two consecutive blank lines\n", path, lineNumber)
+				failures++
+			}
+		} else {
+			blankRun = 0
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		fmt.Printf("%s: scan failure: %v\n", path, err)
+		failures++
+	}
+
+	return failures
+}
+
+func validateYAML(path string) int {
+	handle, err := os.Open(path)
+	if err != nil {
+		fmt.Printf("%s: open failure: %v\n", path, err)
+		return 1
+	}
+	defer handle.Close()
+
+	decoder := yaml.NewDecoder(handle)
+	document := 0
+
+	for {
+		var value any
+		err := decoder.Decode(&value)
+
+		if err == io.EOF {
+			break
+		}
+
+		document++
+
+		if err != nil {
+			fmt.Printf("%s: YAML document %d: %v\n", path, document, err)
+			return 1
+		}
+	}
+
+	return 0
+}
+GO
+}
+
+if [ "$BOOTSTRAP" -eq 1 ]; then
+  printf '\n=== Bootstrap pinned validators ===\n'
+
+  install_shellcheck ||
+    fail_check "ShellCheck bootstrap failed"
+
+  install_go_tool \
+    shfmt \
+    mvdan.cc/sh/v3/cmd/shfmt \
+    "$SHFMT_VERSION" ||
+    fail_check "shfmt bootstrap failed"
+
+  install_go_tool \
+    actionlint \
+    github.com/rhysd/actionlint/cmd/actionlint \
+    "$ACTIONLINT_VERSION" ||
+    fail_check "actionlint bootstrap failed"
+
+  write_text_validator
+fi
+
+export PATH="${BIN_ROOT}:${PATH}"
+
+printf '\n=== Validator availability ===\n'
+
+for tool in \
+  shellcheck \
+  shfmt \
+  actionlint; do
+  require_command \
+    "$tool" ||
+    true
+done
+
+if [ ! -s "$TEXT_VALIDATOR" ]; then
+  fail_check "repository text-validator source is unavailable: ${TEXT_VALIDATOR}"
+fi
+
+if [ "$FAILURES" -ne 0 ]; then
+  echo "STOP: required validators are unavailable."
+  exit "$FAILURES"
+fi
+
+printf 'ShellCheck: %s\n' "$(
+  shellcheck \
+    --version |
+    awk \
+      -F': ' \
+      '$1 == "version" { print $2 }'
+)"
+printf 'shfmt:      %s\n' "$(
+  shfmt \
+    --version
+)"
+printf 'actionlint: %s\n' "$(
+  actionlint \
+    -version
+)"
+
+MANAGED_SHELL=(
+  ".githooks/pre-commit"
+  ".githooks/commit-msg"
+  "scripts/validate-repository.sh"
+)
+
+cd \
+  "$REPO_ROOT" ||
+  exit 1
+
+if [ "$FORMAT_MANAGED" -eq 1 ]; then
+  printf '\n=== Format governance-owned shell ===\n'
+
+  shfmt \
+    -w \
+    -ln \
+    bash \
+    -i \
+    2 \
+    -ci \
+    -sr \
+    "${MANAGED_SHELL[@]}"
+fi
+
+printf '\n=== Shell syntax ===\n'
+
+SHELL_FILES=()
+
+while IFS= read -r -d '' path; do
+  SHELL_FILES+=("$path")
+done < <(
+  find \
+    . \
+    -type f \
+    \( \
+    -name '*.sh' \
+    -o \
+    -name '*.bash' \
+    \) \
+    -not \
+    -path './.git/*' \
+    -not \
+    -path './.build-environment/*' \
+    -not \
+    -path './build/*' \
+    -not \
+    -path './dist/*' \
+    -not \
+    -path './out/*' \
+    -not \
+    -path './node_modules/*' \
+    -print0
+)
+
+for hook in \
+  .githooks/pre-commit \
+  .githooks/commit-msg; do
+  if [ -f "$hook" ]; then
+    SHELL_FILES+=("$hook")
+  fi
+done
+
+SYNTAX_FAILURES=0
+
+for path in "${SHELL_FILES[@]}"; do
+  if ! bash \
+    -n \
+    "$path"; then
+    printf 'FAIL: shell syntax: %s\n' "$path"
+    SYNTAX_FAILURES=$((SYNTAX_FAILURES + 1))
+  fi
+done
+
+if [ "$SYNTAX_FAILURES" -eq 0 ]; then
+  pass_check "all inventoried shell files pass Bash syntax validation."
+else
+  fail_check "${SYNTAX_FAILURES} shell file(s) failed syntax validation"
+fi
+
+printf '\n=== ShellCheck for governance-owned shell ===\n'
+
+if shellcheck \
+  --severity=error \
+  "${MANAGED_SHELL[@]}"; then
+  pass_check "ShellCheck error-level validation passed."
+else
+  fail_check "ShellCheck error-level validation failed"
+fi
+
+printf '\n=== Managed shell formatting ===\n'
+
+if shfmt \
+  -d \
+  -ln \
+  bash \
+  -i \
+  2 \
+  -ci \
+  -sr \
+  "${MANAGED_SHELL[@]}"; then
+  pass_check "governance-owned shell formatting passed."
+else
+  fail_check "governance-owned shell formatting failed"
+fi
+
+printf '\n=== Markdown and YAML ===\n'
+
+if (
+  cd \
+    "$SOURCE_ENV_ROOT" &&
+    GOFLAGS='-mod=readonly' \
+      "$PINNED_GO" \
+      run \
+      "$TEXT_VALIDATOR" \
+      "$REPO_ROOT"
+); then
+  pass_check "repository-owned Markdown and YAML validation passed."
+else
+  fail_check "repository-owned Markdown or YAML validation failed"
+fi
+
+printf '\n=== GitHub Actions ===\n'
+
+WORKFLOW_FILES=()
+
+while IFS= read -r -d '' path; do
+  WORKFLOW_FILES+=("$path")
+done < <(
+  find \
+    .github/workflows \
+    -maxdepth 1 \
+    -type f \
+    \( \
+    -name '*.yml' \
+    -o \
+    -name '*.yaml' \
+    \) \
+    -print0 \
+    2> /dev/null
+)
+
+if [ "${#WORKFLOW_FILES[@]}" -eq 0 ]; then
+  fail_check "no GitHub Actions workflow is present"
+elif actionlint \
+  "${WORKFLOW_FILES[@]}"; then
+  pass_check "GitHub Actions syntax validation passed."
+else
+  fail_check "GitHub Actions syntax validation failed"
+fi
+
+if python3 \
+  - "${WORKFLOW_FILES[@]}" << 'PY'; then
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+failures = 0
+
+for raw in sys.argv[1:]:
+    path = Path(raw)
+    content = path.read_text(encoding="utf-8")
+
+    for line_number, line in enumerate(content.splitlines(), start=1):
+        match = re.match(r"^\s*-\s+uses:\s+([^#\s]+)", line)
+
+        if not match:
+            continue
+
+        value = match.group(1)
+
+        if value.startswith("./") or value.startswith("docker://"):
+            continue
+
+        if not re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", value):
+            print(
+                f"{path}:{line_number}: external Action is not pinned "
+                f"to a full commit SHA: {value}"
+            )
+            failures += 1
+
+raise SystemExit(0 if failures == 0 else 1)
+PY
+  pass_check "external Actions are pinned to full commit SHAs."
+else
+  fail_check "one or more external Actions are not pinned"
+fi
+
+printf '\n=== Git whitespace ===\n'
+
+if git \
+  diff \
+  --check &&
+  git \
+    diff \
+    --cached \
+    --check; then
+  pass_check "Git staged and unstaged whitespace validation passed."
+else
+  fail_check "Git staged or unstaged whitespace validation failed"
+fi
+
+printf '\n=== Required governance files ===\n'
+
+REQUIRED_FILES=(
+  LICENSE
+  CONTRIBUTING.md
+  SECURITY.md
+  .github/CODEOWNERS
+  .github/PULL_REQUEST_TEMPLATE.md
+  .editorconfig
+  .shellcheckrc
+  .markdownlint-cli2.yaml
+  .yamllint.yml
+  .githooks/pre-commit
+  .githooks/commit-msg
+  scripts/validate-repository.sh
+  .github/workflows/validate.yml
+  docs/governance/repository-governance.md
+  docs/governance/tooling.md
+)
+
+for path in "${REQUIRED_FILES[@]}"; do
+  if [ -s "$path" ]; then
+    pass_check "required file exists: ${path}"
+  else
+    fail_check "required file is missing or empty: ${path}"
+  fi
+done
+
+printf '\n=== Validation result ===\n'
+printf 'Failures: %s\n' "$FAILURES"
+
+if [ "$FAILURES" -eq 0 ]; then
+  echo "PASS: repository governance validation completed."
+else
+  echo "STOP: repository governance validation failed."
+fi
+
+exit "$FAILURES"

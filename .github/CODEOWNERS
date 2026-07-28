@@ -1,0 +1,19 @@
+# Default repository owner
+* @a-t-eight
+
+# Governance and automation
+/.github/ @a-t-eight
+/.githooks/ @a-t-eight
+/AGENTS.md @a-t-eight
+/CONTRIBUTING.md @a-t-eight
+/SECURITY.md @a-t-eight
+/LICENSE @a-t-eight
+/docs/governance/ @a-t-eight
+
+# Release, packaging and evidence
+/patches/ @a-t-eight
+/scripts/ @a-t-eight
+/tests/releases/ @a-t-eight
+/docs/releases/ @a-t-eight
+/support-matrix.yaml @a-t-eight
+/build-environment/ @a-t-eight

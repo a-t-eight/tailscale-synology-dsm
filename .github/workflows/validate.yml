@@ -1,0 +1,43 @@
+name: Validate repository
+
+on:
+  pull_request:
+  push:
+    branches:
+      - synology/main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repository-governance:
+    name: repository-governance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out proposed control tree
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Check out pinned Tailscale build environment
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: 20c86229955a3d03de01901aee1499cab87c571d
+          path: .build-environment/tailscale-source
+          persist-credentials: false
+
+      - name: Validate repository
+        shell: bash
+        run: |
+          bash scripts/validate-repository.sh \
+            --source-environment \
+            "$GITHUB_WORKSPACE/.build-environment/tailscale-source" \
+            --bootstrap
