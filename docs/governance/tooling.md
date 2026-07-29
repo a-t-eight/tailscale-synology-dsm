@@ -49,6 +49,7 @@ pinned commit and tree.
 | ShellCheck | `0.11.0` | checksum-verified release binary |
 | shfmt | `3.13.1` | built with repository-pinned Go |
 | actionlint | `1.7.12` | built with repository-pinned Go |
+| Gitleaks | `8.30.1` | checksum-verified official release binary |
 | text and YAML validator | repository-owned Go source | run with repository-pinned Go |
 | actions/checkout | `v6.0.2`, full SHA in workflow | immutable Action reference |
 
@@ -69,6 +70,8 @@ bootstrap command to recreate it.
 - every Go build and `go run` operation uses the release worktree's `./tool/go`;
 - ShellCheck is verified against the SHA-256 digest from its GitHub release;
 - shfmt and actionlint use exact module versions;
+- Gitleaks uses an exact release version and a pinned platform-specific
+  SHA-256 that must match the GitHub release asset digest;
 - the repository-owned text validator uses dependencies already pinned by the
   accepted Tailscale source module;
 - external GitHub Actions are pinned to full commit SHAs;
@@ -111,3 +114,46 @@ committed. It is not a secret. The one-time repository variable
 `RELEASE_ALLOWED_SIGNERS_SHA256` contains only the file SHA-256 and is used only while
 the protected base is `c08cb5af27701615f6180d79182d2c8559c601bf` and lacks the file. Future CI reads
 the signer file directly from the protected base checkout.
+
+
+<!-- BEGIN TARGETED QUALITY TOOLING -->
+
+## Secret scanning
+
+Populate the pinned validator cache with:
+
+```text
+bash scripts/validate-repository.sh --bootstrap
+```
+
+Normal local and CI validation scans the current control tree. The pre-commit
+hook invokes:
+
+```text
+bash scripts/validate-repository.sh --fast --staged-secrets
+```
+
+The staged mode uses Gitleaks `git --pre-commit --staged` with redacted output.
+The repository does not create a Gitleaks baseline or ignore file
+automatically.
+
+## Static SPK inspection
+
+Inspect one package without installing it:
+
+```text
+bash scripts/release/inspect-spk.sh \
+  --spk /path/to/package.spk
+```
+
+Run the synthetic positive and negative fixture suite with:
+
+```text
+bash tests/quality/inspect-spk.sh
+```
+
+Candidate builds invoke the same inspector before generating accepted candidate
+checksums and metadata. The inspector uses only Python standard-library archive
+and JSON parsing plus `bash -n`; it never executes package content.
+
+<!-- END TARGETED QUALITY TOOLING -->

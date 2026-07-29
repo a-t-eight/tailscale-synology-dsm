@@ -65,7 +65,7 @@ cleanup() {
 
 numeric_value() {
   case "$1" in
-    ''|*[!0-9]*)
+    '' | *[!0-9]*)
       return 1
       ;;
     *)
@@ -78,12 +78,12 @@ read_pid_file() {
   local pid_file="$1"
 
   [ -r "$pid_file" ] ||
-  return 1
+    return 1
 
   /usr/bin/tr \
     -cd \
     '0-9' \
-    <"$pid_file"
+    < "$pid_file"
 }
 
 pid_file_is_running() {
@@ -94,18 +94,18 @@ pid_file_is_running() {
     read_pid_file \
       "$pid_file"
   )" ||
-  return 1
+    return 1
 
   [ -n "$pid" ] ||
-  return 1
+    return 1
 
   [ -d "/proc/${pid}" ] ||
-  return 1
+    return 1
 
   /bin/kill \
     -0 \
     "$pid" \
-    2>/dev/null
+    2> /dev/null
 }
 
 check_pid_file() {
@@ -144,8 +144,7 @@ check_pid_file() {
   if ! /bin/kill \
     -0 \
     "$pid" \
-    2>/dev/null
-  then
+    2> /dev/null; then
     fail_check "${description} PID ${pid} is not running"
 
     return
@@ -155,15 +154,14 @@ check_pid_file() {
     /usr/bin/tr \
       '\000' \
       ' ' \
-      <"/proc/${pid}/cmdline"
+      < "/proc/${pid}/cmdline"
   )"
 
   if /usr/bin/printf '%s\n' \
     "$command_line" |
     /bin/grep \
       -Fq \
-      "$expected_command"
-  then
+      "$expected_command"; then
     pass_check "${description} command line matches"
   else
     fail_check "${description} command line is unexpected: ${command_line}"
@@ -204,8 +202,7 @@ extract_self_id() {
     "$1"
 }
 
-while [ "$#" -gt 0 ]
-do
+while [ "$#" -gt 0 ]; do
   case "$1" in
     --package-root)
       [ "$#" -ge 2 ] || {
@@ -385,8 +382,7 @@ for REQUIRED_PATH in \
   "$BOOTSTRAP" \
   "$TAILSCALE" \
   "$TAILSCALED" \
-  "$STATE_FILE"
-do
+  "$STATE_FILE"; do
   if [ -e "$REQUIRED_PATH" ]; then
     pass_check "present: ${REQUIRED_PATH}"
   else
@@ -406,15 +402,14 @@ printf '\n=== Wait for runtime ===\n'
 ATTEMPT=1
 RUNTIME_READY=0
 
-while [ "$ATTEMPT" -le "$WAIT_ATTEMPTS" ]
-do
-  if \
+while [ "$ATTEMPT" -le "$WAIT_ATTEMPTS" ]; do
+  if
     pid_file_is_running "$TAILSCALED_PID_FILE" &&
-    [ -S "$SOCKET_FILE" ] &&
-    "$TAILSCALE" \
-      status \
-      >/dev/null \
-      2>&1
+      [ -S "$SOCKET_FILE" ] &&
+      "$TAILSCALE" \
+        status \
+        > /dev/null \
+        2>&1
   then
     RUNTIME_READY=1
     break
@@ -448,14 +443,12 @@ printf '%s\n' \
 for EXPECTED_STATUS in \
   'Privilege mode: root' \
   'Bootstrap state: current' \
-  'Runtime: running, UID=0'
-do
+  'Runtime: running, UID=0'; do
   if /usr/bin/printf '%s\n' \
     "$BOOTSTRAP_STATUS" |
     /bin/grep \
       -Fq \
-      "$EXPECTED_STATUS"
-  then
+      "$EXPECTED_STATUS"; then
     pass_check "$EXPECTED_STATUS"
   else
     fail_check "bootstrap status missing: ${EXPECTED_STATUS}"
@@ -478,8 +471,7 @@ if [ -n "$EXPECTED_COMMIT" ]; then
     "$VERSION_OUTPUT" |
     /bin/grep \
       -Fq \
-      "$EXPECTED_COMMIT"
-  then
+      "$EXPECTED_COMMIT"; then
     pass_check "installed binary identifies expected commit ${EXPECTED_COMMIT}"
   else
     fail_check "installed binary does not identify expected commit ${EXPECTED_COMMIT}"
@@ -515,8 +507,7 @@ if /usr/bin/printf '%s\n' \
   "$PACKAGE_STATUS" |
   /bin/grep \
     -Fq \
-    '"status":"running"'
-then
+    '"status":"running"'; then
   pass_check "DSM reports the package running"
 else
   fail_check "DSM does not report the package running"
@@ -533,8 +524,8 @@ if [ -n "$CANDIDATE_SPK" ] || [ -n "$EXPECTED_SPK_SHA256" ]; then
     ACTUAL_SPK_SHA256="$(
       /usr/bin/sha256sum \
         "$CANDIDATE_SPK" |
-      /usr/bin/awk \
-        '{print $1}'
+        /usr/bin/awk \
+          '{print $1}'
     )"
 
     if [ "$ACTUAL_SPK_SHA256" = "$EXPECTED_SPK_SHA256" ]; then
@@ -552,9 +543,8 @@ printf '\n=== Runtime identity and preferences ===\n'
 if "$TAILSCALE" \
   status \
   --json \
-  >"$STATUS_JSON" \
-  2>&1
-then
+  > "$STATUS_JSON" \
+  2>&1; then
   pass_check "status JSON captured"
 else
   fail_check "status JSON request failed"
@@ -563,9 +553,8 @@ fi
 if "$TAILSCALE" \
   debug \
   prefs \
-  >"$PREFS_JSON" \
-  2>&1
-then
+  > "$PREFS_JSON" \
+  2>&1; then
   pass_check "preferences captured"
 else
   fail_check "preferences request failed"
@@ -575,10 +564,10 @@ TAILSCALE_IPV4="$(
   "$TAILSCALE" \
     ip \
     -4 \
-    2>/dev/null |
-  /bin/sed \
-    -n \
-    '1p'
+    2> /dev/null |
+    /bin/sed \
+      -n \
+      '1p'
 )"
 
 SELF_ID="$(
@@ -605,13 +594,11 @@ fi
 if [ "${#EXPECTED_PREFS[@]}" -eq 0 ]; then
   echo "NOTICE: no additional preference assertions requested."
 else
-  for EXPECTED_PREF in "${EXPECTED_PREFS[@]}"
-  do
+  for EXPECTED_PREF in "${EXPECTED_PREFS[@]}"; do
     if /bin/grep \
       -Fq \
       "$EXPECTED_PREF" \
-      "$PREFS_JSON"
-    then
+      "$PREFS_JSON"; then
       pass_check "preference retained: ${EXPECTED_PREF}"
     else
       fail_check "expected preference missing: ${EXPECTED_PREF}"
@@ -631,8 +618,8 @@ if [ -n "$EXPECTED_STATE_SHA256" ] && [ -f "$STATE_FILE" ]; then
   ACTUAL_STATE_SHA256="$(
     /usr/bin/sha256sum \
       "$STATE_FILE" |
-    /usr/bin/awk \
-      '{print $1}'
+      /usr/bin/awk \
+        '{print $1}'
   )"
 
   if [ "$ACTUAL_STATE_SHA256" = "$EXPECTED_STATE_SHA256" ]; then
@@ -661,8 +648,7 @@ printf '\n=== Netfilter validation ===\n'
 for CHAIN_SPEC in \
   'filter ts-input' \
   'filter ts-forward' \
-  'nat ts-postrouting'
-do
+  'nat ts-postrouting'; do
   TABLE="${CHAIN_SPEC%% *}"
   CHAIN="${CHAIN_SPEC#* }"
 
@@ -671,9 +657,8 @@ do
     "$TABLE" \
     -S \
     "$CHAIN" \
-    >/dev/null \
-    2>&1
-  then
+    > /dev/null \
+    2>&1; then
     pass_check "${TABLE}/${CHAIN} exists"
   else
     fail_check "${TABLE}/${CHAIN} is missing"

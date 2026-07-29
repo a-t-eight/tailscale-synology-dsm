@@ -7,6 +7,7 @@ SOURCE_ENV_TREE="6d022c18f27a42aab553697c69c852bebd8594b8"
 SHELLCHECK_VERSION="v0.11.0"
 SHFMT_VERSION="v3.13.1"
 ACTIONLINT_VERSION="v1.7.12"
+GITLEAKS_VERSION="v8.30.1"
 
 REPO_ROOT="$(
   cd \
@@ -17,13 +18,14 @@ REPO_ROOT="$(
 SOURCE_ENV_ROOT="${TAILSCALE_SOURCE_ENVIRONMENT:-}"
 
 CACHE_ROOT="${XDG_CACHE_HOME:-${HOME}/.cache}/tailscale-synology-dsm/governance-tools"
-TOOLSET_ID="go-${SOURCE_ENV_COMMIT}-shellcheck-${SHELLCHECK_VERSION#v}-shfmt-${SHFMT_VERSION#v}-actionlint-${ACTIONLINT_VERSION#v}"
+TOOLSET_ID="go-${SOURCE_ENV_COMMIT}-shellcheck-${SHELLCHECK_VERSION#v}-shfmt-${SHFMT_VERSION#v}-actionlint-${ACTIONLINT_VERSION#v}-gitleaks-${GITLEAKS_VERSION#v}"
 BIN_ROOT="${CACHE_ROOT}/${TOOLSET_ID}/bin"
 TEXT_VALIDATOR="${CACHE_ROOT}/${TOOLSET_ID}/validate-text.go"
 
 BOOTSTRAP=0
 FAST=0
 FORMAT_MANAGED=0
+STAGED_SECRETS=0
 FAILURES=0
 
 usage() {
@@ -33,7 +35,8 @@ Usage:
     [--source-environment /path/to/exact-release-worktree] \
     [--bootstrap] \
     [--fast] \
-    [--format-managed]
+    [--format-managed] \
+    [--staged-secrets]
 
 Options:
   --source-environment
@@ -49,7 +52,11 @@ Options:
       Perform no network access. Require all validators to be cached.
 
   --format-managed
-      Format only governance-owned shell scripts before validation.
+      Format the complete repository-owned control-tree shell inventory.
+
+  --staged-secrets
+      Scan only the staged Git diff for secrets. This mode is used by the
+      repository-owned pre-commit hook.
 USAGE
 }
 
@@ -72,6 +79,9 @@ while [ "$#" -gt 0 ]; do
       ;;
     --format-managed)
       FORMAT_MANAGED=1
+      ;;
+    --staged-secrets)
+      STAGED_SECRETS=1
       ;;
     --help | -h)
       usage
@@ -523,6 +533,251 @@ PY
     > /dev/null
 }
 
+install_gitleaks() {
+  mkdir -p \
+    "$BIN_ROOT"
+
+  target="${BIN_ROOT}/gitleaks"
+
+  if [ -x "$target" ] &&
+    [ "$(
+      "$target" \
+        version
+    )" = "${GITLEAKS_VERSION#v}" ]; then
+    return 0
+  fi
+
+  require_command gh || return 1
+  require_command curl || return 1
+  require_command python3 || return 1
+  require_command sha256sum || return 1
+
+  case "$(uname -m)" in
+    x86_64 | amd64)
+      release_arch="x64"
+      pinned_sha="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+      ;;
+    aarch64 | arm64)
+      release_arch="arm64"
+      pinned_sha="e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080"
+      ;;
+    *)
+      fail_check "unsupported Gitleaks bootstrap architecture: $(uname -m)"
+      return 1
+      ;;
+  esac
+
+  release_json="$(
+    mktemp \
+      "${TMPDIR:-/tmp}/gitleaks-release.XXXXXX"
+  )"
+
+  archive="$(
+    mktemp \
+      "${TMPDIR:-/tmp}/gitleaks-archive.XXXXXX"
+  )"
+
+  extract_root="$(
+    mktemp \
+      -d \
+      "${TMPDIR:-/tmp}/gitleaks-extract.XXXXXX"
+  )"
+
+  if ! github_api \
+    "repos/gitleaks/gitleaks/releases/tags/${GITLEAKS_VERSION}" \
+    > "$release_json"; then
+    rm -f \
+      "$release_json" \
+      "$archive"
+    rm -rf \
+      "$extract_root"
+    fail_check "unable to retrieve Gitleaks release metadata"
+    return 1
+  fi
+
+  asset_data="$(
+    python3 \
+      - \
+      "$release_json" \
+      "$GITLEAKS_VERSION" \
+      "$release_arch" \
+      "$pinned_sha" << 'PY'
+import json
+import sys
+from pathlib import Path
+
+data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+version = sys.argv[2].removeprefix("v")
+arch = sys.argv[3]
+pinned_sha = sys.argv[4]
+expected = f"gitleaks_{version}_linux_{arch}.tar.gz"
+
+matches = [
+    asset
+    for asset in data.get("assets", [])
+    if asset.get("name") == expected
+]
+
+if len(matches) != 1:
+    raise SystemExit(
+        f"expected exactly one Gitleaks asset named {expected}, "
+        f"found {len(matches)}"
+    )
+
+asset = matches[0]
+digest = asset.get("digest") or ""
+
+if digest != f"sha256:{pinned_sha}":
+    raise SystemExit(
+        "Gitleaks release asset digest differs from the pinned SHA-256"
+    )
+
+print(asset["browser_download_url"])
+print(pinned_sha)
+PY
+  )"
+
+  asset_rc=$?
+
+  if [ "$asset_rc" -ne 0 ]; then
+    rm -f \
+      "$release_json" \
+      "$archive"
+    rm -rf \
+      "$extract_root"
+    fail_check "unable to select the pinned Gitleaks release asset"
+    return 1
+  fi
+
+  asset_url="$(
+    printf '%s\n' \
+      "$asset_data" |
+      sed \
+        -n \
+        '1p'
+  )"
+
+  asset_sha="$(
+    printf '%s\n' \
+      "$asset_data" |
+      sed \
+        -n \
+        '2p'
+  )"
+
+  if ! curl \
+    --fail \
+    --location \
+    --silent \
+    --show-error \
+    "$asset_url" \
+    --output \
+    "$archive"; then
+    rm -f \
+      "$release_json" \
+      "$archive"
+    rm -rf \
+      "$extract_root"
+    fail_check "unable to download Gitleaks release asset"
+    return 1
+  fi
+
+  observed_sha="$(
+    sha256sum \
+      "$archive" |
+      awk \
+        '{ print $1 }'
+  )"
+
+  if [ "$observed_sha" != "$asset_sha" ]; then
+    rm -f \
+      "$release_json" \
+      "$archive"
+    rm -rf \
+      "$extract_root"
+    fail_check "Gitleaks release asset checksum mismatch"
+    return 1
+  fi
+
+  if ! python3 \
+    - \
+    "$archive" \
+    "$extract_root" << 'PY'; then
+import sys
+import tarfile
+from pathlib import Path, PurePosixPath
+
+archive = Path(sys.argv[1])
+root = Path(sys.argv[2]).resolve()
+
+with tarfile.open(archive, "r:gz") as handle:
+    for member in handle.getmembers():
+        pure = PurePosixPath(member.name)
+
+        if (
+            pure.is_absolute()
+            or ".." in pure.parts
+            or "\\" in member.name
+            or member.issym()
+            or member.islnk()
+            or member.ischr()
+            or member.isblk()
+            or member.isfifo()
+        ):
+            raise SystemExit("unsafe member in Gitleaks archive")
+
+        destination = (root / member.name).resolve()
+
+        if root not in destination.parents and destination != root:
+            raise SystemExit("unsafe path in Gitleaks archive")
+
+    handle.extractall(root)
+PY
+    rm -f \
+      "$release_json" \
+      "$archive"
+    rm -rf \
+      "$extract_root"
+    fail_check "unable to extract Gitleaks release asset"
+    return 1
+  fi
+
+  extracted="$(
+    find \
+      "$extract_root" \
+      -type f \
+      -name gitleaks \
+      -print \
+      -quit
+  )"
+
+  if [ -z "$extracted" ]; then
+    rm -f \
+      "$release_json" \
+      "$archive"
+    rm -rf \
+      "$extract_root"
+    fail_check "Gitleaks binary is absent from the release asset"
+    return 1
+  fi
+
+  install \
+    -m \
+    0755 \
+    "$extracted" \
+    "$target"
+
+  rm -f \
+    "$release_json" \
+    "$archive"
+  rm -rf \
+    "$extract_root"
+
+  [ "$(
+    "$target" \
+      version
+  )" = "${GITLEAKS_VERSION#v}" ]
+}
 install_go_tool() {
   binary="$1"
   module="$2"
@@ -738,6 +993,9 @@ if [ "$BOOTSTRAP" -eq 1 ]; then
     "$ACTIONLINT_VERSION" ||
     fail_check "actionlint bootstrap failed"
 
+  install_gitleaks ||
+    fail_check "Gitleaks bootstrap failed"
+
   write_text_validator
 fi
 
@@ -748,7 +1006,8 @@ printf '\n=== Validator availability ===\n'
 for tool in \
   shellcheck \
   shfmt \
-  actionlint; do
+  actionlint \
+  gitleaks; do
   require_command \
     "$tool" ||
     true
@@ -778,32 +1037,14 @@ printf 'actionlint: %s\n' "$(
   actionlint \
     -version
 )"
-
-MANAGED_SHELL=(
-  ".githooks/pre-commit"
-  ".githooks/commit-msg"
-  "scripts/validate-repository.sh"
-)
+printf 'Gitleaks:   %s\n' "$(
+  gitleaks \
+    version
+)"
 
 cd \
   "$REPO_ROOT" ||
   exit 1
-
-if [ "$FORMAT_MANAGED" -eq 1 ]; then
-  printf '\n=== Format governance-owned shell ===\n'
-
-  shfmt \
-    -w \
-    -ln \
-    bash \
-    -i \
-    2 \
-    -ci \
-    -sr \
-    "${MANAGED_SHELL[@]}"
-fi
-
-printf '\n=== Shell syntax ===\n'
 
 SHELL_FILES=()
 
@@ -841,6 +1082,34 @@ for hook in \
   fi
 done
 
+mapfile -t SHELL_FILES < <(
+  printf '%s\n' \
+    "${SHELL_FILES[@]}" |
+    sort \
+      -u
+)
+
+if [ "${#SHELL_FILES[@]}" -eq 0 ]; then
+  fail_check "repository-owned shell inventory is empty"
+fi
+
+if [ "$FORMAT_MANAGED" -eq 1 ] &&
+  [ "${#SHELL_FILES[@]}" -gt 0 ]; then
+  printf '\n=== Format repository-owned shell ===\n'
+
+  shfmt \
+    -w \
+    -ln \
+    bash \
+    -i \
+    2 \
+    -ci \
+    -sr \
+    "${SHELL_FILES[@]}"
+fi
+
+printf '\n=== Shell syntax ===\n'
+
 SYNTAX_FAILURES=0
 
 for path in "${SHELL_FILES[@]}"; do
@@ -858,30 +1127,32 @@ else
   fail_check "${SYNTAX_FAILURES} shell file(s) failed syntax validation"
 fi
 
-printf '\n=== ShellCheck for governance-owned shell ===\n'
+printf '\n=== ShellCheck for repository-owned shell ===\n'
 
-if shellcheck \
-  --severity=error \
-  "${MANAGED_SHELL[@]}"; then
-  pass_check "ShellCheck error-level validation passed."
+if [ "${#SHELL_FILES[@]}" -gt 0 ] &&
+  shellcheck \
+    --severity=error \
+    "${SHELL_FILES[@]}"; then
+  pass_check "complete control-tree ShellCheck error-level validation passed."
 else
-  fail_check "ShellCheck error-level validation failed"
+  fail_check "control-tree ShellCheck error-level validation failed"
 fi
 
-printf '\n=== Managed shell formatting ===\n'
+printf '\n=== Repository-owned shell formatting ===\n'
 
-if shfmt \
-  -d \
-  -ln \
-  bash \
-  -i \
-  2 \
-  -ci \
-  -sr \
-  "${MANAGED_SHELL[@]}"; then
-  pass_check "governance-owned shell formatting passed."
+if [ "${#SHELL_FILES[@]}" -gt 0 ] &&
+  shfmt \
+    -d \
+    -ln \
+    bash \
+    -i \
+    2 \
+    -ci \
+    -sr \
+    "${SHELL_FILES[@]}"; then
+  pass_check "complete control-tree shell formatting passed."
 else
-  fail_check "governance-owned shell formatting failed"
+  fail_check "control-tree shell formatting failed"
 fi
 
 printf '\n=== Markdown and YAML ===\n'
@@ -898,6 +1169,110 @@ if (
   pass_check "repository-owned Markdown and YAML validation passed."
 else
   fail_check "repository-owned Markdown or YAML validation failed"
+fi
+
+printf '\n=== Secret scanning ===\n'
+
+if [ "$STAGED_SECRETS" -eq 1 ]; then
+  if gitleaks \
+    git \
+    --pre-commit \
+    --staged \
+    --no-banner \
+    --no-color \
+    --redact \
+    --verbose \
+    "$REPO_ROOT"; then
+    pass_check "staged Git diff contains no detected secret."
+  else
+    fail_check "staged Git diff secret scan failed"
+  fi
+else
+  SECRET_SCAN_ROOT="$(
+    mktemp \
+      -d \
+      "${TMPDIR:-/tmp}/tailscale-control-tree-secrets.XXXXXX"
+  )"
+
+  if python3 \
+    - \
+    "$REPO_ROOT" \
+    "$SECRET_SCAN_ROOT" << 'PY'; then
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+destination = Path(sys.argv[2]).resolve()
+
+result = subprocess.run(
+    [
+        "git",
+        "-C",
+        str(root),
+        "ls-files",
+        "-z",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+    ],
+    check=True,
+    capture_output=True,
+)
+
+for raw in result.stdout.split(b"\0"):
+    if not raw:
+        continue
+
+    relative = Path(os.fsdecode(raw))
+
+    if relative.is_absolute() or ".." in relative.parts:
+        raise SystemExit(f"unsafe Git path in secret scan: {relative}")
+
+    source = root / relative
+    target = destination / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    if source.is_symlink():
+        target.write_text(
+            os.readlink(source) + "\n",
+            encoding="utf-8",
+        )
+    elif source.is_file():
+        shutil.copy2(source, target)
+PY
+    if gitleaks \
+      dir \
+      --no-banner \
+      --no-color \
+      --redact \
+      --verbose \
+      "$SECRET_SCAN_ROOT"; then
+      pass_check "current control tree contains no detected secret."
+    else
+      fail_check "current control-tree secret scan failed"
+    fi
+  else
+    fail_check "current control-tree secret-scan staging failed"
+  fi
+
+  rm \
+    -rf \
+    -- \
+    "$SECRET_SCAN_ROOT"
+fi
+
+printf '\n=== Static SPK inspector tests ===\n'
+
+if bash \
+  tests/quality/inspect-spk.sh; then
+  pass_check "synthetic static SPK inspection tests passed."
+else
+  fail_check "synthetic static SPK inspection tests failed"
 fi
 
 printf '\n=== GitHub Actions ===\n'
@@ -997,6 +1372,8 @@ REQUIRED_FILES=(
   .githooks/pre-commit
   .githooks/commit-msg
   scripts/validate-repository.sh
+  scripts/release/inspect-spk.sh
+  tests/quality/inspect-spk.sh
   .github/workflows/validate.yml
   docs/governance/repository-governance.md
   docs/governance/tooling.md

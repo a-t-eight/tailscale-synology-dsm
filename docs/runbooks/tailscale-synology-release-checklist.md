@@ -25,10 +25,13 @@
 
 ## Validation and build
 
+- [ ] Complete control-tree Bash syntax, ShellCheck and shfmt validation passed.
+- [ ] Current-tree and staged-diff secret scans passed without an automatic baseline.
+- [ ] Synthetic positive and malicious SPK inspector fixtures passed.
 - [ ] Synology shell syntax passed.
 - [ ] Repository-pinned Go tests passed.
 - [ ] Candidate build used the source worktree's `./tool/go`.
-- [ ] Package metadata and payload inspection passed.
+- [ ] Static package structure, `INFO`, payload, lifecycle shell and JSON inspection passed.
 - [ ] Independent rebuilds are byte-for-byte reproducible.
 - [ ] Every candidate or reference variant has a checksum.
 

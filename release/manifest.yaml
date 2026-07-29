@@ -16,6 +16,7 @@
     "release_tree": "6d022c18f27a42aab553697c69c852bebd8594b8"
   },
   "package": {
+    "identifier": "Tailscale",
     "version": "1.98.96",
     "build_number": "700098096",
     "full_version": "1.98.96-700098096",
@@ -48,7 +49,8 @@
     "build_entrypoint": "tool/build-synology-root-bootstrap.sh",
     "build_output": "build/synology/v1.98.9-final",
     "evidence": "tests/releases/v1.98.9",
-    "release_record": "docs/releases/v1.98.96-r1/README.md"
+    "release_record": "docs/releases/v1.98.96-r1/README.md",
+    "spk_inspector": "scripts/release/inspect-spk.sh"
   },
   "validation": {
     "go_packages": [
@@ -84,7 +86,20 @@
     "ssh_signer_principals": [
       "andreeww.trieu@gmail.com"
     ],
-    "ssh_trust_bootstrap_base_commit": "c08cb5af27701615f6180d79182d2c8559c601bf"
+    "ssh_trust_bootstrap_base_commit": "c08cb5af27701615f6180d79182d2c8559c601bf",
+    "spk_required_members": [
+      "INFO",
+      "package.tgz",
+      "scripts/start-stop-status",
+      "conf/privilege",
+      "conf/resource"
+    ],
+    "spk_required_info_fields": [
+      "package",
+      "version",
+      "arch",
+      "os_min_ver"
+    ]
   },
   "safety": {
     "allow_stable_publication": false,

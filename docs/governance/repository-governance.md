@@ -55,17 +55,16 @@ exactly one clean registered worktree at the accepted release commit and tree.
 CI supplies the worktree path explicitly. Every Go operation uses that
 worktree's `./tool/go`.
 
-The initial baseline applies:
+The canonical validator applies:
 
-- Bash syntax validation to the shell inventory;
-- ShellCheck error-level analysis to governance-owned shell scripts;
-- shfmt enforcement to governance-owned shell scripts;
+- Bash syntax, ShellCheck error-level analysis and shfmt enforcement to one
+  deterministic inventory of all repository-owned control-tree shell;
 - repository-owned Markdown and YAML validation through the pinned
   Tailscale Go environment;
-- actionlint and immutable Action-reference checks to workflows.
-
-Formatting enforcement can expand to legacy scripts only through a separately
-reviewed change.
+- actionlint and immutable Action-reference checks to workflows;
+- Gitleaks scanning to the current control tree in CI and to the staged diff
+  from the repository-owned pre-commit hook;
+- synthetic positive and negative tests for the non-installing SPK inspector.
 
 ## Automation boundary
 
@@ -137,3 +136,32 @@ The bootstrap PR is the sole exception because protected base
 `c08cb5af27701615f6180d79182d2c8559c601bf` predates the signer file. During that PR,
 `RELEASE_ALLOWED_SIGNERS_SHA256` must equal the signer file SHA-256. Remove the
 repository variable immediately after the bootstrap commit is integrated.
+
+
+<!-- BEGIN TARGETED QUALITY CONTROLS -->
+
+## Targeted quality and package-inspection controls
+
+The repository uses one canonical shell inventory for Bash syntax, ShellCheck
+and shfmt. Imported source worktrees remain outside this control-tree
+formatting boundary.
+
+Gitleaks is pinned as a checksum-verified CLI release. CI scans the current
+control tree. The pre-commit hook scans only the staged Git diff with redacted
+output. No automatic baseline or ignore file is generated; any future
+suppression requires explicit review.
+
+Candidate SPKs are statically inspected before checksums and candidate metadata
+are accepted. Inspection:
+
+- does not source `INFO`;
+- does not execute package scripts;
+- does not install or start the package;
+- rejects archive traversal, unsafe members and duplicate normalised paths;
+- checks manifest-bound `INFO` identity;
+- validates lifecycle shell syntax and package JSON configuration;
+- validates `package.tgz` as a safe readable archive.
+
+Static inspection is not DSM hardware acceptance.
+
+<!-- END TARGETED QUALITY CONTROLS -->

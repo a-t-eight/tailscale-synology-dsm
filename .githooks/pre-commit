@@ -10,4 +10,5 @@ REPO_ROOT="$(
 exec \
   bash \
   "${REPO_ROOT}/scripts/validate-repository.sh" \
-  --fast
+  --fast \
+  --staged-secrets

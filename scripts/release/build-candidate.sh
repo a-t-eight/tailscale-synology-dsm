@@ -107,7 +107,9 @@ fi
 PACKAGE_VERSION="$(release_manifest_get "$MANIFEST" package.version)"
 BUILD_RELATIVE="$(release_manifest_get "$MANIFEST" paths.build_entrypoint)"
 OUTPUT_RELATIVE="$(release_manifest_get "$MANIFEST" paths.build_output)"
+INSPECTOR_RELATIVE="$(release_manifest_get "$MANIFEST" paths.spk_inspector)"
 BUILD_ENTRYPOINT="$(release_resolve_path "$SOURCE_WORKTREE" "$BUILD_RELATIVE")"
+SPK_INSPECTOR="$(release_resolve_path "$CONTROL_WORKTREE" "$INSPECTOR_RELATIVE")"
 
 if [ -z "$OUTPUT_ROOT" ]; then
   OUTPUT_ROOT="$(release_resolve_path "$SOURCE_WORKTREE" "$OUTPUT_RELATIVE")"
@@ -125,6 +127,11 @@ fi
 
 if [ ! -x "$BUILD_ENTRYPOINT" ]; then
   release_fail "build entrypoint is missing or not executable: ${BUILD_ENTRYPOINT}"
+  exit 1
+fi
+
+if [ ! -x "$SPK_INSPECTOR" ]; then
+  release_fail "SPK inspector is missing or not executable: ${SPK_INSPECTOR}"
   exit 1
 fi
 
@@ -220,6 +227,26 @@ if [ "${#spk_files[@]}" -eq 0 ]; then
   release_fail "candidate build produced no SPK files"
   exit 1
 fi
+
+printf '\n=== Static candidate SPK inspection ===\n'
+
+for spk_file in "${spk_files[@]}"; do
+  bash \
+    "$SPK_INSPECTOR" \
+    --control-worktree \
+    "$CONTROL_WORKTREE" \
+    --manifest \
+    "$MANIFEST" \
+    --spk \
+    "$spk_file"
+
+  inspect_rc=$?
+
+  if [ "$inspect_rc" -ne 0 ]; then
+    release_fail "candidate SPK inspection failed: ${spk_file}"
+    exit "$inspect_rc"
+  fi
+done
 
 CHECKSUM_FILE="${OUTPUT_ROOT}/candidate-SHA256SUMS"
 
