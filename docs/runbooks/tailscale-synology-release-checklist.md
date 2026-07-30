@@ -53,3 +53,14 @@
 - [ ] Permanent release record was reviewed.
 - [ ] Release closeout runbook completed.
 - [ ] Temporary branches and worktrees were cleaned up.
+
+## Signed protected integration
+
+- [ ] Checksum-pinned review evidence authorises the exact base, head, paths and required checks.
+- [ ] Reviewed head is the signed and signed-off direct child of the protected base.
+- [ ] Integration dry run passed with no unresolved discussion or failed check.
+- [ ] Protected ref update used an explicit expected-old force-with-lease.
+- [ ] New protected-branch push check passed with a new check-run ID.
+- [ ] Pull-request terminal mode and any comment-and-close fallback were recorded.
+- [ ] Persistent control and accepted-release round-trip validation passed.
+- [ ] Exact temporary worktree and local or remote work branches were removed.

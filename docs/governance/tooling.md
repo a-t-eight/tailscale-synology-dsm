@@ -116,6 +116,47 @@ the protected base is `c08cb5af27701615f6180d79182d2c8559c601bf` and lacks the f
 the signer file directly from the protected base checkout.
 
 
+<!-- BEGIN SIGNED PROTECTED INTEGRATION TOOLING -->
+
+## Signed protected integration tooling
+
+Use the repository-owned integration entrypoint only with checksum-pinned review
+evidence:
+
+```text
+bash scripts/governance/integrate-signed-pr.sh \
+  --repository OWNER/REPOSITORY \
+  --pr-number NUMBER \
+  --control-branch synology/main \
+  --work-branch BRANCH \
+  --expected-base BASE_SHA \
+  --expected-head REVIEWED_SHA \
+  --review-evidence /path/to/review.json \
+  --review-evidence-sha256 REVIEW_SHA256 \
+  --pr-worktree /path/to/pr-worktree \
+  --control-worktree /path/to/control-worktree \
+  --source-worktree /path/to/accepted-source-worktree \
+  --evidence-dir /path/to/evidence \
+  --required-check repository-governance \
+  --dry-run
+```
+
+After reviewing the plan, use `--confirm-integrate`. Use `--resume` only when a
+prior run wrote a post-ref-update state record.
+
+Run the synthetic safety suite with:
+
+```text
+bash tests/governance/integrate-signed-pr.sh
+```
+
+The fixture suite proves that an exact state passes while a moved base,
+unsigned head, failed required check or unresolved review thread stops before
+mutation. It also verifies the expected-old lease, new-check identity, terminal
+fallback and resume controls.
+
+<!-- END SIGNED PROTECTED INTEGRATION TOOLING -->
+
 <!-- BEGIN TARGETED QUALITY TOOLING -->
 
 ## Secret scanning

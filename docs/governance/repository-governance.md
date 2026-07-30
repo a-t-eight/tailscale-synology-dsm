@@ -138,6 +138,33 @@ The bootstrap PR is the sole exception because protected base
 repository variable immediately after the bootstrap commit is integrated.
 
 
+<!-- BEGIN SIGNED PROTECTED INTEGRATION -->
+
+## Signed protected integration
+
+GitHub merge, squash and rebase execution are not accepted as the integration
+primitive when reviewed commit identity must be preserved. A repository-owned
+entrypoint performs the protected ref update only after the pull request,
+reviewed signed commit, changed-path allowlist, immutable review evidence,
+discussions and required checks are exact.
+
+The update must:
+
+- bind an explicit force-with-lease to the expected protected base SHA;
+- move the protected branch only to the reviewed signed direct child;
+- require a new successful protected-branch push check distinguished from prior
+  pull-request checks by check-run ID;
+- record GitHub's pull-request terminal state or use the documented
+  comment-and-close fallback;
+- preserve a resume boundary after remote integration;
+- run repository and accepted-release validation before exact temporary-state
+  cleanup.
+
+The bypass required by the ruleset is an explicit governed authority, not a
+replacement for pull-request review or validation.
+
+<!-- END SIGNED PROTECTED INTEGRATION -->
+
 <!-- BEGIN TARGETED QUALITY CONTROLS -->
 
 ## Targeted quality and package-inspection controls
