@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "candidate": {
+    "commit": "8c9fe5239ee57a89ce687fc8c7608d3df91f6ede",
+    "tree": "6d171c2a01c0fafb9567f3f4bc49bdd4f7ff7392"
+  },
+  "protected_blobs": [
+    {
+      "path": "cmd/tailscale/cli/up.go",
+      "git_blob": "ace6ac3dbdcc42f18e3dadfacbc65cee1b1df311",
+      "sha256": "5da19848c5a76a2242c300b8accf6ae2100d96589d66869eb374fc12337e31c1"
+    },
+    {
+      "path": "cmd/tailscaled/tailscaled.go",
+      "git_blob": "6f0dcede86551dfb142f5a2a6944de92c1ecd756",
+      "sha256": "684e79377cbbe79dc3d3ad7bc8400f26101d1d958ce78a9a724ab4a3d1571990"
+    },
+    {
+      "path": "ipn/ipnlocal/local.go",
+      "git_blob": "b84205d914f2e47e4cefda1a4a0ce98202cd552f",
+      "sha256": "dbbec62dd501abb1262593e19b70868d3b5ca478d6a9d9e7848d1cfb1256a570"
+    },
+    {
+      "path": "util/linuxfw/iptables_runner.go",
+      "git_blob": "03d9b87a8c0c35d655e60b4456ba136116b6afd2",
+      "sha256": "96d2122b8929433cb0ac987587ebf969406fb3d64067378b2b3975b810aeb137"
+    },
+    {
+      "path": "wgengine/router/osrouter/router_linux.go",
+      "git_blob": "c48749734c5618bfe3973afbb2d00f75b34e0d13",
+      "sha256": "54339503f0d7e5598aa3b507a7c685408bcd84d6580bde69acf19a5e60154da0"
+    },
+    {
+      "path": "patches/v1.98.9/synology-netfilter.patch",
+      "git_blob": "b0a9474448b0f5bac5b24229ffe6827c4eebe897",
+      "sha256": "ad577d4032e3c14fa37b284b7e5116c364122471b1d9fdc2c906bf8ae198920f"
+    },
+    {
+      "path": "patches/v1.98.9/synology-netfilter.patch.sha256",
+      "git_blob": "5b88bba7a6ac4b8cea5d307bee5cdc9769e70ad4",
+      "sha256": "b0a7641e8297c79ea2c40ffddc82632cfbdaf83029b4552e42572b227a2b7fe4"
+    }
+  ],
+  "synology_contract": {
+    "dependency_section": "iptables-netfilter-extensions",
+    "dependency_minimum": "1.1.0-3",
+    "dependency_os_minimum": "7.3-86009",
+    "tailscale_os_minimum": "7.3-86009",
+    "os_max_ver_allowed": false
+  },
+  "safety": {
+    "allow_fetch": false,
+    "allow_push": false,
+    "allow_pull_request": false,
+    "allow_tag": false,
+    "allow_release": false,
+    "allow_publish": false,
+    "allow_spk_build": false,
+    "allow_dependency_spk_build": false,
+    "allow_nas_install": false,
+    "allow_root_bootstrap": false,
+    "allow_firewall_mutation": false,
+    "allow_reboot": false
+  }
+}
