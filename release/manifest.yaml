@@ -78,6 +78,9 @@
     "patch_reference_files": [
       "maintenance.patch"
     ],
+    "patch_adjunct_files": [
+      "synology-netfilter.patch"
+    ],
     "ssh_allowed_signers_path": ".github/allowed_signers",
     "ssh_allowed_signers_sha256": "7f6e0b0e70dd002171512380426103ca322c28a30ed2bde5815395f3c7e329c8",
     "ssh_signer_fingerprints": [
