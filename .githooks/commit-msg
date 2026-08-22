@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -u
+
+MESSAGE_FILE="${1:-}"
+
+if [ -z "$MESSAGE_FILE" ] ||
+  [ ! -f "$MESSAGE_FILE" ]; then
+  echo "FAIL: commit message file is unavailable." >&2
+  exit 1
+fi
+
+AUTHOR_IDENT="$(
+  git \
+    var \
+    GIT_AUTHOR_IDENT
+)"
+
+AUTHOR_IDENTITY="$(
+  printf '%s\n' \
+    "$AUTHOR_IDENT" |
+    sed \
+      's/>.*/>/'
+)"
+
+EXPECTED_SIGNOFF="Signed-off-by: ${AUTHOR_IDENTITY}"
+
+SIGNOFF_COUNT="$(
+  grep \
+    -Ec \
+    '^Signed-off-by: .+ <[^>]+>$' \
+    "$MESSAGE_FILE" ||
+    true
+)"
+
+MATCHING_COUNT="$(
+  grep \
+    -Fxc \
+    "$EXPECTED_SIGNOFF" \
+    "$MESSAGE_FILE" ||
+    true
+)"
+
+if [ "$SIGNOFF_COUNT" -ne 1 ]; then
+  printf \
+    'FAIL: commit message contains %s sign-off trailers; expected exactly 1.\n' \
+    "$SIGNOFF_COUNT" \
+    >&2
+  exit 1
+fi
+
+if [ "$MATCHING_COUNT" -ne 1 ]; then
+  printf \
+    'FAIL: expected sign-off is missing: %s\n' \
+    "$EXPECTED_SIGNOFF" \
+    >&2
+  exit 1
+fi
+
+exit 0

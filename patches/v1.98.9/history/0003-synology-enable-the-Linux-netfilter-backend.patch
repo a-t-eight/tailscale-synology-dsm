@@ -1,0 +1,57 @@
+From 46c6f760abf06370ce5b4cfc0e878e2c854c4522 Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Thu, 23 Jul 2026 02:41:10 +1000
+Subject: [PATCH 03/19] synology: enable the Linux netfilter backend
+
+---
+ ipn/ipnlocal/local.go                    | 6 ------
+ wgengine/router/osrouter/router_linux.go | 9 ---------
+ 2 files changed, 15 deletions(-)
+
+diff --git a/ipn/ipnlocal/local.go b/ipn/ipnlocal/local.go
+index b5a0a353c..b84205d91 100644
+--- a/ipn/ipnlocal/local.go
++++ b/ipn/ipnlocal/local.go
+@@ -80,7 +80,6 @@
+ 	"tailscale.com/types/netmap"
+ 	"tailscale.com/types/opt"
+ 	"tailscale.com/types/persist"
+-	"tailscale.com/types/preftype"
+ 	"tailscale.com/types/views"
+ 	"tailscale.com/util/checkchange"
+ 	"tailscale.com/util/clientmetric"
+@@ -5834,11 +5833,6 @@ func (b *LocalBackend) routerConfigLocked(cfg *wgcfg.Config, prefs ipn.PrefsView
+ 		RemoveCGNATDropRule: nm.HasCap(tailcfg.NodeAttrDisableLinuxCGNATDropRule),
+ 	}
+ 
+-	if buildfeatures.HasSynology && distro.Get() == distro.Synology {
+-		// Issue 1995: we don't use iptables on Synology.
+-		rs.NetfilterMode = preftype.NetfilterOff
+-	}
+-
+ 	// Sanity check: we expect the control server to program both a v4
+ 	// and a v6 default route, if default routing is on. Fill in
+ 	// blackhole routes appropriately if we're missing some. This is
+diff --git a/wgengine/router/osrouter/router_linux.go b/wgengine/router/osrouter/router_linux.go
+index 73f65cdf1..cdd99d62a 100644
+--- a/wgengine/router/osrouter/router_linux.go
++++ b/wgengine/router/osrouter/router_linux.go
+@@ -1674,15 +1674,6 @@ func normalizeCIDR(cidr netip.Prefix) string {
+ // platformCanNetfilter reports whether the current distro/environment supports
+ // running iptables/nftables commands.
+ func platformCanNetfilter() bool {
+-	switch getDistroFunc() {
+-	case distro.Synology:
+-		// Synology doesn't support iptables or nftables. Attempting to run it
+-		// just blocks for a long time while it logs about failures.
+-		//
+-		// See https://github.com/tailscale/tailscale/issues/11737 for one such
+-		// prior regression where we tried to run iptables on Synology.
+-		return false
+-	}
+ 	return true
+ }
+ 
+-- 
+2.55.0
+

@@ -1,0 +1,93 @@
+From c5ba81b3386ca96c5e0c4630addbb94b4eb7d4cf Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Sat, 25 Jul 2026 04:28:51 +1000
+Subject: [PATCH 17/19] synology: avoid reconciler broken pipe diagnostics
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ .../scripts/tailscale-netfilter-reconciler     | 18 +++++++++---------
+ .../tests/netfilter-reconciler-test.sh         |  9 ++++++++-
+ tool/build-synology-root-bootstrap.sh          |  2 +-
+ 3 files changed, 18 insertions(+), 11 deletions(-)
+
+diff --git a/release/dist/synology/files/scripts/tailscale-netfilter-reconciler b/release/dist/synology/files/scripts/tailscale-netfilter-reconciler
+index 9581c07ea..6840c6cd3 100755
+--- a/release/dist/synology/files/scripts/tailscale-netfilter-reconciler
++++ b/release/dist/synology/files/scripts/tailscale-netfilter-reconciler
+@@ -171,14 +171,14 @@ prefs_require_netfilter() {
+             2>/dev/null
+     )" || return 1
+ 
+-    printf '%s\n' "${output}" |
+-        grep -Eq \
+-            '"WantRunning"[[:space:]]*:[[:space:]]*true' ||
++    grep -Eq \
++        '"WantRunning"[[:space:]]*:[[:space:]]*true' \
++        <<<"${output}" ||
+         return 1
+ 
+-    printf '%s\n' "${output}" |
+-        grep -Eq \
+-            '"NetfilterMode"[[:space:]]*:[[:space:]]*2' ||
++    grep -Eq \
++        '"NetfilterMode"[[:space:]]*:[[:space:]]*2' \
++        <<<"${output}" ||
+         return 1
+ 
+     return 0
+@@ -195,9 +195,9 @@ backend_running() {
+             2>/dev/null
+     )" || return 1
+ 
+-    printf '%s\n' "${output}" |
+-        grep -Eq \
+-            '"BackendState"[[:space:]]*:[[:space:]]*"Running"'
++    grep -Eq \
++        '"BackendState"[[:space:]]*:[[:space:]]*"Running"' \
++        <<<"${output}"
+ }
+ 
+ 
+diff --git a/release/dist/synology/tests/netfilter-reconciler-test.sh b/release/dist/synology/tests/netfilter-reconciler-test.sh
+index b2a0dec95..00ef18f4d 100755
+--- a/release/dist/synology/tests/netfilter-reconciler-test.sh
++++ b/release/dist/synology/tests/netfilter-reconciler-test.sh
+@@ -71,7 +71,10 @@ case "${args}" in
+ 
+     printf '{\n'
+     printf '  "WantRunning": %s,\n' "${want}"
+-    printf '  "NetfilterMode": %s\n' "${mode}"
++    printf '  "NetfilterMode": %s,\n' "${mode}"
++    printf '  "Padding": "'
++    printf '%262144s' '' | tr ' ' x
++    printf '"\n'
+     printf '}\n'
+     ;;
+ 
+@@ -190,6 +193,10 @@ run_reconciler() {
+         bash "${RECONCILER}" \
+         >"${OUTPUT}" \
+         2>&1
++
++    assert_not_contains \
++        "${OUTPUT}" \
++        'Broken pipe'
+ }
+ 
+ 
+diff --git a/tool/build-synology-root-bootstrap.sh b/tool/build-synology-root-bootstrap.sh
+index 36ec4ea96..bfb33c8f5 100755
+--- a/tool/build-synology-root-bootstrap.sh
++++ b/tool/build-synology-root-bootstrap.sh
+@@ -2,7 +2,7 @@
+ set -euo pipefail
+ 
+ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+-VERSION_OVERRIDE="${TS_VERSION_OVERRIDE:-1.98.94}"
++VERSION_OVERRIDE="${TS_VERSION_OVERRIDE:-1.98.95}"
+ OUT_ROOT="${1:-${REPO_ROOT}/build/synology/v1.98.9-final}"
+ 
+ SIDELOAD_OUT="${OUT_ROOT}/sideload"
+-- 
+2.55.0
+
