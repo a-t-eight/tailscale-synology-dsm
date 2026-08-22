@@ -4,6 +4,10 @@ release_fail() {
   printf 'FAIL: %s\n' "$1" >&2
 }
 
+release_stop() {
+  printf 'STOP: %s\n' "$1" >&2
+}
+
 release_pass() {
   printf 'PASS: %s\n' "$1"
 }

@@ -277,7 +277,7 @@ prepare_version() (
       true
   )"
   if [ "$PEELED_TAG" != "$UPSTREAM_COMMIT" ]; then
-    release_fail "explicit upstream tag does not peel to the explicit commit"
+    release_stop "explicit upstream tag does not peel to the explicit commit"
     exit 1
   fi
 
