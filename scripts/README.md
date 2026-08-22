@@ -13,7 +13,10 @@
 - `setup-worktree.sh` configures repository-owned hooks and signing. The
   `control` role is limited to the separate complete control-only tree that
   contains `scripts/validate-repository.sh`; this promoted source-worktree layer
-  uses the `accepted`, `work`, or `release` roles with that control tree.
+  uses the `accepted`, `work`, or `release` roles with that control tree. Those
+  source-role wrappers require and invoke the retained
+  `scripts/release/validate-release.sh` from the external control worktree; the
+  frozen accepted-release validator is not copied into source branches.
 
 Preparation never fetches, pushes, tags, builds either SPK, publishes, installs
 on a NAS or changes NAS state. See

@@ -134,6 +134,12 @@ if [ ! -x "$HOOK_AUTHORITY/.githooks/pre-commit" ] ||
   exit 1
 fi
 
+if [ "$ROLE" != "control" ] &&
+  [ ! -x "$CONTROL_ROOT/scripts/release/validate-release.sh" ]; then
+  fail "hook authority does not contain an executable release validator"
+  exit 1
+fi
+
 CONTROL_WORKTREE="$CONTROL_ROOT"
 
 if [ "$ROLE" = "control" ] &&

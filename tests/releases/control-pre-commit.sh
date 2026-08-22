@@ -76,6 +76,40 @@ cp \
 if bash "$FIXTURE_ROOT/scripts/setup-worktree.sh" \
   --worktree "$DIFFERENT_ROOT" \
   --control-worktree "$FIXTURE_ROOT" \
+  --role work \
+  --dry-run \
+  > "$SOURCE_LOG" 2>&1; then
+  fail "source-role setup accepted a control tree without its release validator"
+fi
+grep -Fxq \
+  "FAIL: hook authority does not contain an executable release validator" \
+  "$SOURCE_LOG" || fail "missing-validator rejection omitted the exact diagnostic"
+
+mkdir -p "$FIXTURE_ROOT/scripts/release"
+cat > "$FIXTURE_ROOT/scripts/release/validate-release.sh" << 'VALIDATOR'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "${HOOK_RECORD:?}"
+VALIDATOR
+chmod 0755 "$FIXTURE_ROOT/scripts/release/validate-release.sh"
+HOOK_RECORD="$HOOK_RECORD" bash "$FIXTURE_ROOT/scripts/setup-worktree.sh" \
+  --worktree "$DIFFERENT_ROOT" \
+  --control-worktree "$FIXTURE_ROOT" \
+  --role work \
+  > /dev/null || fail "source-role setup with an external validator failed"
+source_hooks="$(
+  git -C "$DIFFERENT_ROOT" config --worktree --get core.hooksPath
+)"
+HOOK_RECORD="$HOOK_RECORD" bash "$source_hooks/pre-commit" ||
+  fail "source-role wrapper did not invoke the external validator"
+[ "$(<"$HOOK_RECORD")" = \
+  "--control-worktree $FIXTURE_ROOT --source-worktree $DIFFERENT_ROOT --role work --fast" ] ||
+  fail "source-role wrapper invoked the external validator with wrong authority"
+git -C "$DIFFERENT_ROOT" config --worktree --unset-all core.hooksPath ||
+  fail "could not reset source-role fixture hooks configuration"
+
+if bash "$FIXTURE_ROOT/scripts/setup-worktree.sh" \
+  --worktree "$DIFFERENT_ROOT" \
+  --control-worktree "$FIXTURE_ROOT" \
   --role control \
   --dry-run \
   > "$SOURCE_LOG" 2>&1; then

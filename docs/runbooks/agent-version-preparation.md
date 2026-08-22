@@ -92,3 +92,10 @@ The agent may draft review notes. Creating or updating a pull request requires
 separate authorization. Building either SPK, tagging, releasing, publishing,
 installing on a NAS, running bootstrap, changing firewall/netfilter state and
 rebooting are outside this workflow.
+
+Accepted-source validation remains an attended control-worktree operation. At
+handoff, invoke the retained
+`/path/to/control-worktree/scripts/release/validate-release.sh` with explicit
+`--control-worktree` and `--source-worktree` paths as documented in
+`docs/runbooks/tailscale-synology-version-update.md`; do not copy that frozen
+closure validator into the prepared source branch.
