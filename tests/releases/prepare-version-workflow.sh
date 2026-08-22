@@ -17,19 +17,38 @@ fail() {
 }
 
 cleanup() {
+  owned_round_trip=""
+  if [ -n "${ROUND_TRIP_RECORD:-}" ] &&
+    [ -s "$ROUND_TRIP_RECORD" ]; then
+    owned_round_trip="$(<"$ROUND_TRIP_RECORD")"
+  fi
+
   if [ -n "$SOURCE_REPO" ] &&
     [ -d "$SOURCE_REPO/.git" ]; then
     while IFS= read -r registered_worktree; do
       if [ "$registered_worktree" != "$SOURCE_REPO" ] &&
-        [ -n "$TEMP_ROOT" ] &&
-        [[ "$registered_worktree" == "$TEMP_ROOT"/* ]]; then
-        git -C "$SOURCE_REPO" worktree remove "$registered_worktree" \
+        {
+          {
+            [ -n "$TEMP_ROOT" ] &&
+              [[ "$registered_worktree" == "$TEMP_ROOT"/* ]]
+          } ||
+            [ "$registered_worktree" = "$owned_round_trip" ]
+        }; then
+        git -C "$SOURCE_REPO" worktree remove --force "$registered_worktree" \
           > /dev/null 2>&1 || true
       fi
     done < <(
       git -C "$SOURCE_REPO" worktree list --porcelain |
         sed -n 's/^worktree //p'
     )
+  fi
+
+  if [ -n "$owned_round_trip" ] &&
+    [[ "$owned_round_trip" == /tmp/tailscale-version-round-trip.*/worktree ]]; then
+    round_trip_parent="$(dirname "$owned_round_trip")"
+    if [ -d "$round_trip_parent" ]; then
+      rm -rf -- "$round_trip_parent"
+    fi
   fi
 
   if [ -n "$TEMP_ROOT" ] &&
@@ -361,7 +380,7 @@ create_failure_fixture() {
   git_fixture switch main > /dev/null 2>&1
   case "$failure_case" in
     mismatch | path-equal | output-inside-worktree | worktree-inside-output | \
-      install-race | mv-failure)
+      install-race | mv-failure | remove-failure)
       printf 'release=2.0.0\n' > "$SOURCE_REPO/upstream-release.conf"
       git_fixture add upstream-release.conf
       ;;
@@ -396,6 +415,8 @@ create_failure_fixture() {
   PREPARE_MODE="--confirm-create"
   EXPECTED_FAILURE="FAIL: logical commit replay conflicted: ${PREVIOUS_RELEASE}"
   PREPARE_PATH=("$PATH")
+  ROUND_TRIP_RECORD="${TEMP_ROOT}/round-trip-worktree"
+  REMOVE_FAILURE_MARKER="${TEMP_ROOT}/remove-failure-injected"
   case "$failure_case" in
     mismatch)
       SELECTED_UPSTREAM="$OLD_UPSTREAM"
@@ -439,6 +460,33 @@ SHIM
       chmod 0755 "$SHIM_DIR/mv"
       PREPARE_PATH=("$SHIM_DIR:$PATH")
       EXPECTED_FAILURE="FAIL: review artifact installation failed"
+      ;;
+    remove-failure)
+      mkdir -p "$SHIM_DIR"
+      REAL_GIT="$(command -v git)"
+      export REAL_GIT ROUND_TRIP_RECORD REMOVE_FAILURE_MARKER
+      cat > "$SHIM_DIR/git" << 'SHIM'
+#!/usr/bin/env bash
+set -u
+
+previous=""
+for argument in "$@"; do
+  if [ "$previous" = "remove" ] &&
+    [[ "$argument" == /tmp/tailscale-version-round-trip.*/worktree ]]; then
+    printf '%s\n' "$argument" > "${ROUND_TRIP_RECORD:?}"
+    if [ ! -e "${REMOVE_FAILURE_MARKER:?}" ]; then
+      : > "$REMOVE_FAILURE_MARKER"
+      exit 73
+    fi
+  fi
+  previous="$argument"
+done
+
+exec "${REAL_GIT:?}" "$@"
+SHIM
+      chmod 0755 "$SHIM_DIR/git"
+      PREPARE_PATH=("$SHIM_DIR:$PATH")
+      EXPECTED_FAILURE="FAIL: round-trip worktree removal failed"
       ;;
   esac
 
@@ -492,7 +540,7 @@ SHIM
         fail "install race misdirected staging beneath the competing destination"
       fi
       ;;
-    conflict | mv-failure)
+    conflict | mv-failure | remove-failure)
     [ -d "$PREPARED_WORKTREE" ] ||
       fail "${failure_case} fixture did not leave its isolated worktree for review"
     if git -C "$PREPARED_WORKTREE" rev-parse -q --verify CHERRY_PICK_HEAD \
@@ -512,6 +560,20 @@ SHIM
       fi
       ;;
   esac
+
+  if [ "$failure_case" = "remove-failure" ]; then
+    [ -s "$ROUND_TRIP_RECORD" ] ||
+      fail "removal-failure fixture did not identify its temporary worktree"
+    ROUND_TRIP_PATH="$(<"$ROUND_TRIP_RECORD")"
+    [ ! -e "$ROUND_TRIP_PATH" ] ||
+      fail "removal-failure fixture left the temporary worktree path"
+    if git_fixture worktree list --porcelain |
+      grep -Fxq "worktree ${ROUND_TRIP_PATH}"; then
+      fail "removal-failure fixture left a registered temporary worktree"
+    fi
+    [ ! -e "$(dirname "$ROUND_TRIP_PATH")" ] ||
+      fail "removal-failure fixture left its temporary parent directory"
+  fi
 
   REMOTE_REFS_AFTER="$(snapshot_refs "$BARE_ORIGIN")"
   TAG_REFS_AFTER="$(git_fixture show-ref --tags | sort)"
@@ -533,7 +595,7 @@ case "$CASE" in
     create_success_fixture
     ;;
   mismatch | conflict | path-equal | output-inside-worktree | \
-    worktree-inside-output | install-race | mv-failure)
+    worktree-inside-output | install-race | mv-failure | remove-failure)
     create_failure_fixture "$CASE"
     ;;
   all)
@@ -552,6 +614,8 @@ case "$CASE" in
     create_failure_fixture install-race
     cleanup
     create_failure_fixture mv-failure
+    cleanup
+    create_failure_fixture remove-failure
     ;;
   *)
     fail "unsupported fixture case: ${CASE}"

@@ -55,6 +55,16 @@ prepare_version() (
   ROUND_TRIP_WORKTREE=""
   MESSAGE_FILE=""
 
+  round_trip_worktree_registered() {
+    [ -n "$ROUND_TRIP_WORKTREE" ] &&
+      release_clean_git \
+        -C "$SOURCE_REPO" \
+        worktree \
+        list \
+        --porcelain |
+      grep -Fxq "worktree ${ROUND_TRIP_WORKTREE}"
+  }
+
   # shellcheck disable=SC2329 # Invoked by the EXIT trap below.
   cleanup_prepare_version() {
     if [ -n "$MESSAGE_FILE" ] &&
@@ -64,17 +74,24 @@ prepare_version() (
 
     if [ -n "$ROUND_TRIP_WORKTREE" ] &&
       [ -n "$SOURCE_REPO" ]; then
-      release_clean_git \
+      if release_clean_git \
         -C "$SOURCE_REPO" \
         worktree \
         remove \
+        --force \
         "$ROUND_TRIP_WORKTREE" \
-        > /dev/null 2>&1 || true
+        > /dev/null 2>&1 &&
+        [ ! -e "$ROUND_TRIP_WORKTREE" ] &&
+        ! round_trip_worktree_registered; then
+        ROUND_TRIP_WORKTREE=""
+      fi
     fi
 
     if [ -n "$ROUND_TRIP_PARENT" ] &&
       [[ "$ROUND_TRIP_PARENT" == /tmp/tailscale-version-round-trip.* ]]; then
-      rmdir -- "$ROUND_TRIP_PARENT" > /dev/null 2>&1 || true
+      if rmdir -- "$ROUND_TRIP_PARENT" > /dev/null 2>&1; then
+        ROUND_TRIP_PARENT=""
+      fi
     fi
 
     if [ -n "$STAGING_DIR" ] &&
@@ -597,8 +614,21 @@ PY
     remove \
     "$ROUND_TRIP_WORKTREE" \
     > /dev/null
+  ROUND_REMOVE_RC=$?
+  if [ "$ROUND_REMOVE_RC" -ne 0 ]; then
+    release_fail "round-trip worktree removal failed"
+    exit "$ROUND_REMOVE_RC"
+  fi
+  if [ -e "$ROUND_TRIP_WORKTREE" ] ||
+    round_trip_worktree_registered; then
+    release_fail "round-trip worktree removal did not unregister and remove its path"
+    exit 1
+  fi
   ROUND_TRIP_WORKTREE=""
-  rmdir -- "$ROUND_TRIP_PARENT"
+  if ! rmdir -- "$ROUND_TRIP_PARENT"; then
+    release_fail "round-trip parent directory removal failed"
+    exit 1
+  fi
   ROUND_TRIP_PARENT=""
 
   printf '%s\n' "${SOURCE_COMMITS[@]}" > "$STAGING_DIR/.source-commits"
