@@ -10,8 +10,10 @@
   manifest-driven control workflow.
 - `release/common.sh` contains strict manifest, patch and worktree helpers used
   by both modes.
-- `setup-worktree.sh` configures repository-owned hooks and signing for a
-  control, work, release or accepted worktree.
+- `setup-worktree.sh` configures repository-owned hooks and signing. The
+  `control` role is limited to the separate complete control-only tree that
+  contains `scripts/validate-repository.sh`; this promoted source-worktree layer
+  uses the `accepted`, `work`, or `release` roles with that control tree.
 
 Preparation never fetches, pushes, tags, builds either SPK, publishes, installs
 on a NAS or changes NAS state. See
