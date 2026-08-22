@@ -11,7 +11,7 @@ This manifest freezes the cleanup decision before any deletion. Cleanup is limit
 - Pre-cleanup feature HEAD: `20899f9110a389a611c5557af07ccbf511eb02d6`
 - Follow-up alias-cleanup feature HEAD: `0c8d38579085ca4e1419b51471be41cb76df5c92`
 - Clean candidate base: `8c9fe5239ee57a89ce687fc8c7608d3df91f6ede`
-- The focused preparation tests, all Synology shell tests, offline relevant Go tests, shell syntax and static analysis, canonical patch checksum, historical checksum inventory, and accepted-source round trip passed before cleanup.
+- The focused preparation tests, all Synology shell tests, offline relevant Go tests, shell syntax, error-level static analysis, canonical patch checksum, historical checksum inventory, and accepted-source round trip passed before cleanup. The original static-analysis invocation did not enforce informational SC1091/SC2329 diagnostics; the follow-up canonical command does.
 - The canonical seven protected blobs were unchanged from the candidate before cleanup.
 
 ## Keep

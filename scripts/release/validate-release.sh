@@ -7,7 +7,7 @@ SCRIPT_DIR="$(
     pwd
 )"
 
-# shellcheck source=common.sh
+# shellcheck source=scripts/release/common.sh
 . "${SCRIPT_DIR}/common.sh"
 
 CONTROL_WORKTREE="$(
@@ -37,6 +37,7 @@ Usage:
 USAGE
 }
 
+# shellcheck disable=SC2329 # Invoked by the EXIT trap below.
 cleanup() {
   if [ -n "$TEMP_WORKTREE" ] &&
     [ -e "$TEMP_WORKTREE" ]; then
