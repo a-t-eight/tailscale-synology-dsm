@@ -41,4 +41,3 @@ Tailscale version preparation.
 core unjailed source blobs plus the canonical patch/checksum. Version-workflow
 changes validate those seven identities but do not recreate or modify them.
 Any identity difference is a stop condition requiring separate product review.
-
