@@ -302,6 +302,143 @@ PY
   printf 'PASS: offline success fixture prepared signed ordered patches without publication side effects.\n'
 }
 
+create_failure_fixture() {
+  failure_case="$1"
+  TEMP_ROOT="$(mktemp -d /tmp/tailscale-prepare-version-test.XXXXXX)"
+  SOURCE_REPO="${TEMP_ROOT}/source"
+  BARE_ORIGIN="${TEMP_ROOT}/origin.git"
+  SIGNING_KEY="${TEMP_ROOT}/signing-key"
+  ALLOWED_SIGNERS="${TEMP_ROOT}/allowed_signers"
+  PREPARED_WORKTREE="${TEMP_ROOT}/prepared"
+  ARTIFACTS="${TEMP_ROOT}/artifacts"
+  LOG="${TEMP_ROOT}/prepare.log"
+
+  git init --bare --initial-branch=main "$BARE_ORIGIN" > /dev/null 2>&1 ||
+    fail "could not create failure-fixture origin"
+  git init -b main "$SOURCE_REPO" > /dev/null 2>&1 ||
+    fail "could not create failure-fixture source"
+  git_fixture config user.name "Fixture Agent"
+  git_fixture config user.email "fixture@example.invalid"
+  git_fixture config commit.gpgsign false
+
+  write_product old userspace
+  git_fixture add product.conf
+  git_fixture commit -m "upstream: old base" > /dev/null ||
+    fail "could not commit failure-fixture old base"
+  OLD_UPSTREAM="$(git_fixture rev-parse HEAD)"
+
+  git_fixture switch -c previous-release > /dev/null 2>&1
+  write_product old kernel
+  git_fixture add product.conf
+  git_fixture commit -s -m "synology: enable kernel tun" > /dev/null ||
+    fail "could not commit failure-fixture logical change"
+  PREVIOUS_RELEASE="$(git_fixture rev-parse HEAD)"
+
+  git_fixture switch main > /dev/null 2>&1
+  case "$failure_case" in
+    mismatch)
+      printf 'release=2.0.0\n' > "$SOURCE_REPO/upstream-release.conf"
+      git_fixture add upstream-release.conf
+      ;;
+    conflict)
+      write_product old native
+      git_fixture add product.conf
+      ;;
+    *)
+      fail "unsupported failure fixture: ${failure_case}"
+      ;;
+  esac
+  git_fixture commit -m "upstream: new release" > /dev/null ||
+    fail "could not commit failure-fixture new upstream"
+  NEW_UPSTREAM="$(git_fixture rev-parse HEAD)"
+  git_fixture tag v2.0.0 "$NEW_UPSTREAM"
+
+  ssh-keygen -q -t ed25519 -N '' -f "$SIGNING_KEY" ||
+    fail "could not generate failure-fixture signing key"
+  printf 'fixture@example.invalid %s\n' "$(<"${SIGNING_KEY}.pub")" \
+    > "$ALLOWED_SIGNERS"
+  git_fixture config gpg.format ssh
+  git_fixture config user.signingkey "$SIGNING_KEY"
+  git_fixture config gpg.ssh.allowedSignersFile "$ALLOWED_SIGNERS"
+  git_fixture config commit.gpgsign true
+  git_fixture remote add origin "$BARE_ORIGIN"
+  git_fixture push origin main previous-release --tags > /dev/null 2>&1 ||
+    fail "could not seed failure-fixture origin"
+
+  REMOTE_REFS_BEFORE="$(snapshot_refs "$BARE_ORIGIN")"
+  TAG_REFS_BEFORE="$(git_fixture show-ref --tags | sort)"
+  SELECTED_UPSTREAM="$NEW_UPSTREAM"
+  EXPECTED_FAILURE="logical commit replay conflicted"
+  if [ "$failure_case" = "mismatch" ]; then
+    SELECTED_UPSTREAM="$OLD_UPSTREAM"
+    EXPECTED_FAILURE="explicit upstream tag does not peel to the explicit commit"
+  fi
+
+  if bash "$PREPARE_SCRIPT" prepare-version \
+    --source-repo "$SOURCE_REPO" \
+    --upstream-tag v2.0.0 \
+    --upstream-commit "$SELECTED_UPSTREAM" \
+    --previous-upstream-commit "$OLD_UPSTREAM" \
+    --previous-release-commit "$PREVIOUS_RELEASE" \
+    --new-version 2.0.0 \
+    --downstream-revision r1 \
+    --target-branch work/v2.0.0-synology-r1 \
+    --target-worktree "$PREPARED_WORKTREE" \
+    --output-root "$ARTIFACTS" \
+    --confirm-create \
+    > "$LOG" 2>&1; then
+    fail "${failure_case} fixture unexpectedly succeeded"
+  fi
+
+  if ! grep -Fq "$EXPECTED_FAILURE" "$LOG"; then
+    sed -n '1,240p' "$LOG" >&2
+    fail "${failure_case} fixture did not report the expected stop condition"
+  fi
+  if [ -e "$ARTIFACTS" ]; then
+    fail "${failure_case} fixture installed a final artifact directory"
+  fi
+  if find "$TEMP_ROOT" -maxdepth 1 -type d \
+    -name '.artifacts.staging.*' -print -quit | grep -q .; then
+    fail "${failure_case} fixture left a private artifact staging directory"
+  fi
+
+  if [ "$failure_case" = "mismatch" ]; then
+    if git_fixture show-ref --verify --quiet \
+      refs/heads/work/v2.0.0-synology-r1; then
+      fail "identity mismatch created a target branch"
+    fi
+    if [ -e "$PREPARED_WORKTREE" ]; then
+      fail "identity mismatch created a target worktree"
+    fi
+  else
+    [ -d "$PREPARED_WORKTREE" ] ||
+      fail "conflict fixture did not leave its isolated worktree for review"
+    if git -C "$PREPARED_WORKTREE" rev-parse -q --verify CHERRY_PICK_HEAD \
+      > /dev/null 2>&1; then
+      fail "conflict fixture left CHERRY_PICK_HEAD"
+    fi
+    if [ -n "$(git -C "$PREPARED_WORKTREE" diff --name-only --diff-filter=U)" ]; then
+      fail "conflict fixture left unmerged entries"
+    fi
+    if [ -n "$(git -C "$PREPARED_WORKTREE" status --short --untracked-files=all)" ]; then
+      fail "conflict fixture left a dirty isolated worktree"
+    fi
+    assert_equal "$NEW_UPSTREAM" \
+      "$(git -C "$PREPARED_WORKTREE" rev-parse HEAD)" \
+      "conflict fixture did not return to the exact upstream commit"
+  fi
+
+  REMOTE_REFS_AFTER="$(snapshot_refs "$BARE_ORIGIN")"
+  TAG_REFS_AFTER="$(git_fixture show-ref --tags | sort)"
+  assert_equal "$REMOTE_REFS_BEFORE" "$REMOTE_REFS_AFTER" \
+    "${failure_case} fixture changed remote refs"
+  assert_equal "$TAG_REFS_BEFORE" "$TAG_REFS_AFTER" \
+    "${failure_case} fixture changed local tags"
+
+  printf 'PASS: %s fixture stopped closed without publication side effects.\n' \
+    "$failure_case"
+}
+
 for command_name in git python3 sha256sum ssh-keygen sed sort; do
   require_command "$command_name"
 done
@@ -309,6 +446,16 @@ done
 case "$CASE" in
   success)
     create_success_fixture
+    ;;
+  mismatch | conflict)
+    create_failure_fixture "$CASE"
+    ;;
+  all)
+    create_success_fixture
+    cleanup
+    create_failure_fixture mismatch
+    cleanup
+    create_failure_fixture conflict
     ;;
   *)
     fail "unsupported fixture case: ${CASE}"
