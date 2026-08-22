@@ -66,7 +66,9 @@ func (t *target) dsmVersionString() string {
 }
 
 func (t *target) buildSPK(b *dist.Build, inner *innerPkg) ([]string, error) {
-	synoVersion := b.Version.Synology[t.dsmVersionInt()]
+	synoVersion := synologyPackageBuildNumber(
+		b.Version.Synology[t.dsmVersionInt()],
+	)
 	filename := fmt.Sprintf("tailscale-%s-%s-%d-dsm%s.spk", t.filenameArch, b.Version.Short, synoVersion, t.dsmVersionString())
 	out := filepath.Join(b.Out, filename)
 	if t.packageCenter {
@@ -163,12 +165,15 @@ func (t *target) buildSPK(b *dist.Build, inner *innerPkg) ([]string, error) {
 }
 
 func (t *target) mkInfo(b *dist.Build, uncompressedSz int64) []byte {
+	synoVersion := synologyPackageBuildNumber(
+		b.Version.Synology[t.dsmVersionInt()],
+	)
 	var ret bytes.Buffer
 	f := func(k, v string) {
 		fmt.Fprintf(&ret, "%s=%q\n", k, v)
 	}
 	f("package", "Tailscale")
-	f("version", fmt.Sprintf("%s-%d", b.Version.Short, b.Version.Synology[t.dsmVersionInt()]))
+	f("version", fmt.Sprintf("%s-%d", b.Version.Short, synoVersion))
 	f("arch", t.filenameArch)
 	f("description", "Connect all your devices using WireGuard, without the hassle.")
 	f("displayname", "Tailscale")
@@ -191,15 +196,14 @@ func (t *target) mkInfo(b *dist.Build, uncompressedSz int64) []byte {
 			case 2:
 				// This custom package depends on the DSM 7.3 netfilter
 				// module package and root-runtime integration.
-				f("os_min_ver", "7.3-81180")
+				f("os_min_ver", "7.3-86009")
 			default:
 				panic(fmt.Sprintf("unsupported DSM major.minor version %s", t.dsmVersionString()))
 			}
 		} else {
 			// This custom package depends on the DSM 7.3 netfilter
 			// module package and root-runtime integration.
-			f("os_min_ver", "7.3-81180")
-			f("os_max_ver", "")
+			f("os_min_ver", "7.3-86009")
 		}
 	default:
 		panic(fmt.Sprintf("unsupported DSM major version %d", t.dsmMajorVersion))
