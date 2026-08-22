@@ -78,6 +78,16 @@ review logical equivalence to the previous stack.
 
 ## Handoff boundary
 
+The handoff must attach all of the following review evidence:
+
+- `manifest.json`;
+- `SHA256SUMS`;
+- `preparation-report.md`;
+- `git range-diff` review notes;
+- signature and single-signoff verification results for every prepared commit;
+- complete output from the relevant source, patch round-trip, shell, and package
+  tests.
+
 The agent may draft review notes. Creating or updating a pull request requires
 separate authorization. Building either SPK, tagging, releasing, publishing,
 installing on a NAS, running bootstrap, changing firewall/netfilter state and
