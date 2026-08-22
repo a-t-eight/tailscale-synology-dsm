@@ -96,12 +96,6 @@ for path in "$WORKTREE" "$CONTROL_WORKTREE"; do
   fi
 done
 
-if [ ! -x "$CONTROL_WORKTREE/.githooks/pre-commit" ] ||
-  [ ! -x "$CONTROL_WORKTREE/.githooks/commit-msg" ]; then
-  fail "control worktree does not contain executable repository hooks"
-  exit 1
-fi
-
 COMMON_DIR="$(
   clean_git \
     -C "$WORKTREE" \
@@ -116,6 +110,31 @@ WORKTREE_ROOT="$(
     rev-parse \
     --show-toplevel
 )"
+
+CONTROL_ROOT="$(
+  clean_git \
+    -C "$CONTROL_WORKTREE" \
+    rev-parse \
+    --show-toplevel
+)"
+
+if [ "$ROLE" = "control" ]; then
+  if [ "$WORKTREE_ROOT" != "$CONTROL_ROOT" ]; then
+    fail "control role requires worktree and control worktree to resolve to the same root"
+    exit 1
+  fi
+  HOOK_AUTHORITY="$WORKTREE_ROOT"
+else
+  HOOK_AUTHORITY="$CONTROL_ROOT"
+fi
+
+if [ ! -x "$HOOK_AUTHORITY/.githooks/pre-commit" ] ||
+  [ ! -x "$HOOK_AUTHORITY/.githooks/commit-msg" ]; then
+  fail "hook authority does not contain executable repository hooks"
+  exit 1
+fi
+
+CONTROL_WORKTREE="$CONTROL_ROOT"
 
 if [ "$ROLE" = "control" ] &&
   [ ! -x "$WORKTREE_ROOT/scripts/validate-repository.sh" ]; then
