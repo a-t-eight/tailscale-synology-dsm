@@ -135,7 +135,7 @@ create_success_fixture() {
     fail "could not seed fixture origin"
 
   mkdir -p "$HOOKS_DIR"
-  for hook_name in post-commit post-applypatch; do
+  for hook_name in post-checkout post-commit post-applypatch; do
     cat > "$HOOKS_DIR/$hook_name" << 'HOOK'
 #!/bin/sh
 printf '%s\n' "$(basename "$0")" >> "${HOOK_EVIDENCE:?}"
