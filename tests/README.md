@@ -12,6 +12,16 @@ Control-branch test content records:
 - SPK metadata and privilege-manifest inspection;
 - NAS runtime and netfilter acceptance evidence.
 
+Source-worktree workflow checks are:
+
+- `releases/version-preparation-contract.sh` — validates the accepted r2
+  candidate, seven protected blobs, exact package dependency/DSM contract,
+  output schema and disabled safety capabilities;
+- `releases/prepare-version-workflow.sh all` — creates real offline Git
+  fixtures and proves signed ordered replay, review artifacts, patch round
+  trip, identity mismatch rejection, conflict cleanup and absence of remote,
+  tag or SPK side effects.
+
 `releases/validate-production-contract.sh` builds disposable local fixtures for
 the accepted release identity. It distinguishes living accepted identity from
 historical patch lineage, rejects structured metadata and evidence drift, and
