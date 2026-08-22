@@ -165,7 +165,7 @@ prepare_version() (
     shift
   done
 
-  for command_name in git python3 sha256sum mktemp; do
+  for command_name in git python3 sha256sum mktemp mv; do
     release_require_command "$command_name" || exit 1
   done
 
@@ -233,6 +233,13 @@ prepare_version() (
   fi
   TARGET_WORKTREE="$(release_absolute_path "$TARGET_WORKTREE")"
   OUTPUT_ROOT="$(release_absolute_path "$OUTPUT_ROOT")"
+
+  if [ "$TARGET_WORKTREE" = "$OUTPUT_ROOT" ] ||
+    [[ "$TARGET_WORKTREE" == "$OUTPUT_ROOT/"* ]] ||
+    [[ "$OUTPUT_ROOT" == "$TARGET_WORKTREE/"* ]]; then
+    release_fail "target worktree and output root must not overlap"
+    exit 1
+  fi
 
   if [ -e "$TARGET_WORKTREE" ] ||
     [ -e "$OUTPUT_ROOT" ]; then
@@ -787,7 +794,18 @@ PY
     exit 1
   }
 
-  mv -- "$STAGING_DIR" "$OUTPUT_ROOT"
+  mv \
+    --update=none-fail \
+    --no-copy \
+    --no-target-directory \
+    -- \
+    "$STAGING_DIR" \
+    "$OUTPUT_ROOT"
+  INSTALL_RC=$?
+  if [ "$INSTALL_RC" -ne 0 ]; then
+    release_fail "review artifact installation failed"
+    exit "$INSTALL_RC"
+  fi
   STAGING_DIR=""
 
   release_pass "pinned Synology version was prepared in an isolated worktree"

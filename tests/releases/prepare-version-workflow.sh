@@ -335,6 +335,7 @@ create_failure_fixture() {
   PREPARED_WORKTREE="${TEMP_ROOT}/prepared"
   ARTIFACTS="${TEMP_ROOT}/artifacts"
   LOG="${TEMP_ROOT}/prepare.log"
+  SHIM_DIR="${TEMP_ROOT}/bin"
 
   git init --bare --initial-branch=main "$BARE_ORIGIN" > /dev/null 2>&1 ||
     fail "could not create failure-fixture origin"
@@ -359,7 +360,8 @@ create_failure_fixture() {
 
   git_fixture switch main > /dev/null 2>&1
   case "$failure_case" in
-    mismatch)
+    mismatch | path-equal | output-inside-worktree | worktree-inside-output | \
+      install-race | mv-failure)
       printf 'release=2.0.0\n' > "$SOURCE_REPO/upstream-release.conf"
       git_fixture add upstream-release.conf
       ;;
@@ -393,13 +395,54 @@ create_failure_fixture() {
   SELECTED_UPSTREAM="$NEW_UPSTREAM"
   PREPARE_MODE="--confirm-create"
   EXPECTED_FAILURE="FAIL: logical commit replay conflicted: ${PREVIOUS_RELEASE}"
-  if [ "$failure_case" = "mismatch" ]; then
-    SELECTED_UPSTREAM="$OLD_UPSTREAM"
-    PREPARE_MODE="--plan-only"
-    EXPECTED_FAILURE="STOP: explicit upstream tag does not peel to the explicit commit"
-  fi
+  PREPARE_PATH=("$PATH")
+  case "$failure_case" in
+    mismatch)
+      SELECTED_UPSTREAM="$OLD_UPSTREAM"
+      PREPARE_MODE="--plan-only"
+      EXPECTED_FAILURE="STOP: explicit upstream tag does not peel to the explicit commit"
+      ;;
+    path-equal)
+      ARTIFACTS="$PREPARED_WORKTREE"
+      PREPARE_MODE="--plan-only"
+      EXPECTED_FAILURE="FAIL: target worktree and output root must not overlap"
+      ;;
+    output-inside-worktree)
+      ARTIFACTS="${PREPARED_WORKTREE}/review"
+      PREPARE_MODE="--plan-only"
+      EXPECTED_FAILURE="FAIL: target worktree and output root must not overlap"
+      ;;
+    worktree-inside-output)
+      PREPARED_WORKTREE="${ARTIFACTS}/prepared"
+      PREPARE_MODE="--plan-only"
+      EXPECTED_FAILURE="FAIL: target worktree and output root must not overlap"
+      ;;
+    install-race)
+      mkdir -p "$SHIM_DIR"
+      cat > "$SHIM_DIR/mv" << 'SHIM'
+#!/usr/bin/env bash
+destination="${!#}"
+mkdir -p "$destination"
+printf 'owned by another process\n' > "$destination/owner-marker"
+exec /usr/bin/mv "$@"
+SHIM
+      chmod 0755 "$SHIM_DIR/mv"
+      PREPARE_PATH=("$SHIM_DIR:$PATH")
+      EXPECTED_FAILURE="FAIL: review artifact installation failed"
+      ;;
+    mv-failure)
+      mkdir -p "$SHIM_DIR"
+      cat > "$SHIM_DIR/mv" << 'SHIM'
+#!/usr/bin/env bash
+exit 73
+SHIM
+      chmod 0755 "$SHIM_DIR/mv"
+      PREPARE_PATH=("$SHIM_DIR:$PATH")
+      EXPECTED_FAILURE="FAIL: review artifact installation failed"
+      ;;
+  esac
 
-  if bash "$PREPARE_SCRIPT" prepare-version \
+  if env PATH="${PREPARE_PATH[0]}" bash "$PREPARE_SCRIPT" prepare-version \
     --source-repo "$SOURCE_REPO" \
     --upstream-tag v2.0.0 \
     --upstream-commit "$SELECTED_UPSTREAM" \
@@ -419,39 +462,56 @@ create_failure_fixture() {
     sed -n '1,240p' "$LOG" >&2
     fail "${failure_case} fixture did not report the expected stop condition"
   fi
-  if [ -e "$ARTIFACTS" ]; then
+  if [ "$failure_case" != "install-race" ] &&
+    [ -e "$ARTIFACTS" ]; then
     fail "${failure_case} fixture installed a final artifact directory"
   fi
-  if find "$TEMP_ROOT" -maxdepth 1 -type d \
-    -name '.artifacts.staging.*' -print -quit | grep -q .; then
+  if find "$TEMP_ROOT" -type d \
+    \( -name '.artifacts.staging.*' -o -name '.review.staging.*' \) \
+    -print -quit | grep -q .; then
     fail "${failure_case} fixture left a private artifact staging directory"
   fi
 
-  if [ "$failure_case" = "mismatch" ]; then
+  case "$failure_case" in
+    mismatch | path-equal | output-inside-worktree | worktree-inside-output)
     if git_fixture show-ref --verify --quiet \
       refs/heads/work/v2.0.0-synology-r1; then
-      fail "identity mismatch created a target branch"
+      fail "${failure_case} created a target branch"
     fi
     if [ -e "$PREPARED_WORKTREE" ]; then
-      fail "identity mismatch created a target worktree"
+      fail "${failure_case} created a target worktree"
     fi
-  else
+      ;;
+    install-race)
+      [ -f "$ARTIFACTS/owner-marker" ] ||
+        fail "install race removed or replaced the competing destination"
+      [ ! -e "$ARTIFACTS/manifest.json" ] ||
+        fail "install race published artifacts into the competing destination"
+      if find "$ARTIFACTS" -mindepth 1 -maxdepth 1 -type d \
+        -name '.*.staging.*' -print -quit | grep -q .; then
+        fail "install race misdirected staging beneath the competing destination"
+      fi
+      ;;
+    conflict | mv-failure)
     [ -d "$PREPARED_WORKTREE" ] ||
-      fail "conflict fixture did not leave its isolated worktree for review"
+      fail "${failure_case} fixture did not leave its isolated worktree for review"
     if git -C "$PREPARED_WORKTREE" rev-parse -q --verify CHERRY_PICK_HEAD \
       > /dev/null 2>&1; then
-      fail "conflict fixture left CHERRY_PICK_HEAD"
+      fail "${failure_case} fixture left CHERRY_PICK_HEAD"
     fi
     if [ -n "$(git -C "$PREPARED_WORKTREE" diff --name-only --diff-filter=U)" ]; then
-      fail "conflict fixture left unmerged entries"
+      fail "${failure_case} fixture left unmerged entries"
     fi
     if [ -n "$(git -C "$PREPARED_WORKTREE" status --short --untracked-files=all)" ]; then
-      fail "conflict fixture left a dirty isolated worktree"
+      fail "${failure_case} fixture left a dirty isolated worktree"
     fi
-    assert_equal "$NEW_UPSTREAM" \
-      "$(git -C "$PREPARED_WORKTREE" rev-parse HEAD)" \
-      "conflict fixture did not return to the exact upstream commit"
-  fi
+      if [ "$failure_case" = "conflict" ]; then
+        assert_equal "$NEW_UPSTREAM" \
+          "$(git -C "$PREPARED_WORKTREE" rev-parse HEAD)" \
+          "conflict fixture did not return to the exact upstream commit"
+      fi
+      ;;
+  esac
 
   REMOTE_REFS_AFTER="$(snapshot_refs "$BARE_ORIGIN")"
   TAG_REFS_AFTER="$(git_fixture show-ref --tags | sort)"
@@ -472,7 +532,8 @@ case "$CASE" in
   success)
     create_success_fixture
     ;;
-  mismatch | conflict)
+  mismatch | conflict | path-equal | output-inside-worktree | \
+    worktree-inside-output | install-race | mv-failure)
     create_failure_fixture "$CASE"
     ;;
   all)
@@ -481,6 +542,16 @@ case "$CASE" in
     create_failure_fixture mismatch
     cleanup
     create_failure_fixture conflict
+    cleanup
+    create_failure_fixture path-equal
+    cleanup
+    create_failure_fixture output-inside-worktree
+    cleanup
+    create_failure_fixture worktree-inside-output
+    cleanup
+    create_failure_fixture install-race
+    cleanup
+    create_failure_fixture mv-failure
     ;;
   *)
     fail "unsupported fixture case: ${CASE}"
