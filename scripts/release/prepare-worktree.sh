@@ -465,7 +465,7 @@ while lines and not lines[-1]:
 path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY
 
-    release_clean_git \
+    release_hookless_git \
       -C "$TARGET_WORKTREE" \
       commit \
       -S \
@@ -559,7 +559,7 @@ PY
     exit "$ROUND_WORKTREE_RC"
   fi
 
-  release_clean_git \
+  release_hookless_git \
     -C "$ROUND_TRIP_WORKTREE" \
     am \
     --3way \
@@ -567,7 +567,7 @@ PY
     > /dev/null
   ROUND_APPLY_RC=$?
   if [ "$ROUND_APPLY_RC" -ne 0 ]; then
-    release_clean_git \
+    release_hookless_git \
       -C "$ROUND_TRIP_WORKTREE" \
       am \
       --abort \
@@ -739,6 +739,7 @@ lines.extend(
         "",
         "## Validation evidence",
         "",
+        "- Internal commit/apply hooks: disabled",
         "- Source range: linear and ordered",
         "- Prepared commits: signed with one matching sign-off each",
         "- Patch series: mail format with verified SHA-256 digests",
