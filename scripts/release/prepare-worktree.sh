@@ -65,7 +65,7 @@ prepare_version() (
       grep -Fxq "worktree ${ROUND_TRIP_WORKTREE}"
   }
 
-  # shellcheck disable=SC2329 # Invoked by the EXIT trap below.
+  # shellcheck disable=SC2317,SC2329 # Invoked by the EXIT trap below.
   cleanup_prepare_version() {
     if [ -n "$MESSAGE_FILE" ] &&
       [ -f "$MESSAGE_FILE" ]; then
