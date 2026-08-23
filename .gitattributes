@@ -1,5 +1,6 @@
 go.mod filter=go-mod
 *.go  diff=golang
+release/dist/synology/files/PKG_DEPS text eol=lf
 
 # Immutable historical patch payloads preserve their checksum-locked bytes.
 patches/v1.98.9/*.patch whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab

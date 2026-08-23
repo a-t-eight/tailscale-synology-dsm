@@ -78,3 +78,41 @@ if failures:
 
 print("PASS: GitHub Actions jobs use fork-portable runners and fuzz ownership.")
 PY
+
+PKG_DEPS_PATH="release/dist/synology/files/PKG_DEPS"
+ATTRIBUTES="$(
+  git \
+    -C "$REPO_ROOT" \
+    check-attr \
+    text \
+    eol \
+    -- \
+    "$PKG_DEPS_PATH"
+)"
+ATTRIBUTES_RC=$?
+
+if [ "$ATTRIBUTES_RC" -ne 0 ]; then
+  printf 'FAIL: could not read effective Git attributes for %s\n' \
+    "$PKG_DEPS_PATH" >&2
+  exit "$ATTRIBUTES_RC"
+fi
+
+TEXT_ATTRIBUTE="$(
+  printf '%s\n' "$ATTRIBUTES" |
+    awk '$2 == "text:" { print $3 }'
+)"
+EOL_ATTRIBUTE="$(
+  printf '%s\n' "$ATTRIBUTES" |
+    awk '$2 == "eol:" { print $3 }'
+)"
+
+if [ "$TEXT_ATTRIBUTE" != "set" ] ||
+  [ "$EOL_ATTRIBUTE" != "lf" ]; then
+  printf 'FAIL: %s must have effective attributes text=set and eol=lf; got text=%s eol=%s\n' \
+    "$PKG_DEPS_PATH" \
+    "$TEXT_ATTRIBUTE" \
+    "$EOL_ATTRIBUTE" >&2
+  exit 1
+fi
+
+echo "PASS: PKG_DEPS uses LF checkout bytes on every platform."
