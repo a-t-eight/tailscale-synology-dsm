@@ -105,6 +105,8 @@ create_success_fixture() {
   LOG="${TEMP_ROOT}/prepare.log"
   HOOKS_DIR="${TEMP_ROOT}/inherited-hooks"
   HOOK_EVIDENCE="${TEMP_ROOT}/inherited-hooks.log"
+  SHIM_DIR="${TEMP_ROOT}/bin"
+  REAL_MV="$(command -v mv)"
 
   git init --bare --initial-branch=main "$BARE_ORIGIN" > /dev/null 2>&1 ||
     fail "could not create bare origin"
@@ -164,10 +166,29 @@ HOOK
   export HOOK_EVIDENCE
   git_fixture config core.hooksPath "$HOOKS_DIR"
 
+  mkdir -p "$SHIM_DIR"
+  cat > "$SHIM_DIR/mv" << 'SHIM'
+#!/usr/bin/env bash
+set -u
+
+for argument in "$@"; do
+  if [ "$argument" = "--update=none-fail" ]; then
+    printf '%s\n' \
+      "mv: invalid argument ‘none-fail’ for ‘--update’" \
+      'Valid arguments are: all, none, older' >&2
+    exit 1
+  fi
+done
+
+exec "${REAL_MV:?}" "$@"
+SHIM
+  chmod 0755 "$SHIM_DIR/mv"
+
   REMOTE_REFS_BEFORE="$(snapshot_refs "$BARE_ORIGIN")"
   TAG_REFS_BEFORE="$(git_fixture show-ref --tags | sort)"
 
-  if ! bash "$PREPARE_SCRIPT" prepare-version \
+  if ! env PATH="$SHIM_DIR:$PATH" REAL_MV="$REAL_MV" \
+    bash "$PREPARE_SCRIPT" prepare-version \
     --source-repo "$SOURCE_REPO" \
     --upstream-tag v2.0.0 \
     --upstream-commit "$NEW_UPSTREAM" \
@@ -586,7 +607,7 @@ SHIM
     "$failure_case"
 }
 
-for command_name in git python3 sha256sum ssh-keygen sed sort; do
+for command_name in git mv python3 sha256sum ssh-keygen sed sort; do
   require_command "$command_name"
 done
 
