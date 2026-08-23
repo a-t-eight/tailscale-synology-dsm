@@ -9,10 +9,70 @@ REPO_ROOT="$(
 
 python3 - \
   "${REPO_ROOT}/.github/workflows/vet.yml" \
-  "${REPO_ROOT}/.github/workflows/test.yml" << 'PY'
+  "${REPO_ROOT}/.github/workflows/test.yml" \
+  "${REPO_ROOT}/.github/workflows/synology-product.yml" \
+  "${REPO_ROOT}/.github/workflows/docker-file-build.yml" \
+  "${REPO_ROOT}/.github/workflows/natlab-integrationtest.yml" << 'PY'
 import re
 import sys
 from pathlib import Path
+
+
+def top_level_block(workflow: str, key: str) -> str:
+    lines = workflow.splitlines()
+    marker = re.compile(rf"^{re.escape(key)}:\s*(?:#.*)?$")
+    start = next(
+        (index for index, line in enumerate(lines) if marker.match(line)),
+        None,
+    )
+    if start is None:
+        return ""
+
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        if re.match(r"^[A-Za-z0-9_-]+:\s*(?:#.*)?$", lines[index]):
+            end = index
+            break
+    return "\n".join(lines[start:end])
+
+
+def mapping_block(text: str, key: str, indent: int) -> str:
+    lines = text.splitlines()
+    marker = f"{' ' * indent}{key}:"
+    try:
+        start = lines.index(marker)
+    except ValueError:
+        return ""
+
+    end = len(lines)
+    sibling = re.compile(
+        rf"^{' ' * indent}[A-Za-z0-9_-]+:\s*(?:#.*)?$"
+    )
+    for index in range(start + 1, len(lines)):
+        if sibling.match(lines[index]):
+            end = index
+            break
+    return "\n".join(lines[start:end])
+
+
+def mapping_keys(text: str, indent: int) -> list[str]:
+    pattern = re.compile(
+        rf"^{' ' * indent}([A-Za-z0-9_-]+):\s*(?:#.*)?$"
+    )
+    return [
+        match.group(1)
+        for line in text.splitlines()
+        if (match := pattern.match(line))
+    ]
+
+
+def list_values(text: str, indent: int) -> list[str]:
+    pattern = re.compile(rf"^{' ' * indent}-\s+(.+?)\s*$")
+    return [
+        match.group(1).strip("'\"")
+        for line in text.splitlines()
+        if (match := pattern.match(line))
+    ]
 
 
 def job_block(workflow: str, job: str) -> str:
@@ -50,8 +110,41 @@ def alls_green_allowed_skips(job: str) -> list[str]:
     )
 
 
-vet_workflow = Path(sys.argv[1]).read_text(encoding="utf-8")
-test_workflow = Path(sys.argv[2]).read_text(encoding="utf-8")
+def read_workflow(path: Path) -> str:
+    if not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8")
+
+
+def trigger_names(workflow: str) -> list[str]:
+    return mapping_keys(top_level_block(workflow, "on"), 2)
+
+
+def assert_triggers(
+    failures: list[str],
+    workflow_name: str,
+    workflow: str,
+    expected: list[str],
+) -> None:
+    observed = trigger_names(workflow)
+    if observed != expected:
+        failures.append(
+            f"{workflow_name} triggers must be exactly {expected!r} "
+            f"(observed: {observed!r})"
+        )
+
+
+vet_path = Path(sys.argv[1])
+test_path = Path(sys.argv[2])
+synology_product_path = Path(sys.argv[3])
+docker_path = Path(sys.argv[4])
+natlab_path = Path(sys.argv[5])
+
+vet_workflow = read_workflow(vet_path)
+test_workflow = read_workflow(test_path)
+synology_product_workflow = read_workflow(synology_product_path)
+docker_workflow = read_workflow(docker_path)
+natlab_workflow = read_workflow(natlab_path)
 
 vet = job_block(vet_workflow, "vet")
 windows = job_block(test_workflow, "windows")
@@ -61,6 +154,165 @@ check_mergeability_strict = job_block(test_workflow, "check_mergeability_strict"
 check_mergeability = job_block(test_workflow, "check_mergeability")
 
 failures: list[str] = []
+
+if not synology_product_workflow:
+    failures.append(
+        "focused Synology product workflow is missing: "
+        ".github/workflows/synology-product.yml"
+    )
+else:
+    assert_triggers(
+        failures,
+        "synology-product workflow",
+        synology_product_workflow,
+        ["pull_request", "workflow_dispatch"],
+    )
+
+    pull_request = mapping_block(
+        top_level_block(synology_product_workflow, "on"),
+        "pull_request",
+        2,
+    )
+    branches = mapping_block(pull_request, "branches", 4)
+    observed_bases = list_values(branches, 6)
+    expected_bases = ["release/*-synology", "synology/main"]
+    if observed_bases != expected_bases:
+        failures.append(
+            "synology-product pull_request bases must be exactly "
+            f"{expected_bases!r} (observed: {observed_bases!r})"
+        )
+
+    jobs = top_level_block(synology_product_workflow, "jobs")
+    observed_jobs = mapping_keys(jobs, 2)
+    if observed_jobs != ["synology-product"]:
+        failures.append(
+            "synology-product workflow must contain exactly one job named "
+            f"synology-product (observed jobs: {observed_jobs!r})"
+        )
+    else:
+        product = job_block(synology_product_workflow, "synology-product")
+
+        names = re.findall(r"(?m)^    name:\s*(.*?)\s*$", product)
+        if names != ["synology-product"]:
+            failures.append(
+                "synology-product job name must be exactly synology-product "
+                f"(observed: {names!r})"
+            )
+
+        product_runners = runs_on(product)
+        if product_runners != ["ubuntu-24.04"]:
+            failures.append(
+                "synology-product job must use exactly ubuntu-24.04 "
+                f"(observed runs-on: {product_runners!r})"
+            )
+
+        timeouts = re.findall(
+            r"(?m)^    timeout-minutes:\s*(.*?)\s*$",
+            product,
+        )
+        if timeouts != ["45"]:
+            failures.append(
+                "synology-product job must have timeout-minutes 45 "
+                f"(observed: {timeouts!r})"
+            )
+
+        permissions = mapping_block(product, "permissions", 4)
+        contents_permissions = re.findall(
+            r"(?m)^      contents:\s*(.*?)\s*$",
+            permissions,
+        )
+        if contents_permissions != ["read"]:
+            failures.append(
+                "synology-product job permissions must set contents to read "
+                f"(observed: {contents_permissions!r})"
+            )
+
+        checkout_uses = re.findall(
+            r"(?m)^        uses:\s*actions/checkout@([^\s#]+)",
+            product,
+        )
+        expected_checkout = "de0fac2e4500dabe0009e67214ff5f5447ce83dd"
+        if checkout_uses != [expected_checkout]:
+            failures.append(
+                "synology-product must use exactly one checkout pinned to "
+                f"{expected_checkout} (observed: {checkout_uses!r})"
+            )
+
+        fetch_depths = re.findall(
+            r"(?m)^          fetch-depth:\s*(.*?)\s*$",
+            product,
+        )
+        if fetch_depths != ["0"]:
+            failures.append(
+                "synology-product checkout must set fetch-depth to 0 "
+                f"(observed: {fetch_depths!r})"
+            )
+
+        required_commands = [
+            "bash tests/releases/version-preparation-contract.sh",
+            "bash tests/releases/prepare-version-workflow.sh all",
+            "bash tests/releases/control-pre-commit.sh",
+            "bash tests/releases/promoted-patch-inventory.sh",
+            "bash tests/releases/github-actions-fork-portability.sh",
+            "bash tests/releases/shellcheck.sh",
+            "bash tests/releases/diff-check.sh",
+            'export PATH="$PWD/tool:$PATH"',
+            "./tool/go test -count=1",
+            "./release/dist/synology",
+            "./cmd/tailscale/cli",
+            "./cmd/tailscaled",
+            "./ipn/ipnlocal",
+            "./util/linuxfw",
+            "./wgengine/router",
+            "git diff --check",
+            "git status --porcelain=v1 --untracked-files=all",
+        ]
+        for command in required_commands:
+            if command not in product:
+                failures.append(
+                    "synology-product job must invoke required gate: "
+                    f"{command}"
+                )
+
+        required_inventory_contract = [
+            "find release/dist/synology/tests",
+            "-name '*-test.sh'",
+            "LC_ALL=C sort",
+            "${#synology_tests[@]}",
+            "for test_script in \"${synology_tests[@]}\"",
+            "bash \"$test_script\"",
+        ]
+        for snippet in required_inventory_contract:
+            if snippet not in product:
+                failures.append(
+                    "synology-product shell-test inventory must contain: "
+                    f"{snippet}"
+                )
+
+        if "command -v shellcheck" not in product or \
+                "ShellCheck is required" not in product:
+            failures.append(
+                "synology-product must fail clearly when ShellCheck is unavailable"
+            )
+
+assert_triggers(
+    failures,
+    "full CI workflow",
+    test_workflow,
+    ["push", "merge_group", "workflow_dispatch"],
+)
+assert_triggers(
+    failures,
+    "Dockerfile build workflow",
+    docker_workflow,
+    ["push", "workflow_dispatch"],
+)
+assert_triggers(
+    failures,
+    "natlab integration workflow",
+    natlab_workflow,
+    ["push", "merge_group", "workflow_dispatch"],
+)
 
 vet_runners = runs_on(vet)
 if vet_runners != ["ubuntu-24.04"] or "self-hosted" in vet:
@@ -117,6 +369,8 @@ if failures:
     raise SystemExit(1)
 
 print("PASS: GitHub Actions jobs use fork-portable runners and fuzz ownership.")
+print("PASS: downstream PRs use one focused Synology product gate.")
+print("PASS: inherited heavy compatibility workflows use explicit triggers.")
 PY
 PYTHON_RC=$?
 
