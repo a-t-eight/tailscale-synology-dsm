@@ -222,10 +222,8 @@ jobs:
     permissions:
       id-token: write # This is required for requesting the GitHub action identity JWT that can auth to cigocached
       contents: read # This is required for actions/checkout
-    # ci-windows-github-1 is a 2022 GitHub-managed runner in our org with 8 cores
-    # and 32 GB of RAM. It is connected to a private Azure VNet that hosts cigocached.
-    # https://github.com/organizations/tailscale/settings/actions/github-hosted-runners/5
-    runs-on: ci-windows-github-1
+    # Use a standard GitHub-hosted runner; the private Go cache is optional.
+    runs-on: windows-2022
     needs: gomod-cache
     name: Windows (${{ matrix.name || matrix.shard}})
     strategy:
@@ -688,7 +686,8 @@ jobs:
     # Practically, this means that all steps after 'build fuzzers' must have an
     # explicit 'if' condition, because the default condition for steps is
     # 'success()', meaning "only run this if no previous steps failed".
-    if: github.event_name == 'pull_request'
+    # Downstream forks require their own ClusterFuzzLite or OSS-Fuzz integration.
+    if: github.event_name == 'pull_request' && github.repository == 'tailscale/tailscale'
     runs-on: ubuntu-24.04
     steps:
     - name: build fuzzers
