@@ -1,0 +1,228 @@
+From 20c86229955a3d03de01901aee1499cab87c571d Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Sun, 26 Jul 2026 11:54:16 +1000
+Subject: [PATCH 19/19] build: make release artifacts reproducible
+
+Honour SOURCE_DATE_EPOCH in the release builder and derive a stable default from the checked-out commit for the Synology root-bootstrap build.
+
+This normalises INFO.create_time and all inner and outer tar member timestamps while preserving the existing wall-clock fallback for other builds.
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ release/dist/dist.go                  |  24 +++++-
+ release/dist/dist_time_test.go        | 111 ++++++++++++++++++++++++++
+ tool/build-synology-root-bootstrap.sh |  29 +++++++
+ 3 files changed, 163 insertions(+), 1 deletion(-)
+ create mode 100644 release/dist/dist_time_test.go
+
+diff --git a/release/dist/dist.go b/release/dist/dist.go
+index 094d0a0e0..b122ba49c 100644
+--- a/release/dist/dist.go
++++ b/release/dist/dist.go
+@@ -16,6 +16,7 @@
+ 	"regexp"
+ 	"runtime"
+ 	"sort"
++	"strconv"
+ 	"strings"
+ 	"sync"
+ 	"time"
+@@ -91,8 +92,29 @@ type Build struct {
+ 	onCloseFuncs []func() error // funcs to be called when Builder is closed
+ }
+ 
++func buildTimestamp() (time.Time, error) {
++	value, ok := os.LookupEnv("SOURCE_DATE_EPOCH")
++	if !ok {
++		return time.Now().UTC(), nil
++	}
++
++	seconds, err := strconv.ParseInt(value, 10, 64)
++	if err != nil || seconds < 0 {
++		return time.Time{}, fmt.Errorf(
++			"invalid SOURCE_DATE_EPOCH %q: must be a non-negative base-10 integer",
++			value,
++		)
++	}
++
++	return time.Unix(seconds, 0).UTC(), nil
++}
++
+ // NewBuild creates a new Build rooted at repo, and writing artifacts to out.
+ func NewBuild(repo, out string) (*Build, error) {
++	timestamp, err := buildTimestamp()
++	if err != nil {
++		return nil, err
++	}
+ 	if err := os.MkdirAll(out, 0750); err != nil {
+ 		return nil, fmt.Errorf("creating out dir: %w", err)
+ 	}
+@@ -119,7 +141,7 @@ func NewBuild(repo, out string) (*Build, error) {
+ 		Go:           goTool,
+ 		Yarn:         yarnTool,
+ 		Version:      mkversion.Info(),
+-		Time:         time.Now().UTC(),
++		Time:         timestamp,
+ 		extra:        map[any]any{},
+ 		goBuildLimit: make(chan struct{}, runtime.NumCPU()),
+ 	}
+diff --git a/release/dist/dist_time_test.go b/release/dist/dist_time_test.go
+new file mode 100644
+index 000000000..273441253
+--- /dev/null
++++ b/release/dist/dist_time_test.go
+@@ -0,0 +1,111 @@
++// Copyright (c) Tailscale Inc & contributors
++// SPDX-License-Identifier: BSD-3-Clause
++
++package dist
++
++import (
++	"os"
++	"testing"
++	"time"
++)
++
++func TestBuildTimestampUsesCurrentTimeWhenSourceDateEpochUnset(t *testing.T) {
++	previous, wasSet := os.LookupEnv("SOURCE_DATE_EPOCH")
++
++	if err := os.Unsetenv("SOURCE_DATE_EPOCH"); err != nil {
++		t.Fatalf("unsetting SOURCE_DATE_EPOCH: %v", err)
++	}
++
++	t.Cleanup(func() {
++		var err error
++
++		if wasSet {
++			err = os.Setenv("SOURCE_DATE_EPOCH", previous)
++		} else {
++			err = os.Unsetenv("SOURCE_DATE_EPOCH")
++		}
++
++		if err != nil {
++			t.Errorf("restoring SOURCE_DATE_EPOCH: %v", err)
++		}
++	})
++
++	before := time.Now().UTC()
++
++	got, err := buildTimestamp()
++	if err != nil {
++		t.Fatalf("buildTimestamp: %v", err)
++	}
++
++	after := time.Now().UTC()
++
++	if got.Before(before) || got.After(after) {
++		t.Fatalf(
++			"buildTimestamp = %v, want a value between %v and %v",
++			got,
++			before,
++			after,
++		)
++	}
++}
++
++func TestBuildTimestampUsesSourceDateEpoch(t *testing.T) {
++	const sourceDateEpoch = "1785000000"
++
++	t.Setenv("SOURCE_DATE_EPOCH", sourceDateEpoch)
++
++	got, err := buildTimestamp()
++	if err != nil {
++		t.Fatalf("buildTimestamp: %v", err)
++	}
++
++	want := time.Unix(1785000000, 0).UTC()
++	if !got.Equal(want) {
++		t.Fatalf("buildTimestamp = %v, want %v", got, want)
++	}
++
++	if got.Location() != time.UTC {
++		t.Fatalf("buildTimestamp location = %v, want UTC", got.Location())
++	}
++}
++
++func TestBuildTimestampRejectsInvalidSourceDateEpoch(t *testing.T) {
++	tests := []struct {
++		name  string
++		value string
++	}{
++		{
++			name:  "empty",
++			value: "",
++		},
++		{
++			name:  "negative",
++			value: "-1",
++		},
++		{
++			name:  "not-a-number",
++			value: "not-a-number",
++		},
++		{
++			name:  "fractional",
++			value: "1.5",
++		},
++		{
++			name:  "overflow",
++			value: "9223372036854775808",
++		},
++	}
++
++	for _, test := range tests {
++		t.Run(test.name, func(t *testing.T) {
++			t.Setenv("SOURCE_DATE_EPOCH", test.value)
++
++			if _, err := buildTimestamp(); err == nil {
++				t.Fatalf(
++					"buildTimestamp accepted invalid SOURCE_DATE_EPOCH %q",
++					test.value,
++				)
++			}
++		})
++	}
++}
+diff --git a/tool/build-synology-root-bootstrap.sh b/tool/build-synology-root-bootstrap.sh
+index 01234e7aa..fe04a50d9 100755
+--- a/tool/build-synology-root-bootstrap.sh
++++ b/tool/build-synology-root-bootstrap.sh
+@@ -5,6 +5,35 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ VERSION_OVERRIDE="${TS_VERSION_OVERRIDE:-1.98.96}"
+ OUT_ROOT="${1:-${REPO_ROOT}/build/synology/v1.98.9-final}"
+ 
++SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-}"
++
++if [ -z "${SOURCE_DATE_EPOCH}" ]; then
++    if ! SOURCE_DATE_EPOCH="$(
++        git -C "${REPO_ROOT}" \
++            show \
++            -s \
++            --format='%ct' \
++            HEAD
++    )"
++    then
++        printf 'ERROR: unable to derive SOURCE_DATE_EPOCH from HEAD\n' >&2
++        exit 1
++    fi
++fi
++
++case "${SOURCE_DATE_EPOCH}" in
++    ''|*[!0-9]*)
++        printf 'ERROR: SOURCE_DATE_EPOCH must be a non-negative integer: %s\n' \
++            "${SOURCE_DATE_EPOCH}" >&2
++        exit 1
++        ;;
++esac
++
++export SOURCE_DATE_EPOCH
++
++printf 'SOURCE_DATE_EPOCH=%s\n' \
++    "${SOURCE_DATE_EPOCH}"
++
+ SIDELOAD_OUT="${OUT_ROOT}/sideload"
+ PACKAGE_CENTER_OUT="${OUT_ROOT}/package-center-reference"
+ REFERENCE_OUT="${OUT_ROOT}/reference-metadata"
+-- 
+2.55.0
+

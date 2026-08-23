@@ -1,3 +1,3 @@
-[tailscale-netfilter-modules]
-pkg_min_ver=1.0.0-11
-os_min_ver=7.3-81180
+[iptables-netfilter-extensions]
+pkg_min_ver=1.1.0-3
+os_min_ver=7.3-86009

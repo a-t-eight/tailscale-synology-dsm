@@ -1,0 +1,838 @@
+From cc5d96275e9dd76fd8a4f38209a2df91199a425c Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Sat, 25 Jul 2026 10:39:20 +1000
+Subject: [PATCH 18/19] synology: harden boot networking startup
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ .../synology/files/scripts/start-stop-status  | 148 ++++++++++++--
+ .../scripts/tailscale-netfilter-reconciler    |  71 +++++--
+ release/dist/synology/pkgs.go                 |  10 +-
+ .../netfilter-reconciler-shutdown-test.sh     | 193 ++++++++++++++++++
+ .../tests/netfilter-reconciler-test.sh        |   8 +
+ .../tests/start-stop-definitions-test.sh      |   4 +
+ .../dist/synology/tests/tun-device-test.sh    | 186 +++++++++++++++++
+ tool/build-synology-root-bootstrap.sh         |  42 +++-
+ 8 files changed, 625 insertions(+), 37 deletions(-)
+ create mode 100755 release/dist/synology/tests/netfilter-reconciler-shutdown-test.sh
+ create mode 100755 release/dist/synology/tests/tun-device-test.sh
+
+diff --git a/release/dist/synology/files/scripts/start-stop-status b/release/dist/synology/files/scripts/start-stop-status
+index 3b03db6d0..1faec8157 100755
+--- a/release/dist/synology/files/scripts/start-stop-status
++++ b/release/dist/synology/files/scripts/start-stop-status
+@@ -38,6 +38,11 @@ TAILSCALE_BIN="${SYNOPKG_PKGDEST}/bin/tailscale"
+ 
+ NETFILTER_LOCALAPI_ATTEMPTS="${TAILSCALE_SYNOLOGY_LOCALAPI_ATTEMPTS:-30}"
+ 
++TUN_DEVICE="${TAILSCALE_SYNOLOGY_TUN_DEVICE:-/dev/net/tun}"
++TUN_PROC_MISC="${TAILSCALE_SYNOLOGY_TUN_PROC_MISC:-/proc/misc}"
++TUN_WAIT_ATTEMPTS="${TAILSCALE_SYNOLOGY_TUN_WAIT_ATTEMPTS:-10}"
++TUN_WAIT_SECONDS="${TAILSCALE_SYNOLOGY_TUN_WAIT_SECONDS:-1}"
++
+ RECONCILER_SCRIPT="${PKG_ROOT}/scripts/tailscale-netfilter-reconciler"
+ RECONCILER_PID_FILE="${PKGVAR}/tailscale-netfilter-reconciler.pid"
+ RECONCILER_LOG_FILE="${PKGVAR}/tailscale-netfilter-reconciler.log"
+@@ -630,28 +635,137 @@ check_netfilter_prerequisites() {
+     return 0
+ }
+ 
++tun_device_is_ready() {
++    [ -c "${TUN_DEVICE}" ]
++}
++
++
++tun_driver_available() {
++    [ -r "${TUN_PROC_MISC}" ] ||
++        return 1
++
++    awk '
++        $1 == "200" && $2 == "tun" {
++            found = 1
++        }
++
++        END {
++            exit found ? 0 : 1
++        }
++    ' "${TUN_PROC_MISC}"
++}
++
++
++try_load_tun_driver() {
++    local modprobe_bin
++
++    modprobe_bin="$(
++        command -v modprobe 2>/dev/null
++    )" || return 1
++
++    "${modprobe_bin}" \
++        tun \
++        >/dev/null 2>&1
++}
++
++
+ ensure_tun_created() {
+-    if [ "${SYNOPKG_DSM_VERSION_MAJOR}" -eq "7" ]; then
+-        if [ ! -c /dev/net/tun ]; then
+-            log_message ERROR \
+-                "/dev/net/tun is unavailable; install and load the TUN kernel module before starting Tailscale."
+-            return 1
++    local attempt=1
++    local tun_directory="${TUN_DEVICE%/*}"
++
++    case "${TUN_WAIT_ATTEMPTS}" in
++    ''|*[!0-9]*|0)
++        log_message ERROR \
++            "TAILSCALE_SYNOLOGY_TUN_WAIT_ATTEMPTS must be a positive integer"
++        return 1
++        ;;
++    esac
++
++    case "${TUN_WAIT_SECONDS}" in
++    ''|*[!0-9]*)
++        log_message ERROR \
++            "TAILSCALE_SYNOLOGY_TUN_WAIT_SECONDS must be a non-negative integer"
++        return 1
++        ;;
++    esac
++
++    while [ "${attempt}" -le "${TUN_WAIT_ATTEMPTS}" ]; do
++        if tun_device_is_ready; then
++            if ! chmod 0666 "${TUN_DEVICE}"; then
++                log_message ERROR \
++                    "cannot set permissions on ${TUN_DEVICE}"
++                return 1
++            fi
++
++            return 0
+         fi
+-        return 0
+-    fi
+-    # Create the necessary file structure for /dev/net/tun
+-    if ([ ! -c /dev/net/tun ]); then
+-        if ([ ! -d /dev/net ]); then
+-            mkdir -m 755 /dev/net
++
++        if ! tun_driver_available; then
++            try_load_tun_driver ||
++                true
+         fi
+-        mknod /dev/net/tun c 10 200
+-        chmod 0755 /dev/net/tun
+-    fi
+ 
+-    # Load the tun module if not already loaded
+-    if (!(lsmod | grep -q "^tun\s")); then
+-        insmod /lib/modules/tun.ko
++        if tun_driver_available; then
++            if ! mkdir -p -- "${tun_directory}"; then
++                log_message ERROR \
++                    "cannot create TUN device directory ${tun_directory}"
++                return 1
++            fi
++
++            if ! chmod 0755 "${tun_directory}"; then
++                log_message ERROR \
++                    "cannot set permissions on ${tun_directory}"
++                return 1
++            fi
++
++            if [ -e "${TUN_DEVICE}" ] ||
++                [ -L "${TUN_DEVICE}" ]
++            then
++                if ! rm -f -- "${TUN_DEVICE}"; then
++                    log_message ERROR \
++                        "cannot replace invalid TUN device path ${TUN_DEVICE}"
++                    return 1
++                fi
++            fi
++
++            mknod \
++                "${TUN_DEVICE}" \
++                c \
++                10 \
++                200 \
++                >/dev/null 2>&1 ||
++                true
++
++            if tun_device_is_ready; then
++                if ! chmod 0666 "${TUN_DEVICE}"; then
++                    log_message ERROR \
++                        "cannot set permissions on ${TUN_DEVICE}"
++                    return 1
++                fi
++
++                log_message INFO \
++                    "created kernel TUN device ${TUN_DEVICE}"
++
++                return 0
++            fi
++        fi
++
++        if [ "${attempt}" -lt "${TUN_WAIT_ATTEMPTS}" ]; then
++            sleep "${TUN_WAIT_SECONDS}"
++        fi
++
++        attempt=$((attempt + 1))
++    done
++
++    if tun_driver_available; then
++        log_message ERROR \
++            "kernel TUN driver is registered, but ${TUN_DEVICE} could not be created"
++    else
++        log_message ERROR \
++            "kernel TUN driver is unavailable after ${TUN_WAIT_ATTEMPTS} attempts"
+     fi
++
++    return 1
+ }
+ 
+ set_sysctl_value() {
+diff --git a/release/dist/synology/files/scripts/tailscale-netfilter-reconciler b/release/dist/synology/files/scripts/tailscale-netfilter-reconciler
+index 6840c6cd3..9647b7bec 100755
+--- a/release/dist/synology/files/scripts/tailscale-netfilter-reconciler
++++ b/release/dist/synology/files/scripts/tailscale-netfilter-reconciler
+@@ -31,6 +31,7 @@ TEST_MAX_ITERATIONS="${TAILSCALE_SYNOLOGY_RECONCILER_TEST_MAX_ITERATIONS:-0}"
+ TEST_NO_SLEEP="${TAILSCALE_SYNOLOGY_RECONCILER_TEST_NO_SLEEP:-0}"
+ 
+ STOP_REQUESTED=0
++SLEEP_PID=""
+ LAST_STATE=""
+ LAST_PHASE=""
+ LAST_REPAIR_EPOCH=0
+@@ -124,7 +125,16 @@ validate_configuration() {
+ 
+ 
+ handle_stop() {
++    local sleep_pid="${SLEEP_PID}"
++
+     STOP_REQUESTED=1
++
++    if [ -n "${sleep_pid}" ]; then
++        kill -TERM \
++            "${sleep_pid}" \
++            >/dev/null 2>&1 ||
++            true
++    fi
+ }
+ 
+ 
+@@ -144,6 +154,8 @@ cleanup_pid_file() {
+ 
+ sleep_for() {
+     local duration="$1"
++    local sleep_pid
++    local wait_status=0
+ 
+     if [ "${TEST_MODE}" = "1" ] &&
+         [ "${TEST_NO_SLEEP}" = "1" ]
+@@ -151,7 +163,32 @@ sleep_for() {
+         return 0
+     fi
+ 
+-    sleep "${duration}"
++    if [ "${STOP_REQUESTED}" -ne 0 ]; then
++        return 0
++    fi
++
++    sleep "${duration}" &
++
++    sleep_pid=$!
++    SLEEP_PID="${sleep_pid}"
++
++    if [ "${STOP_REQUESTED}" -ne 0 ]; then
++        kill -TERM \
++            "${sleep_pid}" \
++            >/dev/null 2>&1 ||
++            true
++    fi
++
++    wait "${sleep_pid}" ||
++        wait_status=$?
++
++    SLEEP_PID=""
++
++    if [ "${STOP_REQUESTED}" -ne 0 ]; then
++        return 0
++    fi
++
++    return "${wait_status}"
+ }
+ 
+ 
+@@ -411,14 +448,22 @@ reconcile_once() {
+         else
+             LAST_STATE="repair-pending"
+         fi
++
+         return
+     fi
+ 
+-    if ! prefs_require_netfilter; then
+-        set_state \
+-            inactive \
+-            INFO \
+-            "current Tailscale preferences do not require netfilter reconciliation"
++    # Keep healthy operation cheap. Only consult LocalAPI when one or
++    # more required firewall hooks are actually missing.
++    if netfilter_hooks_complete; then
++        if [ "${LAST_STATE}" = "missing" ] ||
++            [ "${LAST_STATE}" = "repair-failed" ]
++        then
++            log_message INFO \
++                "Tailscale netfilter hooks are complete again"
++        fi
++
++        LAST_STATE="healthy"
++
+         return
+     fi
+ 
+@@ -427,18 +472,16 @@ reconcile_once() {
+             waiting \
+             INFO \
+             "waiting for the Tailscale backend to reach Running state"
++
+         return
+     fi
+ 
+-    if netfilter_hooks_complete; then
+-        if [ "${LAST_STATE}" = "missing" ] ||
+-            [ "${LAST_STATE}" = "repair-failed" ]
+-        then
+-            log_message INFO \
+-                "Tailscale netfilter hooks are complete again"
+-        fi
++    if ! prefs_require_netfilter; then
++        set_state \
++            inactive \
++            INFO \
++            "current Tailscale preferences do not require netfilter reconciliation"
+ 
+-        LAST_STATE="healthy"
+         return
+     fi
+ 
+diff --git a/release/dist/synology/pkgs.go b/release/dist/synology/pkgs.go
+index c585968ff..7d2f05d59 100644
+--- a/release/dist/synology/pkgs.go
++++ b/release/dist/synology/pkgs.go
+@@ -189,14 +189,16 @@ func (t *target) mkInfo(b *dist.Build, uncompressedSz int64) []byte {
+ 				f("os_min_ver", "7.0-40000")
+ 				f("os_max_ver", "7.2-60000")
+ 			case 2:
+-				f("os_min_ver", "7.2-60000")
++				// This custom package depends on the DSM 7.3 netfilter
++				// module package and root-runtime integration.
++				f("os_min_ver", "7.3-81180")
+ 			default:
+ 				panic(fmt.Sprintf("unsupported DSM major.minor version %s", t.dsmVersionString()))
+ 			}
+ 		} else {
+-			// We do not clamp the os_max_ver currently for non-package center builds as
+-			// the binaries for 7.0 and 7.2 are identical.
+-			f("os_min_ver", "7.0-40000")
++			// This custom package depends on the DSM 7.3 netfilter
++			// module package and root-runtime integration.
++			f("os_min_ver", "7.3-81180")
+ 			f("os_max_ver", "")
+ 		}
+ 	default:
+diff --git a/release/dist/synology/tests/netfilter-reconciler-shutdown-test.sh b/release/dist/synology/tests/netfilter-reconciler-shutdown-test.sh
+new file mode 100755
+index 000000000..db8076070
+--- /dev/null
++++ b/release/dist/synology/tests/netfilter-reconciler-shutdown-test.sh
+@@ -0,0 +1,193 @@
++#!/bin/bash
++
++set -euo pipefail
++
++SCRIPT_DIR="$(
++    cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &&
++        pwd
++)"
++
++REPO_ROOT="$(
++    cd -- "${SCRIPT_DIR}/../../../.." &&
++        pwd
++)"
++
++RECONCILER="${REPO_ROOT}/release/dist/synology/files/scripts/tailscale-netfilter-reconciler"
++
++TEST_ROOT="$(mktemp -d)"
++DEFINITIONS="${TEST_ROOT}/reconciler-definitions.sh"
++RUNNER="${TEST_ROOT}/runner.sh"
++READY_FILE="${TEST_ROOT}/ready"
++
++RUNNER_PID=""
++SLEEP_PID=""
++
++fail() {
++    printf 'ERROR: %s\n' "$*" >&2
++    exit 1
++}
++
++cleanup() {
++    if [ -n "${RUNNER_PID}" ] &&
++        kill -0 "${RUNNER_PID}" >/dev/null 2>&1
++    then
++        kill -KILL "${RUNNER_PID}" >/dev/null 2>&1 ||
++            true
++
++        wait "${RUNNER_PID}" >/dev/null 2>&1 ||
++            true
++    fi
++
++    if [ -n "${SLEEP_PID}" ] &&
++        kill -0 "${SLEEP_PID}" >/dev/null 2>&1
++    then
++        kill -KILL "${SLEEP_PID}" >/dev/null 2>&1 ||
++            true
++    fi
++
++    rm -rf -- "${TEST_ROOT}"
++}
++
++trap cleanup EXIT
++
++grep -Eq \
++    '^[[:space:]]*main[[:space:]]+"\$@"[[:space:]]*$' \
++    "${RECONCILER}" ||
++    fail 'reconciler main invocation was not found'
++
++awk '
++    /^[[:space:]]*main[[:space:]]+"\$@"[[:space:]]*$/ {
++        exit
++    }
++
++    {
++        print
++    }
++' "${RECONCILER}" >"${DEFINITIONS}"
++
++/bin/cat >"${RUNNER}" <<'RUNNER_SH'
++#!/bin/bash
++
++set -euo pipefail
++
++DEFINITIONS="$1"
++READY_FILE="$2"
++
++source "${DEFINITIONS}"
++
++TEST_MODE=0
++TEST_NO_SLEEP=0
++STOP_REQUESTED=0
++SLEEP_PID=""
++
++trap handle_stop TERM INT
++
++printf 'ready\n' >"${READY_FILE}"
++
++sleep_for 30
++RUNNER_SH
++
++chmod 0755 "${RUNNER}"
++
++mkdir -p \
++    "${TEST_ROOT}/pkgvar" \
++    "${TEST_ROOT}/pkgdest/bin"
++
++printf 'TEST: SIGTERM interrupts one long reconciler sleep ... '
++
++SYNOPKG_PKGNAME=Tailscale \
++SYNOPKG_PKGVAR="${TEST_ROOT}/pkgvar" \
++SYNOPKG_PKGDEST="${TEST_ROOT}/pkgdest" \
++TAILSCALE_RECONCILER_TEST_MODE=0 \
++TAILSCALE_RECONCILER_TEST_NO_SLEEP=0 \
++bash "${RUNNER}" \
++    "${DEFINITIONS}" \
++    "${READY_FILE}" &
++
++RUNNER_PID=$!
++
++for ATTEMPT in $(seq 1 50)
++do
++    [ -e "${READY_FILE}" ] &&
++        break
++
++    sleep 0.1
++done
++
++[ -e "${READY_FILE}" ] ||
++    fail 'test runner did not become ready'
++
++CHILDREN_FILE="/proc/${RUNNER_PID}/task/${RUNNER_PID}/children"
++
++for ATTEMPT in $(seq 1 50)
++do
++    if [ -r "${CHILDREN_FILE}" ]; then
++        SLEEP_PID="$(
++            awk '
++                {
++                    print $1
++                    exit
++                }
++            ' "${CHILDREN_FILE}"
++        )"
++    fi
++
++    [ -n "${SLEEP_PID}" ] &&
++        break
++
++    sleep 0.1
++done
++
++[ -n "${SLEEP_PID}" ] ||
++    fail 'sleep child was not created'
++
++case "${SLEEP_PID}" in
++*[!0-9]*|'')
++    fail "unexpected child PID value: ${SLEEP_PID}"
++    ;;
++esac
++
++SLEEP_COMMAND="$(
++    tr '\0' ' ' \
++        <"/proc/${SLEEP_PID}/cmdline"
++)"
++
++case "${SLEEP_COMMAND}" in
++*"sleep 30"*)
++    ;;
++*)
++    fail "unexpected sleep child command: ${SLEEP_COMMAND}"
++    ;;
++esac
++
++kill -TERM "${RUNNER_PID}"
++
++EXITED=0
++
++for ATTEMPT in $(seq 1 30)
++do
++    if ! kill -0 "${RUNNER_PID}" >/dev/null 2>&1; then
++        EXITED=1
++        break
++    fi
++
++    sleep 0.1
++done
++
++[ "${EXITED}" -eq 1 ] ||
++    fail 'reconciler did not exit within three seconds of SIGTERM'
++
++if ! wait "${RUNNER_PID}"; then
++    fail 'reconciler runner returned a failure status after SIGTERM'
++fi
++
++RUNNER_PID=""
++
++if kill -0 "${SLEEP_PID}" >/dev/null 2>&1; then
++    fail "sleep child remains after reconciler exit: PID=${SLEEP_PID}"
++fi
++
++SLEEP_PID=""
++
++printf 'PASS\n'
++printf '\nResults: 1 passed, 0 failed\n'
+diff --git a/release/dist/synology/tests/netfilter-reconciler-test.sh b/release/dist/synology/tests/netfilter-reconciler-test.sh
+index 00ef18f4d..4bba9e00a 100755
+--- a/release/dist/synology/tests/netfilter-reconciler-test.sh
++++ b/release/dist/synology/tests/netfilter-reconciler-test.sh
+@@ -207,6 +207,14 @@ touch "${STATE}/hooks-complete"
+ 
+ run_reconciler
+ 
++assert_not_contains \
++    "${STATE}/commands.log" \
++    'debug prefs'
++
++assert_not_contains \
++    "${STATE}/commands.log" \
++    'status --json'
++
+ assert_not_contains \
+     "${STATE}/commands.log" \
+     'set --netfilter-mode='
+diff --git a/release/dist/synology/tests/start-stop-definitions-test.sh b/release/dist/synology/tests/start-stop-definitions-test.sh
+index 242dbb028..f732551bf 100755
+--- a/release/dist/synology/tests/start-stop-definitions-test.sh
++++ b/release/dist/synology/tests/start-stop-definitions-test.sh
+@@ -52,6 +52,8 @@ env \
+ 
+         printf "%s\n" \
+             "$NETFILTER_LOCALAPI_ATTEMPTS" \
++            "$TUN_WAIT_ATTEMPTS" \
++            "$TUN_WAIT_SECONDS" \
+             "$RECONCILER_START_ATTEMPTS"
+     ' bash "${DEFINITIONS}" \
+     >"${STDOUT_FILE}" \
+@@ -80,6 +82,8 @@ EXPECTED="${TEST_ROOT}/expected"
+ printf '%s\n' \
+     30 \
+     10 \
++    1 \
++    10 \
+     >"${EXPECTED}"
+ 
+ if ! cmp -s \
+diff --git a/release/dist/synology/tests/tun-device-test.sh b/release/dist/synology/tests/tun-device-test.sh
+new file mode 100755
+index 000000000..f4ac48c01
+--- /dev/null
++++ b/release/dist/synology/tests/tun-device-test.sh
+@@ -0,0 +1,186 @@
++#!/bin/bash
++
++set -euo pipefail
++
++SCRIPT_DIR="$(
++    cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &&
++        pwd
++)"
++
++REPO_ROOT="$(
++    cd -- "${SCRIPT_DIR}/../../../.." &&
++        pwd
++)"
++
++START_STOP_SOURCE="${REPO_ROOT}/release/dist/synology/files/scripts/start-stop-status"
++
++TEST_ROOT="$(mktemp -d)"
++DEFINITIONS="${TEST_ROOT}/start-stop-definitions.sh"
++
++PASS_COUNT=0
++
++cleanup() {
++    rm -rf -- "${TEST_ROOT}"
++}
++
++trap cleanup EXIT
++
++mkdir -p \
++    "${TEST_ROOT}/pkgvar" \
++    "${TEST_ROOT}/pkgdest/bin"
++
++awk '
++    /^case \$1 in/ {
++        exit
++    }
++
++    {
++        print
++    }
++' "${START_STOP_SOURCE}" >"${DEFINITIONS}"
++
++export SYNOPKG_DSM_VERSION_MAJOR=7
++export SYNOPKG_PKGVAR="${TEST_ROOT}/pkgvar"
++export SYNOPKG_PKGDEST="${TEST_ROOT}/pkgdest"
++export SYNOPKG_PKGNAME=Tailscale
++
++source "${DEFINITIONS}"
++
++
++fail() {
++    printf 'ERROR: %s\n' "$*" >&2
++    exit 1
++}
++
++
++reset_case() {
++    CASE_ROOT="${TEST_ROOT}/$1"
++
++    rm -rf -- "${CASE_ROOT}"
++
++    mkdir -p \
++        "${CASE_ROOT}/dev" \
++        "${CASE_ROOT}/pkgvar"
++
++    TUN_DEVICE="${CASE_ROOT}/dev/net/tun"
++    TUN_PROC_MISC="${CASE_ROOT}/proc-misc"
++    TUN_WAIT_ATTEMPTS=2
++    TUN_WAIT_SECONDS=0
++
++    : >"${CASE_ROOT}/mknod.log"
++    : >"${CASE_ROOT}/output.log"
++}
++
++
++printf 'TEST: existing TUN device is accepted ... '
++
++reset_case existing
++
++tun_device_is_ready() {
++    return 0
++}
++
++tun_driver_available() {
++    return 0
++}
++
++mknod() {
++    printf '%s\n' "$*" >>"${CASE_ROOT}/mknod.log"
++    return 1
++}
++
++chmod() {
++    return 0
++}
++
++ensure_tun_created \
++    >"${CASE_ROOT}/output.log" \
++    2>&1 ||
++    fail "existing TUN device was rejected"
++
++[ ! -s "${CASE_ROOT}/mknod.log" ] ||
++    fail "existing TUN device unexpectedly triggered mknod"
++
++printf 'PASS\n'
++PASS_COUNT=$((PASS_COUNT + 1))
++
++
++printf 'TEST: missing TUN node is created with major 10 minor 200 ... '
++
++reset_case create
++
++tun_device_is_ready() {
++    [ -e "${CASE_ROOT}/ready" ]
++}
++
++tun_driver_available() {
++    return 0
++}
++
++mknod() {
++    printf '%s\n' "$*" >>"${CASE_ROOT}/mknod.log"
++    touch "${CASE_ROOT}/ready"
++    return 0
++}
++
++chmod() {
++    return 0
++}
++
++ensure_tun_created \
++    >"${CASE_ROOT}/output.log" \
++    2>&1 ||
++    fail "missing TUN device was not created"
++
++grep -Fq -- \
++    "${TUN_DEVICE} c 10 200" \
++    "${CASE_ROOT}/mknod.log" ||
++    fail "mknod did not receive character-device major/minor 10:200"
++
++grep -Fq -- \
++    "created kernel TUN device ${TUN_DEVICE}" \
++    "${CASE_ROOT}/output.log" ||
++    fail "successful TUN creation was not logged"
++
++printf 'PASS\n'
++PASS_COUNT=$((PASS_COUNT + 1))
++
++
++printf 'TEST: unavailable TUN driver fails clearly ... '
++
++reset_case unavailable
++
++tun_device_is_ready() {
++    return 1
++}
++
++tun_driver_available() {
++    return 1
++}
++
++try_load_tun_driver() {
++    return 1
++}
++
++chmod() {
++    return 0
++}
++
++if ensure_tun_created \
++    >"${CASE_ROOT}/output.log" \
++    2>&1
++then
++    fail "unavailable TUN driver unexpectedly passed"
++fi
++
++grep -Fq -- \
++    'kernel TUN driver is unavailable' \
++    "${CASE_ROOT}/output.log" ||
++    fail "missing-driver error was not reported"
++
++printf 'PASS\n'
++PASS_COUNT=$((PASS_COUNT + 1))
++
++
++printf '\nResults: %d passed, 0 failed\n' \
++    "${PASS_COUNT}"
+diff --git a/tool/build-synology-root-bootstrap.sh b/tool/build-synology-root-bootstrap.sh
+index bfb33c8f5..01234e7aa 100755
+--- a/tool/build-synology-root-bootstrap.sh
++++ b/tool/build-synology-root-bootstrap.sh
+@@ -2,7 +2,7 @@
+ set -euo pipefail
+ 
+ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+-VERSION_OVERRIDE="${TS_VERSION_OVERRIDE:-1.98.95}"
++VERSION_OVERRIDE="${TS_VERSION_OVERRIDE:-1.98.96}"
+ OUT_ROOT="${1:-${REPO_ROOT}/build/synology/v1.98.9-final}"
+ 
+ SIDELOAD_OUT="${OUT_ROOT}/sideload"
+@@ -197,10 +197,48 @@ then
+ fi
+ 
+ if cmp -s "${SIDE}/INFO" "${CENTER}/INFO"; then
+-    printf 'ERROR: INFO files should have different DSM bounds\n' >&2
++    printf 'ERROR: INFO files should have different package metadata\n' >&2
+     exit 1
+ fi
+ 
++python3 - \
++    "${SIDE}/INFO" \
++    "${CENTER}/INFO" <<'PYINFO'
++import sys
++from pathlib import Path
++
++expected = 'os_min_ver="7.3-81180"'
++
++for label, value in zip(
++    ("sideload", "Package Center"),
++    sys.argv[1:],
++):
++    path = Path(value)
++
++    if not path.is_file():
++        raise RuntimeError(
++            f"{label} package is missing outer INFO metadata"
++        )
++
++    matches = [
++        line
++        for line in path.read_text(
++            encoding="utf-8",
++        ).splitlines()
++        if line.startswith("os_min_ver=")
++    ]
++
++    if matches != [expected]:
++        raise RuntimeError(
++            "{} INFO has unexpected os_min_ver entries: {!r}".format(
++                label,
++                matches,
++            )
++        )
++
++print("Outer package metadata validation passed.")
++PYINFO
++
+ bash -n "${SIDE}/scripts/start-stop-status"
+ bash -n "${SIDE}/scripts/tailscale-netfilter-reconciler"
+ bash -n "${SIDE}/scripts/tailscale-synology-bootstrap"
+-- 
+2.55.0
+

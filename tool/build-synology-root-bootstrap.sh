@@ -236,7 +236,11 @@ python3 - \
 import sys
 from pathlib import Path
 
-expected = 'os_min_ver="7.3-81180"'
+expected_versions = {
+    "sideload": 'version="1.98.96-700098097"',
+    "Package Center": 'version="1.98.96-720098097"',
+}
+expected_minimum = 'os_min_ver="7.3-86009"'
 
 for label, value in zip(
     ("sideload", "Package Center"),
@@ -249,19 +253,48 @@ for label, value in zip(
             f"{label} package is missing outer INFO metadata"
         )
 
-    matches = [
+    lines = path.read_text(
+        encoding="utf-8",
+    ).splitlines()
+    version_matches = [
         line
-        for line in path.read_text(
-            encoding="utf-8",
-        ).splitlines()
+        for line in lines
+        if line.startswith("version=")
+    ]
+
+    if version_matches != [expected_versions[label]]:
+        raise RuntimeError(
+            "{} INFO has unexpected version entries: {!r}".format(
+                label,
+                version_matches,
+            )
+        )
+
+    minimum_matches = [
+        line
+        for line in lines
         if line.startswith("os_min_ver=")
     ]
 
-    if matches != [expected]:
+    if minimum_matches != [expected_minimum]:
         raise RuntimeError(
             "{} INFO has unexpected os_min_ver entries: {!r}".format(
                 label,
-                matches,
+                minimum_matches,
+            )
+        )
+
+    maximum_matches = [
+        line
+        for line in lines
+        if line.startswith("os_max_ver=")
+    ]
+
+    if maximum_matches:
+        raise RuntimeError(
+            "{} INFO has unexpected os_max_ver entries: {!r}".format(
+                label,
+                maximum_matches,
             )
         )
 
@@ -319,11 +352,7 @@ python3 - \
 import sys
 from pathlib import Path
 
-expected = (
-    "[tailscale-netfilter-modules]\n"
-    "pkg_min_ver=1.0.0-11\n"
-    "os_min_ver=7.3-81180\n"
-)
+expected = b"[iptables-netfilter-extensions]\npkg_min_ver=1.1.0-3\nos_min_ver=7.3-86009\n"
 
 for label, value in zip(
     ("sideload", "Package Center"),
@@ -336,7 +365,7 @@ for label, value in zip(
             f"{label} package is missing conf/PKG_DEPS"
         )
 
-    actual = path.read_text(encoding="utf-8")
+    actual = path.read_bytes()
 
     if actual != expected:
         raise RuntimeError(

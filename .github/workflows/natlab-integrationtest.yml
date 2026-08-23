@@ -11,11 +11,10 @@ on:
     branches:
       - "main"
       - "release-branch/*"
-  pull_request:
-    # all PRs on all branches
   merge_group:
     branches:
       - "main"
+  workflow_dispatch:
 jobs:
   natlab-integrationtest:
     runs-on: ubuntu-latest

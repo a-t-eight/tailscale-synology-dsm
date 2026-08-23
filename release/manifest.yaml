@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "control": {
+    "repository": "a-t-eight/tailscale-synology-dsm",
+    "branch": "synology/main",
+    "governance_baseline_commit": "c08cb5af27701615f6180d79182d2c8559c601bf"
+  },
+  "upstream": {
+    "repository": "tailscale/tailscale",
+    "tag": "v1.98.9",
+    "commit": "6c167d40fa37aeb51afa7ff336730670ea4762bf"
+  },
+  "downstream": {
+    "revision": "r1",
+    "release_commit": "20c86229955a3d03de01901aee1499cab87c571d",
+    "release_tree": "6d022c18f27a42aab553697c69c852bebd8594b8"
+  },
+  "package": {
+    "identifier": "Tailscale",
+    "version": "1.98.96",
+    "build_number": "700098096",
+    "full_version": "1.98.96-700098096",
+    "architecture": "x86_64",
+    "filename": "tailscale-x86_64-1.98.96-700098096-dsm7.spk",
+    "sha256": "bed218b4d0099102e9c3be18456d8a94be9a92b4a29295a9dab33932570cbce0"
+  },
+  "synology": {
+    "minimum_dsm": "7.3-81180",
+    "tested_models": [
+      "DS920+"
+    ],
+    "platforms": [
+      "geminilake"
+    ],
+    "architectures": [
+      "x86_64"
+    ],
+    "netfilter_dependency": "tailscale-netfilter-modules >= 1.0.0-11"
+  },
+  "branches": {
+    "work": "work/v1.98.9-synology",
+    "release": "release/v1.98.9-synology"
+  },
+  "tags": {
+    "release": "release/synology-v1.98.96-r1"
+  },
+  "paths": {
+    "patch_series": "patches/v1.98.9",
+    "build_entrypoint": "tool/build-synology-root-bootstrap.sh",
+    "build_output": "build/synology/v1.98.9-final",
+    "evidence": "tests/releases/v1.98.9",
+    "release_record": "docs/releases/v1.98.96-r1/README.md",
+    "spk_inspector": "scripts/release/inspect-spk.sh"
+  },
+  "validation": {
+    "go_packages": [
+      "./cmd/tailscale/cli",
+      "./ipn/ipnlocal"
+    ],
+    "patch_series_format": "raw-diff",
+    "accepted_legacy_no_signoff_commits": [
+      "8a2204fa027bd56bb27d1e7f6af696e4eefa8c1a",
+      "1c5dcbe5cc7f6c1b237e74ca721bc10f2548506a",
+      "46c6f760abf06370ce5b4cfc0e878e2c854c4522",
+      "a2ac2a275f4b2f0d7f786ca670d8040c83a6ae73",
+      "01d9071ddceae34502978656f1f36b26906841ec",
+      "4d7586ff0238a41fc627cf905af0bdcae1c67d0e",
+      "456f90c5bf5c383f37ab2f0ca6b7f0531730a140",
+      "f7f177695b8d5ade4107536afb2e0f164cde3b7e",
+      "a471b0eb42e8487b47aa051b1198ba536e250669",
+      "a106ddb72822c61cefd068fef64ea1a473c47fae",
+      "ffcabae3653570468ce490d7e77403e9576b904c",
+      "6c9b329bc322f39c29be89b89408c65bfccea545"
+    ],
+    "patch_apply_files": [
+      "release-tree.patch"
+    ],
+    "patch_reference_files": [
+      "maintenance.patch"
+    ],
+    "patch_adjunct_files": [
+      "synology-netfilter.patch"
+    ],
+    "ssh_allowed_signers_path": ".github/allowed_signers",
+    "ssh_allowed_signers_sha256": "7f6e0b0e70dd002171512380426103ca322c28a30ed2bde5815395f3c7e329c8",
+    "ssh_signer_fingerprints": [
+      "SHA256:4qubngt4lNpUoxmyR48OoabwcBlzK67n5nr136xBPrU"
+    ],
+    "ssh_signer_principals": [
+      "andreeww.trieu@gmail.com"
+    ],
+    "ssh_trust_bootstrap_base_commit": "c08cb5af27701615f6180d79182d2c8559c601bf",
+    "spk_required_members": [
+      "INFO",
+      "package.tgz",
+      "scripts/start-stop-status",
+      "conf/privilege",
+      "conf/resource"
+    ],
+    "spk_required_info_fields": [
+      "package",
+      "version",
+      "arch",
+      "os_min_ver"
+    ]
+  },
+  "safety": {
+    "allow_stable_publication": false,
+    "allow_production_install": false,
+    "allow_root_bootstrap": false,
+    "allow_firewall_mutation": false,
+    "allow_reboot": false
+  }
+}

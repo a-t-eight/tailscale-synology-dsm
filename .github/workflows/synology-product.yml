@@ -1,0 +1,80 @@
+name: Synology product
+
+on:
+  pull_request:
+    branches:
+      - "release/*-synology"
+      - "synology/main"
+  workflow_dispatch:
+
+jobs:
+  synology-product:
+    name: synology-product
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate Synology product
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! command -v shellcheck > /dev/null 2>&1; then
+            echo "FAIL: ShellCheck is required for Synology product validation." >&2
+            exit 1
+          fi
+
+          bash tests/releases/version-preparation-contract.sh
+          bash tests/releases/prepare-version-workflow.sh all
+          bash tests/releases/control-pre-commit.sh
+          bash tests/releases/promoted-patch-inventory.sh
+          bash tests/releases/github-actions-fork-portability.sh
+          bash tests/releases/shellcheck.sh
+          bash tests/releases/diff-check.sh
+
+          mapfile -t synology_tests < <(
+            find release/dist/synology/tests \
+              -maxdepth 1 \
+              -type f \
+              -name '*-test.sh' \
+              -print |
+              LC_ALL=C sort
+          )
+
+          if [ "${#synology_tests[@]}" -eq 0 ]; then
+            echo "FAIL: no Synology shell tests were found." >&2
+            exit 1
+          fi
+
+          for test_script in "${synology_tests[@]}"; do
+            bash "$test_script"
+          done
+
+          export PATH="$PWD/tool:$PATH"
+          ./tool/go test -count=1 \
+            ./release/dist/synology \
+            ./cmd/tailscale/cli \
+            ./cmd/tailscaled \
+            ./ipn/ipnlocal \
+            ./util/linuxfw \
+            ./wgengine/router
+
+          git diff --check
+
+          repository_status="$(
+            git status --porcelain=v1 --untracked-files=all
+          )"
+
+          if [ -n "$repository_status" ]; then
+            printf 'FAIL: validation changed repository state:\n%s\n' \
+              "$repository_status" >&2
+            exit 1
+          fi
+
+          echo "PASS: Synology product validation completed without repository changes."
