@@ -35,12 +35,30 @@ def runs_on(job: str) -> list[str]:
     return re.findall(r"(?m)^    runs-on:\s*(.*?)\s*$", job)
 
 
+def alls_green_allowed_skips(job: str) -> list[str]:
+    with_blocks = re.findall(
+        r"(?m)^      uses: re-actors/alls-green@[^\n]+\n"
+        r"      with:\n"
+        r"((?:        [^\n]+\n?)*)",
+        job,
+    )
+    if len(with_blocks) != 1:
+        return []
+    return re.findall(
+        r"(?m)^        allowed-skips:\s*(.*?)\s*$",
+        with_blocks[0],
+    )
+
+
 vet_workflow = Path(sys.argv[1]).read_text(encoding="utf-8")
 test_workflow = Path(sys.argv[2]).read_text(encoding="utf-8")
 
 vet = job_block(vet_workflow, "vet")
 windows = job_block(test_workflow, "windows")
 fuzz = job_block(test_workflow, "fuzz")
+merge_blocker = job_block(test_workflow, "merge_blocker")
+check_mergeability_strict = job_block(test_workflow, "check_mergeability_strict")
+check_mergeability = job_block(test_workflow, "check_mergeability")
 
 failures: list[str] = []
 
@@ -69,6 +87,28 @@ if fuzz_conditions != [fuzz_condition]:
         f"(observed if: {fuzz_conditions!r})"
     )
 
+allowed_skips = (
+    "${{ github.repository != 'tailscale/tailscale' && "
+    "'vm, fuzz' || '' }}"
+)
+for job_name, job in (
+    ("merge_blocker", merge_blocker),
+    ("check_mergeability", check_mergeability),
+):
+    observed = alls_green_allowed_skips(job)
+    if observed != [allowed_skips]:
+        failures.append(
+            f"{job_name} must allow only skipped vm and fuzz jobs in downstream "
+            f"forks (observed allowed-skips: {observed!r})"
+        )
+
+strict_allowed_skips = alls_green_allowed_skips(check_mergeability_strict)
+if strict_allowed_skips:
+    failures.append(
+        "check_mergeability_strict must not allow skipped jobs "
+        f"(observed allowed-skips: {strict_allowed_skips!r})"
+    )
+
 for failure in failures:
     print(f"FAIL: {failure}", file=sys.stderr)
 
@@ -78,6 +118,11 @@ if failures:
 
 print("PASS: GitHub Actions jobs use fork-portable runners and fuzz ownership.")
 PY
+PYTHON_RC=$?
+
+if [ "$PYTHON_RC" -ne 0 ]; then
+  exit "$PYTHON_RC"
+fi
 
 PKG_DEPS_PATH="release/dist/synology/files/PKG_DEPS"
 ATTRIBUTES="$(
