@@ -371,6 +371,7 @@ if patch_format not in ("mail", "raw-diff"):
 
 apply_files = get("validation.patch_apply_files")
 reference_files = get("validation.patch_reference_files")
+adjunct_files = data.get("validation", {}).get("patch_adjunct_files", [])
 
 if not isinstance(apply_files, list) or not apply_files:
     raise SystemExit(
@@ -382,7 +383,12 @@ if not isinstance(reference_files, list):
         "validation.patch_reference_files must be an array"
     )
 
-all_patch_files = apply_files + reference_files
+if not isinstance(adjunct_files, list):
+    raise SystemExit(
+        "validation.patch_adjunct_files must be an array when present"
+    )
+
+all_patch_files = apply_files + reference_files + adjunct_files
 
 if len(all_patch_files) != len(set(all_patch_files)):
     raise SystemExit("declared patch filenames contain duplicates")
@@ -1670,7 +1676,8 @@ validation = manifest["validation"]
 
 apply_files = validation["patch_apply_files"]
 reference_files = validation["patch_reference_files"]
-expected = sorted(apply_files + reference_files)
+adjunct_files = validation.get("patch_adjunct_files", [])
+expected = sorted(apply_files + reference_files + adjunct_files)
 observed = sorted(path.name for path in root.glob("*.patch") if path.is_file())
 
 if observed != expected:
@@ -1685,6 +1692,7 @@ for patch_name in expected:
 
 print(f"Patch apply files:     {len(apply_files)}")
 print(f"Patch reference files: {len(reference_files)}")
+print(f"Patch adjunct files:   {len(adjunct_files)}")
 print("PASS: direct patch inventory matches the manifest roles.")
 PY
 }
