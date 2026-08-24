@@ -93,6 +93,14 @@ separate authorization. Building either SPK, tagging, releasing, publishing,
 installing on a NAS, running bootstrap, changing firewall/netfilter state and
 rebooting are outside this workflow.
 
+Ordinary downstream pull requests require a green `synology-product` check.
+For an actual upstream-version upgrade, run the inherited full `CI` workflow
+manually and attend it through completion before handoff; record its exact run
+and conclusions with the review evidence. The focused product lane and the
+manual compatibility lane validate source only: neither builds, releases,
+publishes, or installs either SPK, and neither authorizes NAS or firewall
+mutation.
+
 Accepted-source validation remains an attended control-worktree operation. At
 handoff, invoke the retained
 `/path/to/control-worktree/scripts/release/validate-release.sh` with explicit

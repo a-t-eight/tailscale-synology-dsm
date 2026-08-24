@@ -41,3 +41,22 @@ Tailscale version preparation.
 core unjailed source blobs plus the canonical patch/checksum. Version-workflow
 changes validate those seven identities but do not recreate or modify them.
 Any identity difference is a stop condition requiring separate product review.
+
+## CI ownership and validation boundary
+
+The `synology-product` job is the required fork-owned gate for ordinary
+downstream pull requests. It validates the version-preparation contracts and
+offline preparation fixtures, control-hook behavior, promoted patch inventory,
+changed-shell static analysis, the complete release diff policy, every
+repository-owned Synology shell test, focused Go packages that contain the
+Synology changes (`release/dist/synology`, `cmd/tailscale/cli`,
+`cmd/tailscaled`, `ipn/ipnlocal`, `util/linuxfw`, and `wgengine/router`),
+`git diff --check`, and unchanged tracked and untracked repository state. It
+does not build an SPK or exercise a DSM host.
+
+The inherited full upstream compatibility workflows are explicit/manual for
+an upstream-version upgrade rather than automatic downstream pull-request
+gates. Upstream OSS-Fuzz ownership remains with `tailscale/tailscale` and covers
+only `net/stun.FuzzStunParser`; it is not Synology fuzz coverage and does not
+exercise SPK or DSM behavior, package metadata, downstream patches, bootstrap,
+TUN, or netfilter behavior.
