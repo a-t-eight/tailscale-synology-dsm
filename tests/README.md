@@ -24,11 +24,19 @@ Source-worktree workflow checks are:
 - `releases/shellcheck.sh` — is the canonical changed-shell static-analysis
   command. It runs ShellCheck with `--severity=style`, so error, warning,
   information, and style diagnostics are all visible and enforced.
+- `releases/diff-check.sh` — runs the complete
+  `git diff --check 8c9fe5239ee57a89ce687fc8c7608d3df91f6ede..HEAD`
+  gate. Git attributes suppress only `blank-at-eol`, `blank-at-eof`, and
+  `space-before-tab` diagnostics inside checksum-locked historical `.patch`
+  payloads under `patches/v1.98.9/`; all Markdown, scripts, source, and other
+  paths remain strict. Its disposable negative fixture proves a real Markdown
+  defect fails.
 
 Run the canonical command from the repository root:
 
 ```text
 bash tests/releases/shellcheck.sh
+bash tests/releases/diff-check.sh
 ```
 
 `releases/validate-production-contract.sh` builds disposable local fixtures for
