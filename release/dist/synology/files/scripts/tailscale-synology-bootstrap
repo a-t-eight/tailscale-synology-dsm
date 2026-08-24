@@ -1,0 +1,545 @@
+#!/bin/bash
+set -u
+
+export PATH="/usr/syno/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+PACKAGE_NAME="Tailscale"
+PACKAGE_ROOT="${TAILSCALE_SYNOLOGY_PACKAGE_ROOT:-/var/packages/${PACKAGE_NAME}}"
+PACKAGE_TARGET="${PACKAGE_ROOT}/target"
+PACKAGE_CONF="${PACKAGE_ROOT}/conf"
+PACKAGE_VAR="${PACKAGE_ROOT}/var"
+
+ACTIVE_PRIVILEGE="${PACKAGE_CONF}/privilege"
+SAFE_TEMPLATE="${PACKAGE_CONF}/privilege.bootstrap-package"
+ROOT_TEMPLATE="${PACKAGE_CONF}/privilege.bootstrap-root"
+
+STATE_FILE="${PACKAGE_VAR}/root-bootstrap.state"
+PID_FILE="${PACKAGE_VAR}/tailscaled.pid"
+BACKUP_ROOT="${PACKAGE_VAR}/bootstrap-backups"
+
+SYNO_PKG="${TAILSCALE_SYNOLOGY_SYNOPKG:-/usr/syno/bin/synopkg}"
+PROC_ROOT="/proc"
+
+if [ "${TAILSCALE_SYNOLOGY_TEST_MODE:-0}" = "1" ]; then
+    PROC_ROOT="${TAILSCALE_SYNOLOGY_PROC_ROOT:-/proc}"
+fi
+STATE_SCHEMA="1"
+ROLLBACK_ARMED=0
+BACKUP_DIR=""
+
+log_message() {
+    local level="$1"
+    shift
+
+    printf '%s %s: %s\n' \
+        "$(date --iso-8601=second)" \
+        "${level}" \
+        "$*"
+}
+
+die() {
+    log_message ERROR "$*" >&2
+    exit 1
+}
+
+sha256_file() {
+    local file="$1"
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "${file}" | awk '{print $1}'
+        return
+    fi
+
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "${file}" | awk '{print $1}'
+        return
+    fi
+
+    if command -v openssl >/dev/null 2>&1; then
+        openssl dgst -sha256 "${file}" | awk '{print $NF}'
+        return
+    fi
+
+    return 127
+}
+
+state_value() {
+    local key="$1"
+
+    awk -F= -v key="${key}" '
+        $1 == key {
+            sub(/^[^=]*=/, "")
+            print
+            exit
+        }
+    ' "${STATE_FILE}"
+}
+
+require_root() {
+    if [ "$(id -u)" != "0" ]; then
+        die "this operation must be run as root"
+    fi
+}
+
+require_secure_root_file() {
+    local file="$1"
+    local uid
+    local mode
+    local mode_value
+
+    [ -f "${file}" ] ||
+        die "required file is missing: ${file}"
+
+    uid="$(stat -c %u -- "${file}")" ||
+        die "cannot read owner for ${file}"
+
+    [ "${uid}" = "0" ] ||
+        die "file is not root-owned: ${file}"
+
+    mode="$(stat -c %a -- "${file}")" ||
+        die "cannot read mode for ${file}"
+
+    mode_value=$((8#${mode}))
+
+    if (( mode_value & 8#022 )); then
+        die "file is writable by group or other: ${file}"
+    fi
+}
+
+validate_dsm() {
+    local major
+
+    # Test harnesses can supply an alternate package root.
+    if [ "${PACKAGE_ROOT}" != "/var/packages/Tailscale" ]; then
+        return 0
+    fi
+
+    [ -r /etc.defaults/VERSION ] ||
+        die "cannot read /etc.defaults/VERSION"
+
+    major="$(
+        awk -F= '
+            $1 == "majorversion" {
+                gsub(/"/, "", $2)
+                print $2
+                exit
+            }
+        ' /etc.defaults/VERSION
+    )"
+
+    [ "${major}" = "7" ] ||
+        die "this bootstrap supports DSM 7 only"
+}
+
+validate_layout() {
+    local script_path
+
+    [ -d "${PACKAGE_ROOT}" ] ||
+        die "package root is missing: ${PACKAGE_ROOT}"
+
+    [ -d "${PACKAGE_TARGET}" ] ||
+        die "package target is missing: ${PACKAGE_TARGET}"
+
+    [ -d "${PACKAGE_CONF}" ] ||
+        die "package conf directory is missing: ${PACKAGE_CONF}"
+
+    [ -d "${PACKAGE_VAR}" ] ||
+        die "package var directory is missing: ${PACKAGE_VAR}"
+
+    [ -x "${PACKAGE_TARGET}/bin/tailscaled" ] ||
+        die "tailscaled is missing or not executable"
+
+    script_path="$(readlink -f -- "${BASH_SOURCE[0]}")" ||
+        die "cannot resolve bootstrap script path"
+
+    require_secure_root_file "${script_path}"
+    require_secure_root_file "${SAFE_TEMPLATE}"
+    require_secure_root_file "${ROOT_TEMPLATE}"
+
+    grep -Eq \
+        '"run-as"[[:space:]]*:[[:space:]]*"package"' \
+        "${SAFE_TEMPLATE}" ||
+        die "safe privilege template is invalid"
+
+    grep -Eq \
+        '"run-as"[[:space:]]*:[[:space:]]*"root"' \
+        "${ROOT_TEMPLATE}" ||
+        die "root privilege template is invalid"
+}
+
+bootstrap_is_current() {
+    local stored_binary_hash
+    local stored_privilege_hash
+    local current_binary_hash
+    local current_privilege_hash
+
+    [ -r "${STATE_FILE}" ] || return 1
+    [ -r "${ACTIVE_PRIVILEGE}" ] || return 1
+
+    [ "$(state_value schema)" = "${STATE_SCHEMA}" ] ||
+        return 1
+
+    [ "$(state_value mode)" = "root" ] ||
+        return 1
+
+    stored_binary_hash="$(state_value tailscaled_sha256)"
+    stored_privilege_hash="$(state_value privilege_sha256)"
+
+    [ -n "${stored_binary_hash}" ] || return 1
+    [ -n "${stored_privilege_hash}" ] || return 1
+
+    current_binary_hash="$(
+        sha256_file "${PACKAGE_TARGET}/bin/tailscaled"
+    )" || return 1
+
+    current_privilege_hash="$(
+        sha256_file "${ROOT_TEMPLATE}"
+    )" || return 1
+
+    [ "${stored_binary_hash}" = "${current_binary_hash}" ] ||
+        return 1
+
+    [ "${stored_privilege_hash}" = "${current_privilege_hash}" ] ||
+        return 1
+
+    cmp -s "${ACTIVE_PRIVILEGE}" "${ROOT_TEMPLATE}" ||
+        return 1
+
+    return 0
+}
+
+daemon_pid() {
+    local pid
+
+    [ -r "${PID_FILE}" ] || return 1
+
+    pid="$(tr -cd '0-9' <"${PID_FILE}")"
+    [ -n "${pid}" ] || return 1
+    [ -d "${PROC_ROOT}/${pid}" ] || return 1
+
+    printf '%s\n' "${pid}"
+}
+
+daemon_running() {
+    daemon_pid >/dev/null 2>&1
+}
+
+daemon_uid() {
+    local pid
+
+    pid="$(daemon_pid)" || return 1
+
+    awk '
+        $1 == "Uid:" {
+            print $2
+            exit
+        }
+    ' "${PROC_ROOT}/${pid}/status"
+}
+
+stop_package() {
+    local counter
+
+    "${SYNO_PKG}" stop "${PACKAGE_NAME}" >/dev/null 2>&1 ||
+        true
+
+    counter=20
+    while [ "${counter}" -gt 0 ]; do
+        if ! daemon_running; then
+            return 0
+        fi
+
+        counter=$((counter - 1))
+        sleep 1
+    done
+
+    die "tailscaled did not stop"
+}
+
+create_backup() {
+    local timestamp
+
+    timestamp="$(date +%Y%m%d-%H%M%S)"
+    BACKUP_DIR="${BACKUP_ROOT}/${timestamp}-$$"
+
+    mkdir -p -- "${BACKUP_DIR}" ||
+        die "cannot create backup directory"
+
+    cp -p -- \
+        "${ACTIVE_PRIVILEGE}" \
+        "${BACKUP_DIR}/privilege" ||
+        die "cannot back up active privilege file"
+
+    if [ -e "${STATE_FILE}" ]; then
+        cp -p -- \
+            "${STATE_FILE}" \
+            "${BACKUP_DIR}/root-bootstrap.state" ||
+            die "cannot back up bootstrap state"
+    fi
+
+    {
+        printf 'tailscaled_sha256=%s\n' \
+            "$(sha256_file "${PACKAGE_TARGET}/bin/tailscaled")"
+        printf 'active_privilege_sha256=%s\n' \
+            "$(sha256_file "${ACTIVE_PRIVILEGE}")"
+    } >"${BACKUP_DIR}/checksums"
+
+    chmod 0700 "${BACKUP_DIR}"
+}
+
+install_privilege() {
+    local source="$1"
+    local temporary="${ACTIVE_PRIVILEGE}.bootstrap-new.$$"
+
+    cp -- "${source}" "${temporary}" || return 1
+    chown root:root "${temporary}" || return 1
+    chmod 0644 "${temporary}" || return 1
+
+    mv -f -- "${temporary}" "${ACTIVE_PRIVILEGE}"
+}
+
+set_target_owner() {
+    local owner="$1"
+    local group="$2"
+    local target_real
+
+    target_real="$(readlink -f -- "${PACKAGE_TARGET}")" ||
+        return 1
+
+    [ -d "${target_real}" ] || return 1
+
+    chown -R "${owner}:${group}" "${target_real}"
+}
+
+write_state() {
+    local temporary="${STATE_FILE}.bootstrap-new.$$"
+    local binary_hash
+    local privilege_hash
+
+    binary_hash="$(
+        sha256_file "${PACKAGE_TARGET}/bin/tailscaled"
+    )" || return 1
+
+    privilege_hash="$(
+        sha256_file "${ROOT_TEMPLATE}"
+    )" || return 1
+
+    {
+        printf 'schema=%s\n' "${STATE_SCHEMA}"
+        printf 'mode=root\n'
+        printf 'package=%s\n' "${PACKAGE_NAME}"
+        printf 'tailscaled_sha256=%s\n' "${binary_hash}"
+        printf 'privilege_sha256=%s\n' "${privilege_hash}"
+        printf 'installed_at=%s\n' "$(date --iso-8601=second)"
+    } >"${temporary}" || return 1
+
+    chown root:root "${temporary}" || return 1
+    chmod 0644 "${temporary}" || return 1
+    mv -f -- "${temporary}" "${STATE_FILE}"
+}
+
+start_and_verify() {
+    local counter
+    local uid
+
+    if ! "${SYNO_PKG}" start "${PACKAGE_NAME}"; then
+        log_message ERROR "DSM rejected the package start"
+        return 1
+    fi
+
+    counter=20
+    while [ "${counter}" -gt 0 ]; do
+        if daemon_running; then
+            uid="$(daemon_uid)" || return 1
+
+            if [ "${uid}" = "0" ]; then
+                return 0
+            fi
+
+            log_message ERROR \
+                "tailscaled started with UID ${uid}, expected UID 0"
+            return 1
+        fi
+
+        counter=$((counter - 1))
+        sleep 1
+    done
+
+    log_message ERROR "tailscaled did not enter the running state"
+    return 1
+}
+
+restore_backup() {
+    local restored_mode="package"
+
+    ROLLBACK_ARMED=0
+
+    "${SYNO_PKG}" stop "${PACKAGE_NAME}" >/dev/null 2>&1 ||
+        true
+
+    if [ -f "${BACKUP_DIR}/privilege" ]; then
+        install_privilege "${BACKUP_DIR}/privilege" ||
+            return 1
+    else
+        install_privilege "${SAFE_TEMPLATE}" ||
+            return 1
+    fi
+
+    if [ -f "${BACKUP_DIR}/root-bootstrap.state" ]; then
+        cp -p -- \
+            "${BACKUP_DIR}/root-bootstrap.state" \
+            "${STATE_FILE}" ||
+            return 1
+    else
+        rm -f -- "${STATE_FILE}"
+    fi
+
+    if cmp -s "${ACTIVE_PRIVILEGE}" "${ROOT_TEMPLATE}"; then
+        restored_mode="root"
+    fi
+
+    if [ "${restored_mode}" = "root" ]; then
+        set_target_owner root root || return 1
+    else
+        set_target_owner tailscale tailscale || return 1
+    fi
+
+    return 0
+}
+
+rollback_on_exit() {
+    local status=$?
+
+    if [ "${ROLLBACK_ARMED}" = "1" ]; then
+        log_message ERROR \
+            "bootstrap failed; restoring ${BACKUP_DIR}"
+
+        restore_backup ||
+            log_message ERROR "automatic rollback also failed"
+    fi
+
+    exit "${status}"
+}
+
+install_action() {
+    require_root
+    validate_dsm
+    validate_layout
+    stop_package
+    create_backup
+
+    ROLLBACK_ARMED=1
+    trap rollback_on_exit EXIT
+
+    install_privilege "${ROOT_TEMPLATE}" ||
+        die "cannot install root privilege manifest"
+
+    set_target_owner root root ||
+        die "cannot secure the package target as root-owned"
+
+    write_state ||
+        die "cannot write bootstrap state"
+
+    bootstrap_is_current ||
+        die "bootstrap state validation failed"
+
+    start_and_verify ||
+        die "root package startup validation failed"
+
+    ROLLBACK_ARMED=0
+    trap - EXIT
+
+    log_message INFO "root runtime bootstrap completed"
+    log_message INFO "backup stored at ${BACKUP_DIR}"
+}
+
+remove_action() {
+    require_root
+    validate_dsm
+    validate_layout
+    stop_package
+    create_backup
+
+    ROLLBACK_ARMED=1
+    trap rollback_on_exit EXIT
+
+    install_privilege "${SAFE_TEMPLATE}" ||
+        die "cannot restore package-user privilege manifest"
+
+    set_target_owner tailscale tailscale ||
+        die "cannot restore package target ownership"
+
+    rm -f -- "${STATE_FILE}"
+
+    ROLLBACK_ARMED=0
+    trap - EXIT
+
+    log_message INFO "root runtime permission removed"
+    log_message INFO "the package remains stopped"
+    log_message INFO "backup stored at ${BACKUP_DIR}"
+}
+
+status_action() {
+    local uid
+
+    validate_layout
+
+    if cmp -s "${ACTIVE_PRIVILEGE}" "${ROOT_TEMPLATE}"; then
+        printf 'Privilege mode: root\n'
+    elif cmp -s "${ACTIVE_PRIVILEGE}" "${SAFE_TEMPLATE}"; then
+        printf 'Privilege mode: package\n'
+    else
+        printf 'Privilege mode: unknown\n'
+    fi
+
+    if bootstrap_is_current; then
+        printf 'Bootstrap state: current\n'
+    elif [ -e "${STATE_FILE}" ]; then
+        printf 'Bootstrap state: stale\n'
+    else
+        printf 'Bootstrap state: absent\n'
+    fi
+
+    if daemon_running; then
+        uid="$(daemon_uid 2>/dev/null || printf unknown)"
+        printf 'Runtime: running, UID=%s\n' "${uid}"
+    else
+        printf 'Runtime: stopped\n'
+    fi
+}
+
+usage() {
+    cat <<EOF
+Usage:
+  $0 install
+  $0 status
+  $0 remove
+
+Commands:
+  install  Enable and validate the root runtime
+  status   Show privilege, approval and runtime state
+  remove   Restore the safe package-user manifest and stop Tailscale
+EOF
+}
+
+main() {
+    case "${1:-}" in
+    install)
+        install_action
+        ;;
+    status)
+        status_action
+        ;;
+    remove)
+        remove_action
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+    esac
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main "$@"
+fi
