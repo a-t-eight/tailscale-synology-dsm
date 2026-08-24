@@ -153,7 +153,7 @@ func TestR2PKGDeps(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := "[iptables-netfilter-extensions]\n" +
-		"pkg_min_ver=1.1.0-3\n" +
+		"pkg_min_ver=1.1.0-2\n" +
 		"os_min_ver=7.3-86009\n"
 	if string(got) != want {
 		t.Fatalf("PKG_DEPS mismatch\n got: %q\nwant: %q", got, want)

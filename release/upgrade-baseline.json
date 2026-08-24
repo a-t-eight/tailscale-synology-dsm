@@ -43,7 +43,7 @@
   ],
   "synology_contract": {
     "dependency_section": "iptables-netfilter-extensions",
-    "dependency_minimum": "1.1.0-3",
+    "dependency_minimum": "1.1.0-2",
     "dependency_os_minimum": "7.3-86009",
     "tailscale_os_minimum": "7.3-86009",
     "os_max_ver_allowed": false

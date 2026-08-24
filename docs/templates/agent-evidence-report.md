@@ -24,7 +24,7 @@ List each source commit beside its prepared commit and subject in replay order.
 ## Fixed product contract
 
 - Dependency section: `iptables-netfilter-extensions`
-- Dependency minimum: `1.1.0-3`
+- Dependency minimum: `1.1.0-2`
 - Dependency DSM minimum: `7.3-86009`
 - Tailscale DSM minimum: `7.3-86009`
 - Production `os_max_ver`: absent

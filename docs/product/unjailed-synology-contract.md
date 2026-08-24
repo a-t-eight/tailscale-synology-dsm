@@ -23,7 +23,7 @@ The dependency file is exactly:
 
 ```text
 [iptables-netfilter-extensions]
-pkg_min_ver=1.1.0-3
+pkg_min_ver=1.1.0-2
 os_min_ver=7.3-86009
 ```
 

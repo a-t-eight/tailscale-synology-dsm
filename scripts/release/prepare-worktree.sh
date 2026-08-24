@@ -785,7 +785,7 @@ lines.extend(
         "## Fixed product contract",
         "",
         "- Dependency: `iptables-netfilter-extensions`",
-        "- Dependency minimum: `1.1.0-3`",
+        "- Dependency minimum: `1.1.0-2`",
         "- Dependency and Tailscale DSM minimum: `7.3-86009`",
         "- Production `os_max_ver`: absent",
         "",

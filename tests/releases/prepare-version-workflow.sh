@@ -332,7 +332,7 @@ if [item["order"] for item in manifest["patches"]] != [1, 2]:
     raise SystemExit("manifest patch order differs")
 if manifest["synology_contract"] != {
     "dependency_section": "iptables-netfilter-extensions",
-    "dependency_minimum": "1.1.0-3",
+    "dependency_minimum": "1.1.0-2",
     "dependency_os_minimum": "7.3-86009",
     "tailscale_os_minimum": "7.3-86009",
     "os_max_ver_allowed": False,

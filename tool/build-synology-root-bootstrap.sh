@@ -352,7 +352,7 @@ python3 - \
 import sys
 from pathlib import Path
 
-expected = b"[iptables-netfilter-extensions]\npkg_min_ver=1.1.0-3\nos_min_ver=7.3-86009\n"
+expected = b"[iptables-netfilter-extensions]\npkg_min_ver=1.1.0-2\nos_min_ver=7.3-86009\n"
 
 for label, value in zip(
     ("sideload", "Package Center"),

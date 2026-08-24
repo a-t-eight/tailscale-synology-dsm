@@ -132,7 +132,7 @@ for relative, (expected_git, expected_sha) in expected_blobs.items():
 contract = baseline["synology_contract"]
 expected_contract = {
     "dependency_section": "iptables-netfilter-extensions",
-    "dependency_minimum": "1.1.0-3",
+    "dependency_minimum": "1.1.0-2",
     "dependency_os_minimum": "7.3-86009",
     "tailscale_os_minimum": "7.3-86009",
     "os_max_ver_allowed": False,
@@ -143,7 +143,7 @@ if contract != expected_contract:
 pkg_deps = (root / "release/dist/synology/files/PKG_DEPS").read_bytes()
 expected_pkg_deps = (
     b"[iptables-netfilter-extensions]\n"
-    b"pkg_min_ver=1.1.0-3\n"
+    b"pkg_min_ver=1.1.0-2\n"
     b"os_min_ver=7.3-86009\n"
 )
 if pkg_deps != expected_pkg_deps:
