@@ -41,7 +41,7 @@ Only these exact targets are approved for removal:
 6. `/tmp/ts-r2-preflight.L5rExv/.r2-candidate.env.sha256.task7-8c9fe5239ee57a89ce687fc8c7608d3df91f6ede.tmp`
 7. `/home/ateight/development/tailscale-synology-unjailed/evidence/.validation-continuation-failure-manifest.e1IIc1`
 
-The first two targets are registered detached Git worktrees. They will be removed with Git's worktree command, then stale administrative entries will be pruned. The final two targets are redundant workspace-root copies, not tracked files in the feature worktree.
+The first two targets are registered detached Git worktrees. They will be removed with Git's worktree command, then stale administrative entries will be pruned. Targets 3–4 are redundant workspace-root copies, not tracked files in the feature worktree; targets 5–7 are the follow-up hard-link aliases documented below.
 
 ## Removal proof
 
