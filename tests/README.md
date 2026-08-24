@@ -21,6 +21,15 @@ Source-worktree workflow checks are:
   fixtures and proves signed ordered replay, review artifacts, patch round
   trip, identity mismatch rejection, conflict cleanup and absence of remote,
   tag or SPK side effects.
+- `releases/shellcheck.sh` — is the canonical changed-shell static-analysis
+  command. It runs ShellCheck with `--severity=style`, so error, warning,
+  information, and style diagnostics are all visible and enforced.
+
+Run the canonical command from the repository root:
+
+```text
+bash tests/releases/shellcheck.sh
+```
 
 `releases/validate-production-contract.sh` builds disposable local fixtures for
 the accepted release identity. It distinguishes living accepted identity from
