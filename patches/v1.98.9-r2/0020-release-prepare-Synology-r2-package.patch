@@ -1,0 +1,354 @@
+From d761199bbf823a5ba22a32b8668a7719c1af6375 Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Mon, 24 Aug 2026 18:23:08 +1000
+Subject: [PATCH 20/58] release: prepare Synology r2 package
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ release/dist/synology/files/PKG_DEPS      |   6 +-
+ release/dist/synology/package_revision.go |  10 ++
+ release/dist/synology/pkgs.go             |  14 +-
+ release/dist/synology/pkgs_test.go        | 161 ++++++++++++++++++++++
+ tool/build-synology-root-bootstrap.sh     |  55 ++++++--
+ 5 files changed, 225 insertions(+), 21 deletions(-)
+ create mode 100644 release/dist/synology/package_revision.go
+ create mode 100644 release/dist/synology/pkgs_test.go
+
+diff --git a/release/dist/synology/files/PKG_DEPS b/release/dist/synology/files/PKG_DEPS
+index 5e649e7f6..9ac9b42db 100644
+--- a/release/dist/synology/files/PKG_DEPS
++++ b/release/dist/synology/files/PKG_DEPS
+@@ -1,3 +1,3 @@
+-[tailscale-netfilter-modules]
+-pkg_min_ver=1.0.0-11
+-os_min_ver=7.3-81180
++[iptables-netfilter-extensions]
++pkg_min_ver=1.1.0-3
++os_min_ver=7.3-86009
+diff --git a/release/dist/synology/package_revision.go b/release/dist/synology/package_revision.go
+new file mode 100644
+index 000000000..5cb5fe472
+--- /dev/null
++++ b/release/dist/synology/package_revision.go
+@@ -0,0 +1,10 @@
++package synology
++
++const synologyPackageRevision int64 = 2
++
++func synologyPackageBuildNumber(base int64) int64 {
++	if synologyPackageRevision < 1 {
++		panic("Synology package revision must be positive")
++	}
++	return base + synologyPackageRevision - 1
++}
+diff --git a/release/dist/synology/pkgs.go b/release/dist/synology/pkgs.go
+index 7d2f05d59..c1b688178 100644
+--- a/release/dist/synology/pkgs.go
++++ b/release/dist/synology/pkgs.go
+@@ -66,7 +66,9 @@ func (t *target) dsmVersionString() string {
+ }
+ 
+ func (t *target) buildSPK(b *dist.Build, inner *innerPkg) ([]string, error) {
+-	synoVersion := b.Version.Synology[t.dsmVersionInt()]
++	synoVersion := synologyPackageBuildNumber(
++		b.Version.Synology[t.dsmVersionInt()],
++	)
+ 	filename := fmt.Sprintf("tailscale-%s-%s-%d-dsm%s.spk", t.filenameArch, b.Version.Short, synoVersion, t.dsmVersionString())
+ 	out := filepath.Join(b.Out, filename)
+ 	if t.packageCenter {
+@@ -163,12 +165,15 @@ func (t *target) buildSPK(b *dist.Build, inner *innerPkg) ([]string, error) {
+ }
+ 
+ func (t *target) mkInfo(b *dist.Build, uncompressedSz int64) []byte {
++	synoVersion := synologyPackageBuildNumber(
++		b.Version.Synology[t.dsmVersionInt()],
++	)
+ 	var ret bytes.Buffer
+ 	f := func(k, v string) {
+ 		fmt.Fprintf(&ret, "%s=%q\n", k, v)
+ 	}
+ 	f("package", "Tailscale")
+-	f("version", fmt.Sprintf("%s-%d", b.Version.Short, b.Version.Synology[t.dsmVersionInt()]))
++	f("version", fmt.Sprintf("%s-%d", b.Version.Short, synoVersion))
+ 	f("arch", t.filenameArch)
+ 	f("description", "Connect all your devices using WireGuard, without the hassle.")
+ 	f("displayname", "Tailscale")
+@@ -191,15 +196,14 @@ func (t *target) mkInfo(b *dist.Build, uncompressedSz int64) []byte {
+ 			case 2:
+ 				// This custom package depends on the DSM 7.3 netfilter
+ 				// module package and root-runtime integration.
+-				f("os_min_ver", "7.3-81180")
++				f("os_min_ver", "7.3-86009")
+ 			default:
+ 				panic(fmt.Sprintf("unsupported DSM major.minor version %s", t.dsmVersionString()))
+ 			}
+ 		} else {
+ 			// This custom package depends on the DSM 7.3 netfilter
+ 			// module package and root-runtime integration.
+-			f("os_min_ver", "7.3-81180")
+-			f("os_max_ver", "")
++			f("os_min_ver", "7.3-86009")
+ 		}
+ 	default:
+ 		panic(fmt.Sprintf("unsupported DSM major version %d", t.dsmMajorVersion))
+diff --git a/release/dist/synology/pkgs_test.go b/release/dist/synology/pkgs_test.go
+new file mode 100644
+index 000000000..1b2d05973
+--- /dev/null
++++ b/release/dist/synology/pkgs_test.go
+@@ -0,0 +1,161 @@
++package synology
++
++import (
++	"bytes"
++	"log"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"tailscale.com/release/dist"
++	"tailscale.com/version/mkversion"
++)
++
++func r2TestBuild() *dist.Build {
++	return &dist.Build{Version: mkversion.VersionInfo{
++		Short: "1.98.96",
++		Synology: map[int]int64{
++			70: 700098096,
++			72: 720098096,
++		},
++	}}
++}
++
++func TestSynologyPackageRevision(t *testing.T) {
++	if synologyPackageRevision != 2 {
++		t.Fatalf("revision=%d, want 2", synologyPackageRevision)
++	}
++	for base, want := range map[int64]int64{
++		700098096: 700098097,
++		720098096: 720098097,
++	} {
++		if got := synologyPackageBuildNumber(base); got != want {
++			t.Fatalf("build(%d)=%d, want %d", base, got, want)
++		}
++		if want <= base {
++			t.Fatalf("r2 build %d is not newer than r1 %d", want, base)
++		}
++	}
++}
++
++func TestDSM7R2Info(t *testing.T) {
++	tests := []struct {
++		name   string
++		target target
++		want   string
++	}{
++		{"sideload", target{dsmMajorVersion: 7}, `version="1.98.96-700098097"`},
++		{"package-center", target{dsmMajorVersion: 7, dsmMinorVersion: 2, packageCenter: true}, `version="1.98.96-720098097"`},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			info := string(tt.target.mkInfo(r2TestBuild(), 0))
++			for _, want := range []string{tt.want, `os_min_ver="7.3-86009"`} {
++				if !strings.Contains(info, want+"\n") {
++					t.Fatalf("INFO missing %q:\n%s", want, info)
++				}
++			}
++			if strings.Contains(info, "os_max_ver=") {
++				t.Fatalf("INFO must omit os_max_ver:\n%s", info)
++			}
++		})
++	}
++}
++
++func TestDSM7R2SPKFilenames(t *testing.T) {
++	tests := []struct {
++		name   string
++		target target
++		want   string
++	}{
++		{
++			"sideload",
++			target{filenameArch: "x86_64", dsmMajorVersion: 7},
++			"tailscale-x86_64-1.98.96-700098097-dsm7.spk",
++		},
++		{
++			"package-center",
++			target{filenameArch: "x86_64", dsmMajorVersion: 7, dsmMinorVersion: 2, packageCenter: true},
++			"tailscale-x86_64-1.98.96-720098097-dsm7-2.spk",
++		},
++	}
++	previousLogOutput := log.Writer()
++	t.Cleanup(func() { log.SetOutput(previousLogOutput) })
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			var logOutput bytes.Buffer
++			log.SetOutput(&logOutput)
++
++			build := r2TestBuild()
++			build.Out = filepath.Join(t.TempDir(), "missing")
++			_, err := tt.target.buildSPK(build, &innerPkg{})
++			if !os.IsNotExist(err) {
++				t.Fatalf("buildSPK error=%v, want missing-output-directory error", err)
++			}
++			if !strings.Contains(logOutput.String(), tt.want) {
++				t.Fatalf("buildSPK log missing filename %q: %s", tt.want, logOutput.String())
++			}
++			if _, err := os.Stat(filepath.Join(build.Out, tt.want)); !os.IsNotExist(err) {
++				t.Fatalf("buildSPK unexpectedly created %q: %v", tt.want, err)
++			}
++		})
++	}
++}
++
++func TestLegacyDSMInfoRanges(t *testing.T) {
++	tests := []struct {
++		name    string
++		target  target
++		wantMin string
++		wantMax string
++	}{
++		{
++			"dsm6-package-center",
++			target{dsmMajorVersion: 6, packageCenter: true},
++			`os_min_ver="6.0.1-7445"`,
++			`os_max_ver="7.0-40000"`,
++		},
++		{
++			"dsm7-package-center",
++			target{dsmMajorVersion: 7, packageCenter: true},
++			`os_min_ver="7.0-40000"`,
++			`os_max_ver="7.2-60000"`,
++		},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			info := string(tt.target.mkInfo(r2TestBuild(), 0))
++			for prefix, want := range map[string]string{
++				"os_min_ver=": tt.wantMin,
++				"os_max_ver=": tt.wantMax,
++			} {
++				var matches []string
++				for _, line := range strings.Split(info, "\n") {
++					if strings.HasPrefix(line, prefix) {
++						matches = append(matches, line)
++					}
++				}
++				if len(matches) != 1 || matches[0] != want {
++					t.Fatalf("INFO %s entries=%q, want [%q]:\n%s", prefix, matches, want, info)
++				}
++			}
++		})
++	}
++}
++
++func TestR2PKGDeps(t *testing.T) {
++	got, err := files.ReadFile("files/PKG_DEPS")
++	if err != nil {
++		t.Fatal(err)
++	}
++	want := "[iptables-netfilter-extensions]\n" +
++		"pkg_min_ver=1.1.0-3\n" +
++		"os_min_ver=7.3-86009\n"
++	if string(got) != want {
++		t.Fatalf("PKG_DEPS mismatch\n got: %q\nwant: %q", got, want)
++	}
++	if strings.Contains(string(got), "tailscale-netfilter-modules") {
++		t.Fatal("old dependency remains")
++	}
++}
+diff --git a/tool/build-synology-root-bootstrap.sh b/tool/build-synology-root-bootstrap.sh
+index fe04a50d9..084b91a15 100755
+--- a/tool/build-synology-root-bootstrap.sh
++++ b/tool/build-synology-root-bootstrap.sh
+@@ -236,7 +236,11 @@ python3 - \
+ import sys
+ from pathlib import Path
+ 
+-expected = 'os_min_ver="7.3-81180"'
++expected_versions = {
++    "sideload": 'version="1.98.96-700098097"',
++    "Package Center": 'version="1.98.96-720098097"',
++}
++expected_minimum = 'os_min_ver="7.3-86009"'
+ 
+ for label, value in zip(
+     ("sideload", "Package Center"),
+@@ -249,19 +253,48 @@ for label, value in zip(
+             f"{label} package is missing outer INFO metadata"
+         )
+ 
+-    matches = [
++    lines = path.read_text(
++        encoding="utf-8",
++    ).splitlines()
++    version_matches = [
+         line
+-        for line in path.read_text(
+-            encoding="utf-8",
+-        ).splitlines()
++        for line in lines
++        if line.startswith("version=")
++    ]
++
++    if version_matches != [expected_versions[label]]:
++        raise RuntimeError(
++            "{} INFO has unexpected version entries: {!r}".format(
++                label,
++                version_matches,
++            )
++        )
++
++    minimum_matches = [
++        line
++        for line in lines
+         if line.startswith("os_min_ver=")
+     ]
+ 
+-    if matches != [expected]:
++    if minimum_matches != [expected_minimum]:
+         raise RuntimeError(
+             "{} INFO has unexpected os_min_ver entries: {!r}".format(
+                 label,
+-                matches,
++                minimum_matches,
++            )
++        )
++
++    maximum_matches = [
++        line
++        for line in lines
++        if line.startswith("os_max_ver=")
++    ]
++
++    if maximum_matches:
++        raise RuntimeError(
++            "{} INFO has unexpected os_max_ver entries: {!r}".format(
++                label,
++                maximum_matches,
+             )
+         )
+ 
+@@ -319,11 +352,7 @@ python3 - \
+ import sys
+ from pathlib import Path
+ 
+-expected = (
+-    "[tailscale-netfilter-modules]\n"
+-    "pkg_min_ver=1.0.0-11\n"
+-    "os_min_ver=7.3-81180\n"
+-)
++expected = b"[iptables-netfilter-extensions]\npkg_min_ver=1.1.0-3\nos_min_ver=7.3-86009\n"
+ 
+ for label, value in zip(
+     ("sideload", "Package Center"),
+@@ -336,7 +365,7 @@ for label, value in zip(
+             f"{label} package is missing conf/PKG_DEPS"
+         )
+ 
+-    actual = path.read_text(encoding="utf-8")
++    actual = path.read_bytes()
+ 
+     if actual != expected:
+         raise RuntimeError(

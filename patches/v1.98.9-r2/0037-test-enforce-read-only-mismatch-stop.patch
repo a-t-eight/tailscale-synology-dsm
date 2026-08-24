@@ -1,0 +1,74 @@
+From 59528baa4d5e1bbe7384dc367598528b0627e9ce Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Mon, 24 Aug 2026 18:23:13 +1000
+Subject: [PATCH 37/58] test: enforce read-only mismatch stop
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ scripts/release/common.sh                  |  4 ++++
+ scripts/release/prepare-worktree.sh        |  2 +-
+ tests/releases/prepare-version-workflow.sh | 10 ++++++----
+ 3 files changed, 11 insertions(+), 5 deletions(-)
+
+diff --git a/scripts/release/common.sh b/scripts/release/common.sh
+index 7f1e3ce90..bb8a919b5 100644
+--- a/scripts/release/common.sh
++++ b/scripts/release/common.sh
+@@ -4,6 +4,10 @@ release_fail() {
+   printf 'FAIL: %s\n' "$1" >&2
+ }
+ 
++release_stop() {
++  printf 'STOP: %s\n' "$1" >&2
++}
++
+ release_pass() {
+   printf 'PASS: %s\n' "$1"
+ }
+diff --git a/scripts/release/prepare-worktree.sh b/scripts/release/prepare-worktree.sh
+index 2df705554..420b5a748 100755
+--- a/scripts/release/prepare-worktree.sh
++++ b/scripts/release/prepare-worktree.sh
+@@ -277,7 +277,7 @@ prepare_version() (
+       true
+   )"
+   if [ "$PEELED_TAG" != "$UPSTREAM_COMMIT" ]; then
+-    release_fail "explicit upstream tag does not peel to the explicit commit"
++    release_stop "explicit upstream tag does not peel to the explicit commit"
+     exit 1
+   fi
+ 
+diff --git a/tests/releases/prepare-version-workflow.sh b/tests/releases/prepare-version-workflow.sh
+index 84cbf5556..b1951664c 100755
+--- a/tests/releases/prepare-version-workflow.sh
++++ b/tests/releases/prepare-version-workflow.sh
+@@ -391,10 +391,12 @@ create_failure_fixture() {
+   REMOTE_REFS_BEFORE="$(snapshot_refs "$BARE_ORIGIN")"
+   TAG_REFS_BEFORE="$(git_fixture show-ref --tags | sort)"
+   SELECTED_UPSTREAM="$NEW_UPSTREAM"
+-  EXPECTED_FAILURE="logical commit replay conflicted"
++  PREPARE_MODE="--confirm-create"
++  EXPECTED_FAILURE="FAIL: logical commit replay conflicted: ${PREVIOUS_RELEASE}"
+   if [ "$failure_case" = "mismatch" ]; then
+     SELECTED_UPSTREAM="$OLD_UPSTREAM"
+-    EXPECTED_FAILURE="explicit upstream tag does not peel to the explicit commit"
++    PREPARE_MODE="--plan-only"
++    EXPECTED_FAILURE="STOP: explicit upstream tag does not peel to the explicit commit"
+   fi
+ 
+   if bash "$PREPARE_SCRIPT" prepare-version \
+@@ -408,12 +410,12 @@ create_failure_fixture() {
+     --target-branch work/v2.0.0-synology-r1 \
+     --target-worktree "$PREPARED_WORKTREE" \
+     --output-root "$ARTIFACTS" \
+-    --confirm-create \
++    "$PREPARE_MODE" \
+     > "$LOG" 2>&1; then
+     fail "${failure_case} fixture unexpectedly succeeded"
+   fi
+ 
+-  if ! grep -Fq "$EXPECTED_FAILURE" "$LOG"; then
++  if ! grep -Fxq "$EXPECTED_FAILURE" "$LOG"; then
+     sed -n '1,240p' "$LOG" >&2
+     fail "${failure_case} fixture did not report the expected stop condition"
+   fi

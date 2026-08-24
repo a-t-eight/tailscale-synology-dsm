@@ -1,0 +1,279 @@
+From 6a1a6235a021ed05934e62c37ba171cf09904675 Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Mon, 24 Aug 2026 18:23:17 +1000
+Subject: [PATCH 55/58] synology: expose attended bootstrap command
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ release/dist/synology/files/resource  |   7 +-
+ release/dist/synology/pkgs.go         |  33 ++++++--
+ release/dist/synology/pkgs_test.go    | 105 ++++++++++++++++++++++++++
+ tool/build-synology-root-bootstrap.sh |  29 ++++++-
+ 4 files changed, 162 insertions(+), 12 deletions(-)
+
+diff --git a/release/dist/synology/files/resource b/release/dist/synology/files/resource
+index 0da0002ef..a831e052e 100644
+--- a/release/dist/synology/files/resource
++++ b/release/dist/synology/files/resource
+@@ -3,9 +3,12 @@
+ 		"protocol-file": "conf/Tailscale.sc"
+ 	},
+ 	"usr-local-linker": {
+-		"bin": ["bin/tailscale"]
++		"bin": [
++			"bin/tailscale",
++			"bin/tailscale-synology-bootstrap"
++		]
+ 	},
+ 	"syslog-config": {
+ 		"logrotate-relpath": "conf/logrotate.conf"
+ 	}
+-}
+\ No newline at end of file
++}
+diff --git a/release/dist/synology/pkgs.go b/release/dist/synology/pkgs.go
+index c1b688178..bd718a52f 100644
+--- a/release/dist/synology/pkgs.go
++++ b/release/dist/synology/pkgs.go
+@@ -261,17 +261,14 @@ func (m *synologyBuilds) buildInnerPackage(b *dist.Build, dsmVersion int, goenv
+ 		tw := tar.NewWriter(cw)
+ 		defer tw.Close()
+ 
+-		err = writeTar(tw, b.Time,
++		entries := []tarEntry{
+ 			dir("bin"),
+ 			file(tsd, "bin/tailscaled", 0755),
+ 			file(ts, "bin/tailscale", 0755),
+-			dir("conf"),
+-			static("Tailscale.sc", "conf/Tailscale.sc", 0644),
+-			static(fmt.Sprintf("logrotate-dsm%d", dsmVersion), "conf/logrotate.conf", 0644),
+-			dir("ui"),
+-			static("PACKAGE_ICON_256.PNG", "ui/PACKAGE_ICON_256.PNG", 0644),
+-			static("config", "ui/config", 0644),
+-			static("index.cgi", "ui/index.cgi", 0755))
++		}
++		entries = append(entries, innerPackageStaticEntries(dsmVersion)...)
++
++		err = writeTar(tw, b.Time, entries...)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+@@ -290,6 +287,26 @@ func (m *synologyBuilds) buildInnerPackage(b *dist.Build, dsmVersion int, goenv
+ 	})
+ }
+ 
++func innerPackageStaticEntries(dsmVersion int) []tarEntry {
++	entries := []tarEntry{}
++	if dsmVersion == 7 {
++		entries = append(entries, static(
++			"scripts/tailscale-synology-bootstrap",
++			"bin/tailscale-synology-bootstrap",
++			0755,
++		))
++	}
++	return append(entries,
++		dir("conf"),
++		static("Tailscale.sc", "conf/Tailscale.sc", 0644),
++		static(fmt.Sprintf("logrotate-dsm%d", dsmVersion), "conf/logrotate.conf", 0644),
++		dir("ui"),
++		static("PACKAGE_ICON_256.PNG", "ui/PACKAGE_ICON_256.PNG", 0644),
++		static("config", "ui/config", 0644),
++		static("index.cgi", "ui/index.cgi", 0755),
++	)
++}
++
+ // writeTar writes ents to tw.
+ func writeTar(tw *tar.Writer, modTime time.Time, ents ...tarEntry) error {
+ 	for _, ent := range ents {
+diff --git a/release/dist/synology/pkgs_test.go b/release/dist/synology/pkgs_test.go
+index 888eee35e..d04104bbe 100644
+--- a/release/dist/synology/pkgs_test.go
++++ b/release/dist/synology/pkgs_test.go
+@@ -4,17 +4,122 @@
+ package synology
+ 
+ import (
++	"archive/tar"
+ 	"bytes"
++	"encoding/json"
++	"io"
+ 	"log"
+ 	"os"
+ 	"path/filepath"
+ 	"strings"
+ 	"testing"
++	"time"
+ 
+ 	"tailscale.com/release/dist"
+ 	"tailscale.com/version/mkversion"
+ )
+ 
++func TestDSM7InnerStaticEntriesIncludeBootstrap(t *testing.T) {
++	var buf bytes.Buffer
++	tw := tar.NewWriter(&buf)
++	if err := writeTar(tw, time.Unix(0, 0), innerPackageStaticEntries(7)...); err != nil {
++		t.Fatal(err)
++	}
++	if err := tw.Close(); err != nil {
++		t.Fatal(err)
++	}
++
++	want, err := files.ReadFile("files/scripts/tailscale-synology-bootstrap")
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	tr := tar.NewReader(bytes.NewReader(buf.Bytes()))
++	for {
++		hdr, err := tr.Next()
++		if err == io.EOF {
++			break
++		}
++		if err != nil {
++			t.Fatal(err)
++		}
++		if hdr.Name != "bin/tailscale-synology-bootstrap" {
++			continue
++		}
++		if got := hdr.FileInfo().Mode().Perm(); got != 0755 {
++			t.Fatalf("bootstrap mode=%#o, want 0755", got)
++		}
++		got, err := io.ReadAll(tr)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if !bytes.Equal(got, want) {
++			t.Fatal("inner bootstrap content differs from canonical script source")
++		}
++		return
++	}
++
++	t.Fatal("inner package entries do not contain bin/tailscale-synology-bootstrap")
++}
++
++func TestDSM7BootstrapIntegrationMetadata(t *testing.T) {
++	resourceBytes, err := files.ReadFile("files/resource")
++	if err != nil {
++		t.Fatal(err)
++	}
++	var resource struct {
++		UsrLocalLinker struct {
++			Bin []string `json:"bin"`
++		} `json:"usr-local-linker"`
++	}
++	if err := json.Unmarshal(resourceBytes, &resource); err != nil {
++		t.Fatal(err)
++	}
++	if !containsString(resource.UsrLocalLinker.Bin, "bin/tailscale-synology-bootstrap") {
++		t.Fatalf("usr-local-linker bin=%q, missing bootstrap", resource.UsrLocalLinker.Bin)
++	}
++
++	for _, test := range []struct {
++		name          string
++		wantToolPaths []string
++	}{
++		{name: "privilege-dsm7"},
++		{
++			name:          "privilege-dsm7.for-package-center",
++			wantToolPaths: []string{"bin/tailscaled"},
++		},
++	} {
++		privilegeBytes, err := files.ReadFile("files/" + test.name)
++		if err != nil {
++			t.Fatal(err)
++		}
++		var privilege struct {
++			Tool []struct {
++				Relpath string `json:"relpath"`
++			} `json:"tool"`
++		}
++		if err := json.Unmarshal(privilegeBytes, &privilege); err != nil {
++			t.Fatal(err)
++		}
++		var gotToolPaths []string
++		for _, tool := range privilege.Tool {
++			gotToolPaths = append(gotToolPaths, tool.Relpath)
++		}
++		if strings.Join(gotToolPaths, "\n") != strings.Join(test.wantToolPaths, "\n") {
++			t.Fatalf("%s tool paths=%q, want %q", test.name, gotToolPaths, test.wantToolPaths)
++		}
++	}
++}
++
++func containsString(values []string, want string) bool {
++	for _, value := range values {
++		if value == want {
++			return true
++		}
++	}
++	return false
++}
++
+ func r2TestBuild() *dist.Build {
+ 	return &dist.Build{Version: mkversion.VersionInfo{
+ 		Short: "1.98.96",
+diff --git a/tool/build-synology-root-bootstrap.sh b/tool/build-synology-root-bootstrap.sh
+index dd5f20aaa..68475cceb 100755
+--- a/tool/build-synology-root-bootstrap.sh
++++ b/tool/build-synology-root-bootstrap.sh
+@@ -314,9 +314,13 @@ python3 - \
+     "${SIDE}/conf/privilege" \
+     "${SIDE}/conf/privilege.bootstrap-package" \
+     "${SIDE}/conf/privilege.bootstrap-root" \
+-    "${CENTER}/conf/privilege" <<'PYJSON'
++    "${CENTER}/conf/privilege" \
++    "${SIDE}/conf/resource" \
++    "${SIDE}/package.tgz" \
++    "${SIDE}/scripts/tailscale-synology-bootstrap" <<'PYJSON'
+ import json
+ import sys
++import tarfile
+ from pathlib import Path
+ 
+ (
+@@ -324,15 +328,20 @@ from pathlib import Path
+     safe_template_path,
+     root_template_path,
+     package_center_path,
++    resource_path,
++    inner_package_path,
++    outer_bootstrap_path,
+ ) = map(Path, sys.argv[1:])
+ 
+ active_sideload = json.loads(active_sideload_path.read_text())
+ safe_template = json.loads(safe_template_path.read_text())
+ root_template = json.loads(root_template_path.read_text())
+ package_center = json.loads(package_center_path.read_text())
++resource = json.loads(resource_path.read_text())
+ 
+ assert active_sideload == safe_template
+ assert active_sideload["defaults"]["run-as"] == "package"
++assert "tool" not in active_sideload
+ assert root_template["defaults"]["run-as"] == "root"
+ 
+ assert package_center["defaults"]["run-as"] == "package"
+@@ -343,7 +352,23 @@ assert package_center["tool"] == [{
+     "capabilities": "cap_net_admin,cap_chown,cap_net_raw",
+ }]
+ 
+-print("Privilege manifest validation passed.")
++assert resource["usr-local-linker"]["bin"] == [
++    "bin/tailscale",
++    "bin/tailscale-synology-bootstrap",
++]
++
++with tarfile.open(inner_package_path, mode="r:gz") as archive:
++    bootstrap_member = archive.getmember(
++        "bin/tailscale-synology-bootstrap"
++    )
++    assert bootstrap_member.isfile()
++    assert bootstrap_member.mode == 0o755
++
++    stream = archive.extractfile(bootstrap_member)
++    assert stream is not None
++    assert stream.read() == outer_bootstrap_path.read_bytes()
++
++print("Bootstrap packaging and privilege validation passed.")
+ PYJSON
+ 
+ python3 - \

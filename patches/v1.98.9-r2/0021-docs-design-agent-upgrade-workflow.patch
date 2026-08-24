@@ -1,0 +1,672 @@
+From 1aaf5576281e0c4318adc8418def72c8d11b90e7 Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Mon, 24 Aug 2026 18:23:08 +1000
+Subject: [PATCH 21/58] docs: design agent upgrade workflow
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ .../2026-08-23-agent-upgrade-workflow.md      | 464 ++++++++++++++++++
+ ...026-08-23-agent-upgrade-workflow-design.md | 183 +++++++
+ 2 files changed, 647 insertions(+)
+ create mode 100644 docs/superpowers/plans/2026-08-23-agent-upgrade-workflow.md
+ create mode 100644 docs/superpowers/specs/2026-08-23-agent-upgrade-workflow-design.md
+
+diff --git a/docs/superpowers/plans/2026-08-23-agent-upgrade-workflow.md b/docs/superpowers/plans/2026-08-23-agent-upgrade-workflow.md
+new file mode 100644
+index 000000000..d6be06827
+--- /dev/null
++++ b/docs/superpowers/plans/2026-08-23-agent-upgrade-workflow.md
+@@ -0,0 +1,464 @@
++# Agent Upgrade Workflow Implementation Plan
++
++> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
++
++**Goal:** Provide one offline, fail-closed command that prepares an explicitly pinned Tailscale Synology version in an isolated worktree and emits validated review artifacts.
++
++**Architecture:** Promote the minimum existing control layer into the candidate source branch, then extend `scripts/release/prepare-worktree.sh` with a separate explicit `prepare-version` mode. A real temporary Git fixture drives the behavior through TDD; the command stages artifacts until signed replay and patch round-trip validation complete.
++
++**Tech Stack:** Bash, Git worktrees, SSH commit signing, Python 3 standard library for strict JSON/schema checks, SHA-256, repository-pinned Go.
++
++**Spec:** `docs/superpowers/specs/2026-08-23-agent-upgrade-workflow-design.md`
++
++## Global Constraints
++
++- Base commit is exactly `8c9fe5239ee57a89ce687fc8c7608d3df91f6ede`.
++- Never recreate or alter the seven protected blobs enumerated in the spec.
++- Dependency declaration is exactly `[iptables-netfilter-extensions]`.
++- Dependency minimum is exactly `pkg_min_ver=1.1.0-3`.
++- Dependency and Tailscale DSM minimum is exactly `7.3-86009`.
++- Production r2/new lineage contains no `os_max_ver`.
++- New downstream commits are signed and contain exactly one `Signed-off-by` trailer.
++- No fetch, push, pull request, tag creation, release, publication, SPK build, dependency-SPK build, NAS install, root bootstrap, firewall mutation, or reboot.
++
++---
++
++### Task 1: Promote the source-worktree control layer
++
++**Files:**
++- Create from accepted control blobs: `AGENTS.md`
++- Create from accepted control blobs: `CLAUDE.md`
++- Create from accepted control blobs: `.githooks/README.md`
++- Create from accepted control blobs: `.githooks/commit-msg`
++- Create from accepted control blobs: `.githooks/pre-commit`
++- Create from accepted control blobs: `scripts/setup-worktree.sh`
++- Create from accepted control blobs: `scripts/release/common.sh`
++- Create from accepted control blobs: `scripts/release/prepare-worktree.sh`
++- Create from accepted control blobs: `scripts/README.md`
++- Create from accepted control blobs: `tests/README.md`
++- Create from accepted control blobs: `release/manifest.yaml`
++- Create from accepted control blobs: `docs/runbooks/tailscale-synology-version-update.md`
++- Add missing accepted lineage files under: `patches/v1.98.9/`
++
++**Interfaces:**
++- Consumes: exact blobs from `e6cc919d7fc5ee35e14bb1aa56d33ec782c2c016` and the seven protected candidate blobs.
++- Produces: source-worktree instructions, worktree setup, release helpers, existing preparation interface, historical lineage, and accepted manifest for later tasks.
++
++- [ ] **Step 1: Record source blob selections and collision decisions**
++
++Run:
++
++```bash
++git diff --name-status HEAD e6cc919d7fc5ee35e14bb1aa56d33ec782c2c016 -- \
++  AGENTS.md CLAUDE.md .githooks scripts/setup-worktree.sh \
++  scripts/release/common.sh scripts/release/prepare-worktree.sh \
++  scripts/README.md tests/README.md release/manifest.yaml \
++  docs/runbooks/tailscale-synology-version-update.md \
++  patches/v1.98.9
++```
++
++Expected: control assets are absent from the candidate except the protected
++canonical patch and checksum, whose candidate blobs remain authoritative.
++
++- [ ] **Step 2: Promote exact non-colliding control blobs**
++
++Run `git restore --source=e6cc919d7fc5ee35e14bb1aa56d33ec782c2c016 --` for the listed files and for lineage paths other than
++`patches/v1.98.9/synology-netfilter.patch` and
++`patches/v1.98.9/synology-netfilter.patch.sha256`.
++
++Expected: promoted files match their control-commit blobs byte for byte and the
++two protected patch blobs still match the candidate.
++
++- [ ] **Step 3: Verify shell syntax and protected identities**
++
++Run:
++
++```bash
++bash -n scripts/setup-worktree.sh scripts/release/common.sh \
++  scripts/release/prepare-worktree.sh .githooks/commit-msg .githooks/pre-commit
++git diff --exit-code 8c9fe5239ee57a89ce687fc8c7608d3df91f6ede -- \
++  cmd/tailscale/cli/up.go cmd/tailscaled/tailscaled.go ipn/ipnlocal/local.go \
++  util/linuxfw/iptables_runner.go wgengine/router/osrouter/router_linux.go \
++  patches/v1.98.9/synology-netfilter.patch \
++  patches/v1.98.9/synology-netfilter.patch.sha256
++```
++
++Expected: both commands exit 0.
++
++- [ ] **Step 4: Commit the promoted control layer**
++
++```bash
++git add AGENTS.md CLAUDE.md .githooks scripts/setup-worktree.sh \
++  scripts/release/common.sh scripts/release/prepare-worktree.sh \
++  scripts/README.md tests/README.md release/manifest.yaml \
++  docs/runbooks/tailscale-synology-version-update.md \
++  patches/v1.98.9
++git commit -S -s -m "chore: promote Synology release controls"
++```
++
++Expected: the commit verifies with `git verify-commit` and has one sign-off.
++
++### Task 2: Establish executable upgrade contracts
++
++**Files:**
++- Create: `release/version-preparation.schema.json`
++- Create: `release/upgrade-baseline.json`
++- Create: `docs/product/unjailed-synology-contract.md`
++- Create: `docs/runbooks/agent-version-preparation.md`
++- Create: `docs/templates/agent-evidence-report.md`
++- Modify: `AGENTS.md`
++
++**Interfaces:**
++- Consumes: immutable candidate identities and fixed Synology contract from the design spec.
++- Produces: `schema_version = 1` JSON contract consumed by `prepare-worktree.sh`; concise agent rules and a standard evidence report structure.
++
++- [ ] **Step 1: Write a failing contract validation test**
++
++Add `tests/releases/version-preparation-contract.sh` that invokes a Python
++strict-JSON validator against `release/upgrade-baseline.json` and
++`release/version-preparation.schema.json`, then checks actual candidate blobs
++and the exact `PKG_DEPS` bytes. The test must require all safety booleans to be
++false and reject an `os_max_ver` field.
++
++- [ ] **Step 2: Run the contract test and observe RED**
++
++Run:
++
++```bash
++bash tests/releases/version-preparation-contract.sh
++```
++
++Expected: FAIL because the baseline and schema files do not exist.
++
++- [ ] **Step 3: Add the minimal machine-readable contracts**
++
++Create strict JSON files containing the exact candidate commit/tree, seven
++protected Git blob and SHA-256 pairs, exact dependency lines, DSM floor,
++`os_max_ver_allowed: false`, and false capabilities for every prohibited side
++effect. The schema permits no unknown top-level members.
++
++- [ ] **Step 4: Run the contract test and observe GREEN**
++
++Run `bash tests/releases/version-preparation-contract.sh`.
++
++Expected: PASS with actual file, Git blob, checksum, dependency, and safety
++checks.
++
++- [ ] **Step 5: Add concise product, runbook, report, and root-agent docs**
++
++Document that unjailed means the daemon uses kernel TUN and Linux netfilter,
++supports routing preferences, and gates startup on administrator-installed
++root runtime prerequisites. Document the exact new command inputs/outputs and
++reuse the report template sections defined by the spec. Append a short
++`Agent version preparation` section to `AGENTS.md` pointing to these contracts.
++
++- [ ] **Step 6: Commit the contracts**
++
++```bash
++git add AGENTS.md release/version-preparation.schema.json \
++  release/upgrade-baseline.json docs/product/unjailed-synology-contract.md \
++  docs/runbooks/agent-version-preparation.md \
++  docs/templates/agent-evidence-report.md \
++  tests/releases/version-preparation-contract.sh
++git commit -S -s -m "docs: define agent upgrade contracts"
++```
++
++Expected: contract test passes and commit signature/sign-off verify.
++
++### Task 3: Add the offline success fixture and minimal preparation mode
++
++**Files:**
++- Create: `tests/releases/prepare-version-workflow.sh`
++- Modify: `scripts/release/prepare-worktree.sh`
++- Modify: `scripts/release/common.sh`
++
++**Interfaces:**
++- Consumes: `prepare-version` arguments from the spec and the version-preparation schema.
++- Produces: an isolated signed worktree and atomically installed artifacts at `--output-root`.
++
++- [ ] **Step 1: Write the success fixture first**
++
++The test creates a temporary repository, an old base, two ordered logical
++commits, a new upstream commit tagged `v2.0.0`, an SSH signing key, and a bare
++origin. It invokes:
++
++```bash
++bash scripts/release/prepare-worktree.sh prepare-version \
++  --source-repo "$fixture_repo" \
++  --upstream-tag v2.0.0 \
++  --upstream-commit "$new_upstream" \
++  --previous-upstream-commit "$old_upstream" \
++  --previous-release-commit "$old_release" \
++  --new-version 2.0.0 \
++  --downstream-revision r1 \
++  --target-branch work/v2.0.0-synology-r1 \
++  --target-worktree "$prepared_worktree" \
++  --output-root "$artifacts" \
++  --confirm-create
++```
++
++Assert two signed commits in source order, one sign-off each, exact upstream
++base, schema-valid manifest, two ordered mail patches, matching prepared and
++round-trip tree IDs, fixed Synology contract, and unchanged origin/tag refs.
++
++- [ ] **Step 2: Run the success fixture and observe RED**
++
++Run `bash tests/releases/prepare-version-workflow.sh success`.
++
++Expected: FAIL because `prepare-version` is unsupported.
++
++- [ ] **Step 3: Implement strict argument and identity preflight**
++
++Add `prepare-version` dispatch and validate full SHAs, version/revision/branch
++forms, clean source worktree, local tag peeling, old ancestry, non-empty linear
++range, absent targets, signer configuration, required commands, and exact
++baseline safety contract. `--plan-only` prints exact identities without
++mutation; `--confirm-create` is required otherwise.
++
++- [ ] **Step 4: Implement ordered signed replay**
++
++Create the target worktree at the exact new upstream commit. For each
++`git rev-list --reverse --topo-order old..tip` entry, cherry-pick without
++committing, strip all inherited `Signed-off-by` trailers from its message, and
++commit with `git commit -S -s -F`. Verify the commit signature and exactly one
++sign-off immediately before continuing.
++
++- [ ] **Step 5: Implement staged export and round trip**
++
++Export mail patches into a same-parent staging directory, derive `series` from
++actual filenames, compute checksums, write strict JSON and Markdown artifacts,
++apply the series in a temporary detached worktree, compare tree IDs, then rename
++the staging directory to `--output-root`.
++
++- [ ] **Step 6: Run success fixture and observe GREEN**
++
++Run `bash tests/releases/prepare-version-workflow.sh success`.
++
++Expected: PASS and the test removes only its own temporary worktrees.
++
++- [ ] **Step 7: Commit the successful workflow slice**
++
++```bash
++git add scripts/release/common.sh scripts/release/prepare-worktree.sh \
++  tests/releases/prepare-version-workflow.sh
++git commit -S -s -m "feat: prepare pinned Synology versions"
++```
++
++Expected: focused workflow and contract tests pass; commit verifies.
++
++### Task 4: Prove mismatch and conflict fail closed
++
++**Files:**
++- Modify: `tests/releases/prepare-version-workflow.sh`
++- Modify: `scripts/release/prepare-worktree.sh`
++- Modify: `scripts/release/common.sh`
++
++**Interfaces:**
++- Consumes: the preparation mode from Task 3.
++- Produces: stable nonzero behavior with no publication or final artifacts on invalid identity or replay conflict.
++
++- [ ] **Step 1: Add the mismatched-tag test and observe RED if needed**
++
++Invoke `--plan-only` with `v2.0.0` and a different full commit. Assert nonzero,
++no target branch/worktree/output/staging directory, and unchanged tag/origin
++refs.
++
++- [ ] **Step 2: Add the replay-conflict test and observe RED**
++
++Create a new upstream commit that edits the same line as the first downstream
++logical commit. Assert nonzero, no final output, no `CHERRY_PICK_HEAD`, no
++unmerged entries, unchanged tag/origin refs, and a clear `STOP` message naming
++the source commit that conflicted.
++
++- [ ] **Step 3: Implement minimal fail-closed cleanup**
++
++On replay failure, run `git cherry-pick --abort`, remove only the workflow's
++private artifact staging directory, leave the isolated target worktree for
++review, and exit with the failing Git status. Never delete or reset a path that
++existed before invocation.
++
++- [ ] **Step 4: Run all fixture cases and observe GREEN**
++
++Run:
++
++```bash
++bash tests/releases/prepare-version-workflow.sh all
++```
++
++Expected: success, mismatch, and conflict cases pass; origin and tag snapshots
++remain identical in every case.
++
++- [ ] **Step 5: Commit fail-closed behavior**
++
++```bash
++git add scripts/release/common.sh scripts/release/prepare-worktree.sh \
++  tests/releases/prepare-version-workflow.sh
++git commit -S -s -m "test: enforce fail-closed version preparation"
++```
++
++Expected: focused tests and commit verification pass.
++
++### Task 5: Complete documentation and standard evidence reporting
++
++**Files:**
++- Modify: `docs/runbooks/tailscale-synology-version-update.md`
++- Modify: `docs/runbooks/agent-version-preparation.md`
++- Modify: `scripts/README.md`
++- Modify: `tests/README.md`
++
++**Interfaces:**
++- Consumes: the tested CLI and artifact contract.
++- Produces: one unambiguous operator/agent route to the new mode and explicit handoff boundaries.
++
++- [ ] **Step 1: Document exact plan-only and confirmed commands**
++
++Add commands using explicit example-only SHAs, label them as examples, explain
++local-object prerequisites, output layout, conflict handling, and review steps.
++
++- [ ] **Step 2: Document evidence and PR handoff**
++
++Require attaching `manifest.json`, `SHA256SUMS`, `preparation-report.md`,
++`git range-diff` review notes, signature/sign-off verification, and test output.
++State that PR creation and all publication remain separate human-authorized
++actions.
++
++- [ ] **Step 3: Validate docs and commit**
++
++Run available Markdown lint in offline mode if present, then:
++
++```bash
++git add docs/runbooks/tailscale-synology-version-update.md \
++  docs/runbooks/agent-version-preparation.md scripts/README.md tests/README.md
++git commit -S -s -m "docs: add version preparation runbook"
++```
++
++Expected: docs reflect the tested interface and commit verifies.
++
++### Task 6: Focused and broad verification
++
++**Files:**
++- Modify only if a failing test exposes a tested workflow defect.
++
++**Interfaces:**
++- Consumes: complete feature tree.
++- Produces: fresh verification evidence and a requirements checklist.
++
++- [ ] **Step 1: Run focused contract and workflow tests**
++
++```bash
++bash tests/releases/version-preparation-contract.sh
++bash tests/releases/prepare-version-workflow.sh all
++```
++
++- [ ] **Step 2: Run all Synology shell regression tests**
++
++```bash
++for test_script in release/dist/synology/tests/*.sh; do
++  bash "$test_script"
++done
++```
++
++- [ ] **Step 3: Run offline focused Go tests through pinned Go**
++
++```bash
++env GOPROXY=off GOTOOLCHAIN=local \
++  GOCACHE=/tmp/tailscale-agent-upgrade-go-cache \
++  GOMODCACHE=/home/ateight/development/tailscale-synology-unjailed/go/pkg/mod \
++  ./tool/go test ./release/dist/synology ./wgengine/router/osrouter \
++  ./cmd/tailscale/cli ./ipn/ipnlocal ./util/linuxfw
++```
++
++- [ ] **Step 4: Run syntax and available style checks**
++
++Run `bash -n` over repository-owned shell files, `shellcheck` over changed shell
++files, `shfmt -d` if installed, strict JSON parsing, and Markdown/YAML tools only
++when locally available without downloads.
++
++- [ ] **Step 5: Verify patches and protected blobs**
++
++Run the canonical checksum from `patches/v1.98.9`, validate the promoted
++historical SHA256 inventory, run the synthetic patch round trip again, and run
++`git diff --exit-code 8c9fe523...` over all seven protected paths.
++
++- [ ] **Step 6: Verify every new commit**
++
++For each commit in `8c9fe523..HEAD`, run `git verify-commit` and assert exactly
++one `Signed-off-by` trailer. Confirm no prohibited remote or tag ref changed.
++
++### Task 7: Evidence-backed cleanup and post-cleanup inventory
++
++**Files:**
++- Create: `docs/cleanup/2026-08-23-pre-cleanup-manifest.md`
++- Create: `docs/cleanup/2026-08-23-post-cleanup-inventory.md`
++
++**Interfaces:**
++- Consumes: verified implementation state and top-level workspace inventory.
++- Produces: auditable keep/remove decisions and a final inventory; no ambiguous deletion.
++
++- [ ] **Step 1: Enumerate cleanup candidates without deleting**
++
++List only named C0R/controller/state-machine scripts, temporary preflight,
++controller/correction/evidence roots, detached dirty evidence worktrees, and
++redundant top-level patch copies. Record absolute path, type, size, Git/worktree
++state, checksum/tree identity, uniqueness evidence, and `KEEP`, `REMOVE`, or
++`AMBIGUOUS`.
++
++- [ ] **Step 2: Prove detached-worktree equivalence**
++
++For each candidate, record HEAD, index tree, worktree status, untracked files,
++and compare its staged tree to accepted candidate tree
++`6d171c2a01c0fafb9567f3f4bc49bdd4f7ff7392`. Only an equal staged tree with no
++unique unstaged/untracked product change can be `REMOVE`.
++
++- [ ] **Step 3: Prove patch-copy equality or distinction**
++
++Record SHA-256 for each top-level copy, the protected canonical patch, and its
++checksum. Mark a copy `REMOVE` only when it is byte-identical and no retained
++evidence references that absolute copy as required current-release evidence.
++
++- [ ] **Step 4: Commit the pre-cleanup manifest before deletion**
++
++```bash
++git add docs/cleanup/2026-08-23-pre-cleanup-manifest.md
++git commit -S -s -m "docs: record workspace cleanup decisions"
++```
++
++- [ ] **Step 5: Remove only manifest-approved targets**
++
++Use exact absolute paths. Remove registered worktrees with `git worktree remove`
++from outside them; do not force removal. Delete only unregistered targets marked
++`REMOVE`. Leave every `AMBIGUOUS` path unchanged.
++
++- [ ] **Step 6: Write and commit the post-cleanup inventory**
++
++Record retained source/base, r2 candidate, control, contract, feature worktree,
++branches, canonical assets, history, SPKs/evidence, and remaining ambiguous
++items. Include `git worktree list --porcelain` and checksum verification.
++
++```bash
++git add docs/cleanup/2026-08-23-post-cleanup-inventory.md
++git commit -S -s -m "docs: record post-cleanup workspace inventory"
++```
++
++### Task 8: Finish the branch without integration or publication
++
++**Files:**
++- No file changes expected.
++
++**Interfaces:**
++- Consumes: fresh complete verification evidence.
++- Produces: preserved local branch/worktree and final implementation report.
++
++- [ ] **Step 1: Re-run the complete relevant verification suite**
++
++Repeat Task 6 on the final tree and inspect `git status --short --branch`.
++
++- [ ] **Step 2: Capture final identity and diff**
++
++Record branch, HEAD, tree, commit list, diff statistics, worktree path, protected
++blob verification, cleanup reports, and any unavailable optional tool.
++
++- [ ] **Step 3: Preserve local state**
++
++Keep `codex/agent-upgrade-workflow` and its worktree. Do not merge, push, create
++a pull request, tag, release, publish, or operate a NAS.
+diff --git a/docs/superpowers/specs/2026-08-23-agent-upgrade-workflow-design.md b/docs/superpowers/specs/2026-08-23-agent-upgrade-workflow-design.md
+new file mode 100644
+index 000000000..a239c8e35
+--- /dev/null
++++ b/docs/superpowers/specs/2026-08-23-agent-upgrade-workflow-design.md
+@@ -0,0 +1,183 @@
++# Agent upgrade workflow design
++
++## Status
++
++Approved for implementation on `codex/agent-upgrade-workflow`, based on the
++clean candidate commit `8c9fe5239ee57a89ce687fc8c7608d3df91f6ede`.
++
++## Problem
++
++The working Tailscale 1.98.9 Synology implementation has a reviewed source
++history and release evidence, but preparing a later upstream version still
++requires an operator to coordinate several lower-level scripts manually. That
++leaves room for selecting a floating upstream ref, applying changes out of
++order, working in the wrong checkout, emitting incomplete artifacts, or
++crossing a publication boundary accidentally.
++
++The repository needs one deep, agent-facing command that turns exact local Git
++identities into an isolated adaptation worktree and reviewable artifacts. It
++must remain useful without network access and must stop safely when a logical
++change conflicts with the selected upstream commit.
++
++## Immutable baseline
++
++The implementation starts from candidate commit
++`8c9fe5239ee57a89ce687fc8c7608d3df91f6ede`, tree
++`6d171c2a01c0fafb9567f3f4bc49bdd4f7ff7392`.
++
++The following seven blobs are protected. This feature may inspect and validate
++them but must not recreate, format, regenerate, or semantically alter them:
++
++| Path | Candidate Git blob | Candidate SHA-256 |
++| --- | --- | --- |
++| `cmd/tailscale/cli/up.go` | `ace6ac3dbdcc42f18e3dadfacbc65cee1b1df311` | `5da19848c5a76a2242c300b8accf6ae2100d96589d66869eb374fc12337e31c1` |
++| `cmd/tailscaled/tailscaled.go` | `6f0dcede86551dfb142f5a2a6944de92c1ecd756` | `684e79377cbbe79dc3d3ad7bc8400f26101d1d958ce78a9a724ab4a3d1571990` |
++| `ipn/ipnlocal/local.go` | `b84205d914f2e47e4cefda1a4a0ce98202cd552f` | `dbbec62dd501abb1262593e19b70868d3b5ca478d6a9d9e7848d1cfb1256a570` |
++| `util/linuxfw/iptables_runner.go` | `03d9b87a8c0c35d655e60b4456ba136116b6afd2` | `96d2122b8929433cb0ac987587ebf969406fb3d64067378b2b3975b810aeb137` |
++| `wgengine/router/osrouter/router_linux.go` | `c48749734c5618bfe3973afbb2d00f75b34e0d13` | `54339503f0d7e5598aa3b507a7c685408bcd84d6580bde69acf19a5e60154da0` |
++| `patches/v1.98.9/synology-netfilter.patch` | `b0a9474448b0f5bac5b24229ffe6827c4eebe897` | `ad577d4032e3c14fa37b284b7e5116c364122471b1d9fdc2c906bf8ae198920f` |
++| `patches/v1.98.9/synology-netfilter.patch.sha256` | `5b88bba7a6ac4b8cea5d307bee5cdc9769e70ad4` | `b0a7641e8297c79ea2c40ffddc82632cfbdaf83029b4552e42572b227a2b7fe4` |
++
++The r2/new-lineage Synology product contract is also fixed:
++
++- dependency declaration: exactly `[iptables-netfilter-extensions]`;
++- dependency minimum: exactly `pkg_min_ver=1.1.0-3`;
++- dependency DSM floor: exactly `os_min_ver=7.3-86009`;
++- Tailscale DSM floor: exactly `7.3-86009`;
++- production r2 and later lineage: no `os_max_ver`.
++
++## Selected architecture
++
++Deepen the existing `scripts/release/prepare-worktree.sh` interface promoted
++from `synology/main`. Preserve its manifest-driven worktree mode and add a
++separate `prepare-version` mode with explicit, pinned inputs. Do not introduce
++a second entry command.
++
++The new mode accepts:
++
++- `--source-repo PATH`;
++- `--upstream-tag vN.N.N`;
++- `--upstream-commit` as a full 40-character lowercase commit ID;
++- `--previous-upstream-commit` as the exact old base;
++- `--previous-release-commit` as the exact tip of the ordered logical stack;
++- `--new-version N.N.N` and `--downstream-revision rN`;
++- `--target-branch work/vN.N.N-synology-rN`;
++- `--target-worktree PATH` and `--output-root PATH`;
++- `--plan-only` for a read-only preflight or `--confirm-create` for mutation.
++
++All identities must already exist locally. The command never fetches and the
++explicit tag must peel to the explicit upstream commit. The old base must be an
++ancestor of the old release tip. The old downstream range must be non-empty,
++linear, and ordered oldest-to-newest. Target branch, worktree, and artifact
++paths must not already exist.
++
++After preflight, the command creates a Git worktree at the exact new upstream
++commit. It replays each logical commit with `git cherry-pick --no-commit`,
++removes inherited `Signed-off-by` trailers from the copied message, and creates
++one signed commit with one current-identity sign-off. This preserves logical
++order while making the new stack auditable under the current commit policy.
++Commit signing must already be configured; a missing or failing signer stops
++the operation.
++
++Only after every commit succeeds does the command export mail patches with
++`git format-patch`, write an ordered `series` file, write SHA-256 checksums, and
++emit a schema-validated JSON preparation manifest plus a standard Markdown
++evidence/PR report. It creates a temporary detached round-trip worktree at the
++new upstream commit, applies the exported mail series, and requires its tree to
++equal the prepared tree. Temporary round-trip state is removed on success.
++
++If replay, signing, export, or round-trip validation fails, the command exits
++nonzero and does not publish an artifact set. A replay conflict is aborted so
++the target worktree is left free of Git conflict state for review. It never
++removes a pre-existing path or ref.
++
++## Manifest and artifact contract
++
++`release/version-preparation.schema.json` defines the emitted JSON artifact.
++The manifest records schema version, exact source and upstream identities,
++ordered source commits, prepared branch/commit/tree, ordered mail patch names,
++the fixed Synology contract, validation results, and all safety capabilities as
++`false`.
++
++The output directory is committed atomically by renaming a same-parent staging
++directory only after validation. Its reviewable contents are:
++
++```text
++<output-root>/
++  manifest.json
++  SHA256SUMS
++  patches/
++    series
++    0001-*.patch
++    0002-*.patch
++  preparation-report.md
++```
++
++The report uses the same identities as the JSON manifest and includes sections
++for change summary, ordered logical history, validation evidence, fixed product
++contract, risk/review notes, and explicit prohibited side effects.
++
++## Control assets promoted without rewriting
++
++The minimum coherent source-worktree control layer is promoted as exact blobs
++from the accepted control worktree where possible:
++
++- `AGENTS.md` and `CLAUDE.md`;
++- repository-owned hooks and `scripts/setup-worktree.sh`;
++- the existing `patches/v1.98.9` lineage files, added alongside the protected
++  canonical source patch/checksum without replacing either;
++- `release/manifest.yaml` as the immutable accepted r1 operational record;
++- `scripts/release/common.sh` and `scripts/release/prepare-worktree.sh`;
++- the existing version-update runbook, then a focused edit describing the new
++  mode;
++- only tests directly needed to prove the promoted and new interface.
++
++Frozen r1 closure validators, build/publish scripts, retained runtime evidence,
++and unrelated governance material are not copied merely for completeness.
++
++## Test strategy
++
++The primary test is an offline Bash integration test. It creates a temporary
++Git repository with:
++
++1. an old upstream commit;
++2. two ordered downstream commits;
++3. a distinct new upstream commit and explicit local tag;
++4. an SSH signing key generated in the fixture and configured only in that
++   repository;
++5. a local bare `origin` whose refs are snapshotted before invocation.
++
++The success case runs the real script and asserts the isolated worktree base,
++logical commit order, one sign-off per generated commit, valid signatures,
++schema-valid manifest, ordered patches, matching round-trip tree, fixed product
++contract, and unchanged origin/tag refs.
++
++The conflict case creates a new upstream commit that conflicts with the first
++downstream logical change. It asserts a nonzero exit, an explanatory failure,
++no final artifact directory, no conflict state in the target worktree, and
++unchanged local tags and remote refs.
++
++The preflight case supplies a tag/commit mismatch and asserts failure before
++any branch, worktree, staging directory, or artifact is created.
++
++The test is written and observed failing before implementation. Each added
++behavior follows its own red-green cycle.
++
++## Safety boundary
++
++The interface may create local branches, local worktrees, signed local commits,
++temporary round-trip worktrees, and review artifacts under exact caller paths.
++It must not fetch, push, create a pull request, create or alter a tag, build an
++SPK, build the dependency SPK, publish, release, install on a NAS, run root
++bootstrap, alter firewall/netfilter state, or reboot DSM.
++
++## Cleanup boundary
++
++Cleanup happens only after feature verification. A pre-cleanup report must name
++every proposed target, classification, evidence, and decision. Detached dirty
++evidence worktrees may be removed only when their staged trees equal the
++accepted candidate tree and no untracked or unstaged product change exists.
++Top-level patch copies may be removed only after recording equality or
++distinction from the canonical in-repository patch and confirming the canonical
++checksum. Ambiguous targets remain untouched.
++

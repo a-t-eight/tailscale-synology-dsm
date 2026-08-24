@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -u
 
-SOURCE_ENV_COMMIT="20c86229955a3d03de01901aee1499cab87c571d"
-SOURCE_ENV_TREE="6d022c18f27a42aab553697c69c852bebd8594b8"
+SOURCE_ENV_COMMIT="0fad8b81a3e0eb86c457bc79c474bcc213834c43"
+SOURCE_ENV_TREE="33f5c5927ae4db54b9d582650ed31cc6a2eb7161"
 
 SHELLCHECK_VERSION="v0.11.0"
 SHFMT_VERSION="v3.13.1"
@@ -18,7 +18,7 @@ REPO_ROOT="$(
 SOURCE_ENV_ROOT="${TAILSCALE_SOURCE_ENVIRONMENT:-}"
 
 CACHE_ROOT="${XDG_CACHE_HOME:-${HOME}/.cache}/tailscale-synology-dsm/governance-tools"
-TOOLSET_ID="go-${SOURCE_ENV_COMMIT}-shellcheck-${SHELLCHECK_VERSION#v}-shfmt-${SHFMT_VERSION#v}-actionlint-${ACTIONLINT_VERSION#v}-gitleaks-${GITLEAKS_VERSION#v}"
+TOOLSET_ID="$(uname -s)-$(uname -m)-go-${SOURCE_ENV_COMMIT}-shellcheck-${SHELLCHECK_VERSION#v}-shfmt-${SHFMT_VERSION#v}-actionlint-${ACTIONLINT_VERSION#v}-gitleaks-${GITLEAKS_VERSION#v}"
 BIN_ROOT="${CACHE_ROOT}/${TOOLSET_ID}/bin"
 TEXT_VALIDATOR="${CACHE_ROOT}/${TOOLSET_ID}/validate-text.go"
 
@@ -327,6 +327,19 @@ install_shellcheck() {
   require_command python3 || return 1
   require_command sha256sum || return 1
 
+  case "$(uname -s)" in
+    Linux)
+      release_os="linux"
+      ;;
+    Darwin)
+      release_os="darwin"
+      ;;
+    *)
+      fail_check "unsupported ShellCheck bootstrap operating system: $(uname -s)"
+      return 1
+      ;;
+  esac
+
   case "$(uname -m)" in
     x86_64 | amd64)
       release_arch="x86_64"
@@ -373,6 +386,7 @@ install_shellcheck() {
       - \
       "$release_json" \
       "$SHELLCHECK_VERSION" \
+      "$release_os" \
       "$release_arch" << 'PY'
 import json
 import sys
@@ -380,8 +394,9 @@ from pathlib import Path
 
 data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 version = sys.argv[2]
-arch = sys.argv[3]
-expected = f"shellcheck-{version}.linux.{arch}.tar.xz"
+operating_system = sys.argv[3]
+arch = sys.argv[4]
+expected = f"shellcheck-{version}.{operating_system}.{arch}.tar.xz"
 
 matches = [
     asset
@@ -552,17 +567,29 @@ install_gitleaks() {
   require_command python3 || return 1
   require_command sha256sum || return 1
 
-  case "$(uname -m)" in
-    x86_64 | amd64)
+  case "$(uname -s):$(uname -m)" in
+    Linux:x86_64 | Linux:amd64)
+      release_os="linux"
       release_arch="x64"
       pinned_sha="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
       ;;
-    aarch64 | arm64)
+    Linux:aarch64 | Linux:arm64)
+      release_os="linux"
       release_arch="arm64"
       pinned_sha="e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080"
       ;;
+    Darwin:x86_64 | Darwin:amd64)
+      release_os="darwin"
+      release_arch="x64"
+      pinned_sha="dfe101a4db2255fc85120ac7f3d25e4342c3c20cf749f2c20a18081af1952709"
+      ;;
+    Darwin:aarch64 | Darwin:arm64)
+      release_os="darwin"
+      release_arch="arm64"
+      pinned_sha="b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5"
+      ;;
     *)
-      fail_check "unsupported Gitleaks bootstrap architecture: $(uname -m)"
+      fail_check "unsupported Gitleaks bootstrap platform: $(uname -s)/$(uname -m)"
       return 1
       ;;
   esac
@@ -600,6 +627,7 @@ install_gitleaks() {
       - \
       "$release_json" \
       "$GITLEAKS_VERSION" \
+      "$release_os" \
       "$release_arch" \
       "$pinned_sha" << 'PY'
 import json
@@ -608,9 +636,10 @@ from pathlib import Path
 
 data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 version = sys.argv[2].removeprefix("v")
-arch = sys.argv[3]
-pinned_sha = sys.argv[4]
-expected = f"gitleaks_{version}_linux_{arch}.tar.gz"
+operating_system = sys.argv[3]
+arch = sys.argv[4]
+pinned_sha = sys.argv[5]
+expected = f"gitleaks_{version}_{operating_system}_{arch}.tar.gz"
 
 matches = [
     asset
@@ -1275,6 +1304,15 @@ else
   fail_check "synthetic static SPK inspection tests failed"
 fi
 
+printf '\n=== Living r2 release contract ===\n'
+
+if bash \
+  tests/releases/r2-control-contract.sh; then
+  pass_check "living r2 release contract and retained checksums passed."
+else
+  fail_check "living r2 release contract or retained checksums failed"
+fi
+
 printf '\n=== GitHub Actions ===\n'
 
 WORKFLOW_FILES=()
@@ -1347,11 +1385,17 @@ printf '\n=== Git whitespace ===\n'
 
 if git \
   diff \
-  --check &&
+  --check \
+  -- \
+  . \
+  ':(exclude,glob)patches/**/*.patch' &&
   git \
     diff \
     --cached \
-    --check; then
+    --check \
+    -- \
+    . \
+    ':(exclude,glob)patches/**/*.patch'; then
   pass_check "Git staged and unstaged whitespace validation passed."
 else
   fail_check "Git staged or unstaged whitespace validation failed"

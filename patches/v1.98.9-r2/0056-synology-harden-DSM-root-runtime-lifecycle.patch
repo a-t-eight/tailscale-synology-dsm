@@ -1,0 +1,1702 @@
+From 3df4304bbb8ccb24fcd60aa7c3ab42c3599055f2 Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Mon, 24 Aug 2026 18:23:17 +1000
+Subject: [PATCH 56/58] synology: harden DSM root runtime lifecycle
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ docs/product/unjailed-synology-contract.md    |  22 +-
+ .../synology/files/scripts/start-stop-status  | 372 ++++++++++++++----
+ .../scripts/tailscale-netfilter-reconciler    |   2 -
+ .../scripts/tailscale-synology-bootstrap      | 169 +++++++-
+ .../tests/netfilter-preflight-test.sh         | 177 ++++++++-
+ .../synology/tests/root-bootstrap-test.sh     | 201 +++++++++-
+ .../tests/start-stop-definitions-test.sh      | 130 +++++-
+ tests/releases/shellcheck.sh                  |   7 +-
+ 8 files changed, 962 insertions(+), 118 deletions(-)
+
+diff --git a/docs/product/unjailed-synology-contract.md b/docs/product/unjailed-synology-contract.md
+index e20b4eeb7..0b02c3f0a 100644
+--- a/docs/product/unjailed-synology-contract.md
++++ b/docs/product/unjailed-synology-contract.md
+@@ -10,12 +10,26 @@ mode. On supported DSM systems it:
+ - uses the Linux netfilter backend for routing, forwarding and NAT;
+ - preserves routing and netfilter preferences accepted by `tailscale up`;
+ - supports subnet-routing behavior through the kernel router;
+-- requires an administrator-installed root runtime before package startup;
++- enters an explicit bootstrap-pending staging state after installation, in
++  which DSM reports the package healthy only to retain package resources while
++  `tailscaled` remains stopped;
++- requires an administrator-installed root runtime before daemon startup;
+ - verifies the root runtime and repairs required Tailscale netfilter hooks.
+ 
+-Package startup fails closed when TUN, root-runtime or required netfilter
+-prerequisites are unavailable. Agent workflows must not run bootstrap or alter
+-those prerequisites on a NAS.
++Initial approval must run the root-owned outer package script:
++
++```text
++sudo /var/packages/Tailscale/scripts/tailscale-synology-bootstrap install
++```
++
++The `/usr/local/bin/tailscale-synology-bootstrap` linker target is
++package-owned before approval and must not be executed through `sudo` in that
++state. A successful bootstrap changes the package target to `root:root`; the
++linked command is then a trusted post-bootstrap convenience entry point.
++
++After approval, package startup fails closed when TUN, root-runtime or required
++netfilter prerequisites are unavailable. Agent workflows must not run
++bootstrap or alter those prerequisites on a NAS.
+ 
+ ## r2 and later package contract
+ 
+diff --git a/release/dist/synology/files/scripts/start-stop-status b/release/dist/synology/files/scripts/start-stop-status
+index 1faec8157..f162460a2 100755
+--- a/release/dist/synology/files/scripts/start-stop-status
++++ b/release/dist/synology/files/scripts/start-stop-status
+@@ -34,6 +34,12 @@ STATE_FILE="${PKGVAR}/tailscaled.state"
+ SOCKET_FILE="${PKGVAR}/tailscaled.sock"
+ PORT="41641"
+ 
++PROC_ROOT="/proc"
++
++if [ "${TAILSCALE_SYNOLOGY_TEST_MODE:-0}" = "1" ]; then
++    PROC_ROOT="${TAILSCALE_SYNOLOGY_PROC_ROOT:-/proc}"
++fi
++
+ TAILSCALE_BIN="${SYNOPKG_PKGDEST}/bin/tailscale"
+ 
+ NETFILTER_LOCALAPI_ATTEMPTS="${TAILSCALE_SYNOLOGY_LOCALAPI_ATTEMPTS:-30}"
+@@ -60,34 +66,104 @@ if [ "${SYNOPKG_DSM_VERSION_MAJOR}" -eq "6" ]; then
+     chown -R tailscale:tailscale "${PKGVAR}/"
+ fi
+ 
++process_executable_matches() {
++    local pid="$1"
++    local executable="$2"
++    local expected_executable
++    local actual_executable
++
++    expected_executable="$(readlink -f -- "${executable}")" ||
++        return 1
++
++    actual_executable="$(
++        readlink -f -- "${PROC_ROOT}/${pid}/exe"
++    )" || return 1
++
++    [ "${actual_executable}" = "${expected_executable}" ]
++}
++
++process_cmdline_has_arg() {
++    local pid="$1"
++    local expected_arg="$2"
++    local arg
++
++    [ -r "${PROC_ROOT}/${pid}/cmdline" ] || return 1
++
++    while IFS= read -r arg; do
++        if [ "${arg}" = "${expected_arg}" ]; then
++            return 0
++        fi
++    done < <(tr '\000' '\n' <"${PROC_ROOT}/${pid}/cmdline")
++
++    return 1
++}
++
++daemon_pid() {
++    local pid
++
++    [ -r "${PID_FILE}" ] || return 1
++
++    pid="$(cat -- "${PID_FILE}" 2>/dev/null)" || return 1
++
++    case "${pid}" in
++    ''|*[!0-9]*)
++        return 1
++        ;;
++    esac
++
++    [ -d "${PROC_ROOT}/${pid}" ] || return 1
++
++    process_executable_matches \
++        "${pid}" \
++        "${SYNOPKG_PKGDEST}/bin/tailscaled" ||
++        return 1
++
++    printf '%s\n' "${pid}"
++}
++
+ start_daemon() {
+-    local ts=$(date --iso-8601=second)
+-    echo "${ts} Starting ${SERVICE_NAME} with: ${SERVICE_COMMAND}" >${LOG_FILE}
+-    STATE_DIRECTORY=${PKGVAR} ${SERVICE_COMMAND} 2>&1 | sed -u '1,200p;201s,.*,[further tailscaled logs suppressed],p;d' >>${LOG_FILE} &
++    local ts
++
++    ts="$(date --iso-8601=second)"
++    echo "${ts} Starting ${SERVICE_NAME} with: ${SERVICE_COMMAND}" >"${LOG_FILE}"
++    STATE_DIRECTORY=${PKGVAR} ${SERVICE_COMMAND} 2>&1 | sed -u '1,200p;201s,.*,[further tailscaled logs suppressed],p;d' >>"${LOG_FILE}" &
+     # We pipe tailscaled's output to sed, so "$!" retrieves the PID of sed not tailscaled.
+     # Use jobs -p to retrieve the PID of the most recent process group leader.
+     jobs -p >"${PID_FILE}"
+ }
+ 
+ stop_daemon() {
+-    if [ -r "${PID_FILE}" ]; then
+-        local PID=$(cat "${PID_FILE}")
+-        local ts=$(date --iso-8601=second)
+-        echo "${ts} Stopping ${SERVICE_NAME} service PID=${PID}" >>${LOG_FILE}
+-        kill -TERM $PID >>${LOG_FILE} 2>&1
+-        wait_for_status 1 || kill -KILL $PID >>${LOG_FILE} 2>&1
+-        rm -f "${PID_FILE}" >/dev/null
++    local pid
++    local current_pid
++    local ts
++
++    pid="$(daemon_pid)" || {
++        rm -f -- "${PID_FILE}" >/dev/null
++        return 0
++    }
++
++    ts=$(date --iso-8601=second)
++    echo "${ts} Stopping ${SERVICE_NAME} service PID=${pid}" >>"${LOG_FILE}"
++    kill -TERM -- "${pid}" >>"${LOG_FILE}" 2>&1 || true
++
++    if ! wait_for_status 1; then
++        current_pid="$(daemon_pid)" || current_pid=""
++
++        if [ "${current_pid}" = "${pid}" ]; then
++            kill -KILL -- "${pid}" >>"${LOG_FILE}" 2>&1 || true
++        fi
+     fi
++
++    rm -f -- "${PID_FILE}" >/dev/null
+ }
+ 
+ daemon_status() {
+-    if [ -r "${PID_FILE}" ]; then
+-        local PID=$(cat "${PID_FILE}")
+-        if ps -o pid -p ${PID} > /dev/null; then
+-            return
+-        fi
+-        rm -f "${PID_FILE}" >/dev/null
++    if daemon_pid >/dev/null 2>&1; then
++        return 0
+     fi
++
++    rm -f -- "${PID_FILE}" >/dev/null
++
+     return 1
+ }
+ 
+@@ -97,7 +173,7 @@ wait_for_status() {
+     local counter=20
+     while [ ${counter} -gt 0 ]; do
+         daemon_status
+-        [ $? -eq $1 ] && return
++        [ $? -eq "$1" ] && return
+         counter=$((counter - 1))
+         sleep 1
+     done
+@@ -396,27 +472,50 @@ check_iptables_rule_support() {
+ 
+ cleanup_tailscale_nat_preflight() {
+     local chain="$1"
++    local after_count
++    local before_count
+     local failed=0
++    local parent
++    local parents
++    local updated_parents
+ 
+-    while "${IPTABLES_BIN}" \
+-        -t nat \
+-        -D POSTROUTING \
+-        -j "${chain}" \
+-        >/dev/null 2>&1
+-    do
+-        :
+-    done
++    parents="$(tailscale_nat_hook_parents "${chain}")" ||
++        failed=1
+ 
+-    # DSM exposes its effective built-in NAT chain as
+-    # DEFAULT_POSTROUTING in full table listings. This fallback is
+-    # harmless when the normal POSTROUTING deletion already succeeded.
+-    while "${IPTABLES_BIN}" \
+-        -t nat \
+-        -D DEFAULT_POSTROUTING \
+-        -j "${chain}" \
+-        >/dev/null 2>&1
+-    do
+-        :
++    while [ "${failed}" -eq 0 ] && [ -n "${parents}" ]; do
++        before_count="$(
++            printf '%s\n' "${parents}" |
++                awk 'NF { count++ } END { print count + 0 }'
++        )"
++        parent="$(printf '%s\n' "${parents}" | awk 'NF { print; exit }')"
++
++        if ! "${IPTABLES_BIN}" \
++            -t nat \
++            -D "${parent}" \
++            -j "${chain}" \
++            >/dev/null 2>&1
++        then
++            failed=1
++            break
++        fi
++
++        updated_parents="$(tailscale_nat_hook_parents "${chain}")" || {
++            failed=1
++            break
++        }
++        after_count="$(
++            printf '%s\n' "${updated_parents}" |
++                awk 'NF { count++ } END { print count + 0 }'
++        )"
++
++        if [ "${after_count}" -ge "${before_count}" ]; then
++            log_message ERROR \
++                "iptables reported successful deletion from nat/${parent}, but the ${chain} hook did not change"
++            failed=1
++            break
++        fi
++
++        parents="${updated_parents}"
+     done
+ 
+     "${IPTABLES_BIN}" \
+@@ -435,11 +534,58 @@ cleanup_tailscale_nat_preflight() {
+ }
+ 
+ 
+-check_tailscale_nat_topology() {
++tailscale_nat_hook_parents() {
++    local chain="$1"
++    local output
++    local status
++
++    output="$("${IPTABLES_BIN}" -t nat -S 2>&1)"
++    status=$?
++
++    if [ "${status}" -ne 0 ]; then
++        log_message ERROR \
++            "cannot inspect temporary NAT hooks for ${chain}: ${output}"
++        return 1
++    fi
++
++    printf '%s\n' "${output}" |
++        awk -v wanted="${chain}" '
++            $1 == "-A" &&
++            ($2 == "POSTROUTING" || $2 == "DEFAULT_POSTROUTING") {
++                for (field = 3; field < NF; field++) {
++                    if ($field == "-j" && $(field + 1) == wanted) {
++                        print $2
++                        break
++                    }
++                }
++            }
++        '
++}
++
++
++tailscale_nat_preflight_test_checkpoint() {
++    :
++}
++
++
++check_tailscale_nat_topology() (
+     local chain="ts-pf-nat-$$"
++    local cleanup_armed=0
+     local output
+     local status
+ 
++    # shellcheck disable=SC2329
++    cleanup_on_exit() {
++        if [ "${cleanup_armed}" -eq 1 ]; then
++            cleanup_tailscale_nat_preflight "${chain}" ||
++                true
++        fi
++    }
++
++    trap cleanup_on_exit EXIT
++    trap 'exit 130' INT
++    trap 'exit 143' TERM
++
+     output="$(
+         "${IPTABLES_BIN}" \
+             -t nat \
+@@ -454,6 +600,8 @@ check_tailscale_nat_topology() {
+         return 1
+     fi
+ 
++    cleanup_armed=1
++
+     output="$(
+         "${IPTABLES_BIN}" \
+             -t nat \
+@@ -465,9 +613,6 @@ check_tailscale_nat_topology() {
+     status=$?
+ 
+     if [ "${status}" -ne 0 ]; then
+-        cleanup_tailscale_nat_preflight "${chain}" ||
+-            true
+-
+         log_message ERROR \
+             "cannot hook a temporary chain from nat/POSTROUTING: ${output}"
+         return 1
+@@ -483,14 +628,15 @@ check_tailscale_nat_topology() {
+     status=$?
+ 
+     if [ "${status}" -ne 0 ]; then
+-        cleanup_tailscale_nat_preflight "${chain}" ||
+-            true
+-
+         log_message ERROR \
+             "cannot verify the temporary nat/POSTROUTING hook: ${output}"
+         return 1
+     fi
+ 
++    if [ "${TAILSCALE_SYNOLOGY_TEST_MODE:-0}" = "1" ]; then
++        tailscale_nat_preflight_test_checkpoint
++    fi
++
+     output="$(
+         "${IPTABLES_BIN}" \
+             -t nat \
+@@ -503,9 +649,6 @@ check_tailscale_nat_topology() {
+     status=$?
+ 
+     if [ "${status}" -ne 0 ]; then
+-        cleanup_tailscale_nat_preflight "${chain}" ||
+-            true
+-
+         log_message ERROR \
+             "cannot add a marked MASQUERADE rule: ${output}"
+         return 1
+@@ -523,22 +666,25 @@ check_tailscale_nat_topology() {
+     status=$?
+ 
+     if [ "${status}" -ne 0 ]; then
+-        cleanup_tailscale_nat_preflight "${chain}" ||
+-            true
+-
+         log_message ERROR \
+             "cannot verify the marked MASQUERADE rule: ${output}"
+         return 1
+     fi
+ 
+-    if ! cleanup_tailscale_nat_preflight "${chain}"; then
++    cleanup_tailscale_nat_preflight "${chain}"
++    status=$?
++    cleanup_armed=0
++
++    if [ "${status}" -ne 0 ]; then
+         log_message ERROR \
+             "cannot remove the temporary NAT preflight topology"
+         return 1
+     fi
+ 
++    trap - EXIT INT TERM
++
+     return 0
+-}
++)
+ 
+ check_netfilter_prerequisites() {
+     if [ "${SYNOPKG_DSM_VERSION_MAJOR}" -ne "7" ]; then
+@@ -849,7 +995,7 @@ wait_for_localapi() {
+ }
+ 
+ 
+-reconciler_status() {
++reconciler_pid() {
+     local pid=""
+ 
+     if [ ! -r "${RECONCILER_PID_FILE}" ]; then
+@@ -861,12 +1007,22 @@ reconciler_status() {
+ 
+     case "${pid}" in
+     ''|*[!0-9]*)
+-        rm -f -- "${RECONCILER_PID_FILE}"
+         return 1
+         ;;
+     esac
+ 
+-    if kill -0 "${pid}" >/dev/null 2>&1; then
++    kill -0 -- "${pid}" >/dev/null 2>&1 ||
++        return 1
++
++    process_cmdline_has_arg "${pid}" "${RECONCILER_SCRIPT}" ||
++        return 1
++
++    printf '%s\n' "${pid}"
++}
++
++
++reconciler_status() {
++    if reconciler_pid >/dev/null 2>&1; then
+         return 0
+     fi
+ 
+@@ -879,6 +1035,8 @@ reconciler_status() {
+ start_reconciler() {
+     local pid
+     local counter="${RECONCILER_START_ATTEMPTS}"
++    local stable_checks=0
++    local termination_wait=2
+ 
+     if reconciler_status; then
+         return 0
+@@ -925,18 +1083,51 @@ start_reconciler() {
+ 
+     while [ "${counter}" -gt 0 ]; do
+         if reconciler_status; then
+-            log_message INFO \
+-                "started netfilter reconciler PID=${pid}"
+-            return 0
++            stable_checks=$((stable_checks + 1))
++
++            if [ "${stable_checks}" -ge 2 ]; then
++                log_message INFO \
++                    "started stable netfilter reconciler PID=${pid}"
++                return 0
++            fi
++        else
++            stable_checks=0
+         fi
+ 
+         counter=$((counter - 1))
+-        sleep 1
++
++        if [ "${counter}" -gt 0 ]; then
++            sleep 1
++        fi
+     done
+ 
+     log_message ERROR \
+         "netfilter reconciler did not remain running"
+ 
++    if kill -0 -- "${pid}" >/dev/null 2>&1 &&
++        process_cmdline_has_arg "${pid}" "${RECONCILER_SCRIPT}"
++    then
++        kill -TERM -- "${pid}" >/dev/null 2>&1 ||
++            true
++
++        while [ "${termination_wait}" -gt 0 ] &&
++            kill -0 -- "${pid}" >/dev/null 2>&1
++        do
++            termination_wait=$((termination_wait - 1))
++            sleep 1
++        done
++
++        if kill -0 -- "${pid}" >/dev/null 2>&1 &&
++            process_cmdline_has_arg "${pid}" "${RECONCILER_SCRIPT}"
++        then
++            kill -KILL -- "${pid}" >/dev/null 2>&1 ||
++                true
++        fi
++    fi
++
++    wait "${pid}" >/dev/null 2>&1 ||
++        true
++
+     rm -f -- "${RECONCILER_PID_FILE}"
+ 
+     return 1
+@@ -945,24 +1136,24 @@ start_reconciler() {
+ 
+ stop_reconciler() {
+     local pid=""
++    local current_pid=""
+     local counter=20
+ 
+-    if ! reconciler_status; then
++    pid="$(reconciler_pid)" || {
+         rm -f -- "${RECONCILER_PID_FILE}"
+         return 0
+-    fi
+-
+-    IFS= read -r pid <"${RECONCILER_PID_FILE}" ||
+-        pid=""
++    }
+ 
+     log_message INFO \
+         "stopping netfilter reconciler PID=${pid}"
+ 
+-    kill -TERM "${pid}" >/dev/null 2>&1 ||
++    kill -TERM -- "${pid}" >/dev/null 2>&1 ||
+         true
+ 
+     while [ "${counter}" -gt 0 ]; do
+-        if ! kill -0 "${pid}" >/dev/null 2>&1; then
++        current_pid="$(reconciler_pid)" || current_pid=""
++
++        if [ "${current_pid}" != "${pid}" ]; then
+             rm -f -- "${RECONCILER_PID_FILE}"
+             return 0
+         fi
+@@ -974,8 +1165,12 @@ stop_reconciler() {
+     log_message WARNING \
+         "netfilter reconciler did not stop after SIGTERM; sending SIGKILL"
+ 
+-    kill -KILL "${pid}" >/dev/null 2>&1 ||
+-        true
++    current_pid="$(reconciler_pid)" || current_pid=""
++
++    if [ "${current_pid}" = "${pid}" ]; then
++        kill -KILL -- "${pid}" >/dev/null 2>&1 ||
++            true
++    fi
+ 
+     rm -f -- "${RECONCILER_PID_FILE}"
+ 
+@@ -983,6 +1178,30 @@ stop_reconciler() {
+ }
+ 
+ 
++service_status() {
++    if daemon_status; then
++        echo "${SERVICE_NAME} is running"
++
++        if reconciler_status; then
++            echo "netfilter reconciler is running"
++            return 0
++        fi
++
++        echo "netfilter reconciler is not running"
++        return 1
++    fi
++
++    if ! bootstrap_is_current; then
++        echo "${SERVICE_NAME} requires administrator bootstrap"
++        echo "Run: ${BOOTSTRAP_COMMAND}"
++        return 0
++    fi
++
++    echo "${SERVICE_NAME} is not running"
++    return 3
++}
++
++
+ case $1 in
+ start)
+     if daemon_status; then
+@@ -1049,25 +1268,8 @@ stop)
+     exit "${STOP_STATUS}"
+     ;;
+ status)
+-    if daemon_status; then
+-        echo "${SERVICE_NAME} is running"
+-
+-        if reconciler_status; then
+-            echo "netfilter reconciler is running"
+-        else
+-            echo "netfilter reconciler is not running"
+-        fi
+-
+-        exit 0
+-    else
+-        if ! bootstrap_is_current; then
+-            echo "${SERVICE_NAME} requires administrator bootstrap"
+-            echo "Run: ${BOOTSTRAP_COMMAND}"
+-        fi
+-
+-        echo "${SERVICE_NAME} is not running"
+-        exit 3
+-    fi
++    service_status
++    exit $?
+     ;;
+ log)
+     exit 0
+diff --git a/release/dist/synology/files/scripts/tailscale-netfilter-reconciler b/release/dist/synology/files/scripts/tailscale-netfilter-reconciler
+index 9647b7bec..6e1466ade 100755
+--- a/release/dist/synology/files/scripts/tailscale-netfilter-reconciler
++++ b/release/dist/synology/files/scripts/tailscale-netfilter-reconciler
+@@ -4,8 +4,6 @@ set -u
+ 
+ export PATH="/usr/syno/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ 
+-SERVICE_NAME="tailscale-netfilter-reconciler"
+-
+ PKG_NAME="${SYNOPKG_PKGNAME:-Tailscale}"
+ PKG_ROOT="${TAILSCALE_SYNOLOGY_PACKAGE_ROOT:-/var/packages/${PKG_NAME}}"
+ 
+diff --git a/release/dist/synology/files/scripts/tailscale-synology-bootstrap b/release/dist/synology/files/scripts/tailscale-synology-bootstrap
+index 912df9a4d..ca74b37c0 100755
+--- a/release/dist/synology/files/scripts/tailscale-synology-bootstrap
++++ b/release/dist/synology/files/scripts/tailscale-synology-bootstrap
+@@ -4,6 +4,7 @@ set -u
+ export PATH="/usr/syno/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ 
+ PACKAGE_NAME="Tailscale"
++BOOTSTRAP_SOURCE_PATH="${BASH_SOURCE[0]}"
+ PACKAGE_ROOT="${TAILSCALE_SYNOLOGY_PACKAGE_ROOT:-/var/packages/${PACKAGE_NAME}}"
+ PACKAGE_TARGET="${PACKAGE_ROOT}/target"
+ PACKAGE_CONF="${PACKAGE_ROOT}/conf"
+@@ -16,8 +17,12 @@ ROOT_TEMPLATE="${PACKAGE_CONF}/privilege.bootstrap-root"
+ STATE_FILE="${PACKAGE_VAR}/root-bootstrap.state"
+ PID_FILE="${PACKAGE_VAR}/tailscaled.pid"
+ BACKUP_ROOT="${PACKAGE_VAR}/bootstrap-backups"
++TARGET_BOOTSTRAP="${PACKAGE_TARGET}/bin/tailscale-synology-bootstrap"
++OUTER_BOOTSTRAP="${PACKAGE_ROOT}/scripts/tailscale-synology-bootstrap"
+ 
+ SYNO_PKG="${TAILSCALE_SYNOLOGY_SYNOPKG:-/usr/syno/bin/synopkg}"
++TIMEOUT_BIN="${TAILSCALE_SYNOLOGY_TIMEOUT_BIN:-/usr/bin/timeout}"
++SYNOPKG_TIMEOUT_SECONDS="${TAILSCALE_SYNOLOGY_SYNOPKG_TIMEOUT_SECONDS:-60}"
+ PROC_ROOT="/proc"
+ 
+ if [ "${TAILSCALE_SYNOLOGY_TEST_MODE:-0}" = "1" ]; then
+@@ -81,6 +86,31 @@ require_root() {
+     fi
+ }
+ 
++require_secure_privileged_entrypoint() {
++    local script_path
++    local target_bootstrap_path
++    local target_uid
++
++    script_path="$(readlink -f -- "${BOOTSTRAP_SOURCE_PATH}")" ||
++        die "cannot resolve bootstrap script path"
++
++    target_bootstrap_path="$(readlink -f -- "${TARGET_BOOTSTRAP}")" ||
++        die "cannot resolve target bootstrap script path"
++
++    if [ "${script_path}" != "${target_bootstrap_path}" ]; then
++        return 0
++    fi
++
++    target_uid="$(stat -c %u -- "${TARGET_BOOTSTRAP}")" ||
++        die "cannot read owner for ${TARGET_BOOTSTRAP}"
++
++    if [ "${target_uid}" != "0" ]; then
++        die "initial root bootstrap must use the root-owned package script: ${OUTER_BOOTSTRAP}"
++    fi
++
++    require_secure_root_file "${TARGET_BOOTSTRAP}"
++}
++
+ require_secure_root_file() {
+     local file="$1"
+     local uid
+@@ -132,7 +162,10 @@ validate_dsm() {
+ }
+ 
+ validate_layout() {
++    local outer_bootstrap_path
+     local script_path
++    local target_bootstrap_mode
++    local target_bootstrap_path
+ 
+     [ -d "${PACKAGE_ROOT}" ] ||
+         die "package root is missing: ${PACKAGE_ROOT}"
+@@ -149,10 +182,37 @@ validate_layout() {
+     [ -x "${PACKAGE_TARGET}/bin/tailscaled" ] ||
+         die "tailscaled is missing or not executable"
+ 
+-    script_path="$(readlink -f -- "${BASH_SOURCE[0]}")" ||
++    [ -f "${TARGET_BOOTSTRAP}" ] ||
++        die "target bootstrap is missing: ${TARGET_BOOTSTRAP}"
++
++    script_path="$(readlink -f -- "${BOOTSTRAP_SOURCE_PATH}")" ||
+         die "cannot resolve bootstrap script path"
+ 
+-    require_secure_root_file "${script_path}"
++    outer_bootstrap_path="$(readlink -f -- "${OUTER_BOOTSTRAP}")" ||
++        die "cannot resolve outer bootstrap script path"
++
++    target_bootstrap_path="$(readlink -f -- "${TARGET_BOOTSTRAP}")" ||
++        die "cannot resolve target bootstrap script path"
++
++    case "${script_path}" in
++    "${outer_bootstrap_path}"|"${target_bootstrap_path}")
++        ;;
++    *)
++        die "bootstrap was invoked from an unexpected path: ${script_path}"
++        ;;
++    esac
++
++    require_secure_root_file "${OUTER_BOOTSTRAP}"
++
++    cmp -s "${TARGET_BOOTSTRAP}" "${OUTER_BOOTSTRAP}" ||
++        die "target bootstrap differs from the root-owned package copy"
++
++    target_bootstrap_mode="$(stat -c %a -- "${TARGET_BOOTSTRAP}")" ||
++        die "cannot read target bootstrap mode"
++
++    [ "${target_bootstrap_mode}" = "755" ] ||
++        die "target bootstrap mode is ${target_bootstrap_mode}, expected 755"
++
+     require_secure_root_file "${SAFE_TEMPLATE}"
+     require_secure_root_file "${ROOT_TEMPLATE}"
+ 
+@@ -210,13 +270,32 @@ bootstrap_is_current() {
+ 
+ daemon_pid() {
+     local pid
++    local expected_executable
++    local actual_executable
+ 
+     [ -r "${PID_FILE}" ] || return 1
+ 
+-    pid="$(tr -cd '0-9' <"${PID_FILE}")"
+-    [ -n "${pid}" ] || return 1
++    pid="$(cat -- "${PID_FILE}" 2>/dev/null)" || return 1
++
++    case "${pid}" in
++    ''|*[!0-9]*)
++        return 1
++        ;;
++    esac
++
+     [ -d "${PROC_ROOT}/${pid}" ] || return 1
+ 
++    expected_executable="$(
++        readlink -f -- "${PACKAGE_TARGET}/bin/tailscaled"
++    )" || return 1
++
++    actual_executable="$(
++        readlink -f -- "${PROC_ROOT}/${pid}/exe"
++    )" || return 1
++
++    [ "${actual_executable}" = "${expected_executable}" ] ||
++        return 1
++
+     printf '%s\n' "${pid}"
+ }
+ 
+@@ -237,11 +316,52 @@ daemon_uid() {
+     ' "${PROC_ROOT}/${pid}/status"
+ }
+ 
++run_synopkg_with_timeout() {
++    local status
++
++    case "${SYNOPKG_TIMEOUT_SECONDS}" in
++    ''|*[!0-9]*|0)
++        log_message ERROR \
++            "invalid synopkg timeout: ${SYNOPKG_TIMEOUT_SECONDS}"
++        return 2
++        ;;
++    esac
++
++    [ -x "${TIMEOUT_BIN}" ] || {
++        log_message ERROR \
++            "DSM timeout command is unavailable: ${TIMEOUT_BIN}"
++        return 127
++    }
++
++    "${TIMEOUT_BIN}" \
++        -s TERM \
++        -k 2 \
++        "${SYNOPKG_TIMEOUT_SECONDS}" \
++        "${SYNO_PKG}" \
++        "$@"
++    status=$?
++
++    if [ "${status}" -eq 124 ] ||
++        [ "${status}" -eq 137 ] ||
++        [ "${status}" -eq 143 ]
++    then
++        log_message ERROR \
++            "synopkg $1 exceeded ${SYNOPKG_TIMEOUT_SECONDS}s"
++    fi
++
++    return "${status}"
++}
++
+ stop_package() {
+     local counter
+ 
+-    "${SYNO_PKG}" stop "${PACKAGE_NAME}" >/dev/null 2>&1 ||
+-        true
++    if ! run_synopkg_with_timeout \
++        stop \
++        "${PACKAGE_NAME}" \
++        >/dev/null
++    then
++        die "DSM rejected or timed out the package stop"
++    fi
+ 
+     counter=20
+     while [ "${counter}" -gt 0 ]; do
+@@ -311,6 +431,12 @@ set_target_owner() {
+     chown -R "${owner}:${group}" "${target_real}"
+ }
+ 
++set_target_bootstrap_mode() {
++    [ -f "${TARGET_BOOTSTRAP}" ] || return 1
++
++    chmod 0755 "${TARGET_BOOTSTRAP}"
++}
++
+ write_state() {
+     local temporary="${STATE_FILE}.bootstrap-new.$$"
+     local binary_hash
+@@ -342,7 +468,7 @@ start_and_verify() {
+     local counter
+     local uid
+ 
+-    if ! "${SYNO_PKG}" start "${PACKAGE_NAME}"; then
++    if ! run_synopkg_with_timeout start "${PACKAGE_NAME}"; then
+         log_message ERROR "DSM rejected the package start"
+         return 1
+     fi
+@@ -374,8 +500,15 @@ restore_backup() {
+ 
+     ROLLBACK_ARMED=0
+ 
+-    "${SYNO_PKG}" stop "${PACKAGE_NAME}" >/dev/null 2>&1 ||
+-        true
++    if ! run_synopkg_with_timeout \
++        stop \
++        "${PACKAGE_NAME}" \
++        >/dev/null
++    then
++        log_message ERROR \
++            "cannot stop the package safely during rollback"
++        return 1
++    fi
+ 
+     if [ -f "${BACKUP_DIR}/privilege" ]; then
+         install_privilege "${BACKUP_DIR}/privilege" ||
+@@ -404,6 +537,8 @@ restore_backup() {
+         set_target_owner tailscale tailscale || return 1
+     fi
+ 
++    set_target_bootstrap_mode || return 1
++
+     return 0
+ }
+ 
+@@ -423,6 +558,7 @@ rollback_on_exit() {
+ 
+ install_action() {
+     require_root
++    require_secure_privileged_entrypoint
+     validate_dsm
+     validate_layout
+     stop_package
+@@ -437,6 +573,9 @@ install_action() {
+     set_target_owner root root ||
+         die "cannot secure the package target as root-owned"
+ 
++    set_target_bootstrap_mode ||
++        die "cannot set the target bootstrap mode to 0755"
++
+     write_state ||
+         die "cannot write bootstrap state"
+ 
+@@ -455,6 +594,7 @@ install_action() {
+ 
+ remove_action() {
+     require_root
++    require_secure_privileged_entrypoint
+     validate_dsm
+     validate_layout
+     stop_package
+@@ -469,6 +609,9 @@ remove_action() {
+     set_target_owner tailscale tailscale ||
+         die "cannot restore package target ownership"
+ 
++    set_target_bootstrap_mode ||
++        die "cannot restore the target bootstrap mode to 0755"
++
+     rm -f -- "${STATE_FILE}"
+ 
+     ROLLBACK_ARMED=0
+@@ -511,14 +654,14 @@ status_action() {
+ usage() {
+     cat <<EOF
+ Usage:
+-  $0 install
++  sudo ${OUTER_BOOTSTRAP} install
+   $0 status
+-  $0 remove
++  sudo ${OUTER_BOOTSTRAP} remove
+ 
+ Commands:
+-  install  Enable and validate the root runtime
++  install  Enable and validate the root runtime using the root-owned script
+   status   Show privilege, approval and runtime state
+-  remove   Restore the safe package-user manifest and stop Tailscale
++  remove   Restore the safe package-user manifest using the root-owned script
+ EOF
+ }
+ 
+diff --git a/release/dist/synology/tests/netfilter-preflight-test.sh b/release/dist/synology/tests/netfilter-preflight-test.sh
+index 0ec26d6ff..bae5c6e82 100755
+--- a/release/dist/synology/tests/netfilter-preflight-test.sh
++++ b/release/dist/synology/tests/netfilter-preflight-test.sh
+@@ -90,6 +90,7 @@ setup_case() {
+     MOCK_CHAINS="${MOCK_IPTABLES_STATE}/chains"
+     MOCK_HOOKS="${MOCK_IPTABLES_STATE}/hooks"
+     MOCK_MASQUERADE="${MOCK_IPTABLES_STATE}/masquerade"
++    MOCK_DELETE_COUNT="${MOCK_IPTABLES_STATE}/delete-count"
+     DEFINITIONS="${CASE_ROOT}/start-stop-definitions.sh"
+ 
+     mkdir -p \
+@@ -103,6 +104,7 @@ setup_case() {
+     : >"${MOCK_CHAINS}"
+     : >"${MOCK_HOOKS}"
+     : >"${MOCK_MASQUERADE}"
++    printf '0\n' >"${MOCK_DELETE_COUNT}"
+ 
+     awk '
+         /^case \$1 in/ {
+@@ -124,6 +126,7 @@ COMMAND_LOG="${STATE}/commands.log"
+ CHAINS="${STATE}/chains"
+ HOOKS="${STATE}/hooks"
+ MASQUERADE="${STATE}/masquerade"
++DELETE_COUNT="${STATE}/delete-count"
+ 
+ printf '%s\n' "$*" >>"${COMMAND_LOG}"
+ 
+@@ -326,17 +329,18 @@ case "${operation}" in
+         iptables_error
+     fi
+ 
+-    add_line "${chain}" "${MASQUERADE}"
+-    ;;
++	add_line "${chain}" "${MASQUERADE}"
++
++	;;
+ 
+ -C)
+     chain="${1:-}"
+     shift || true
+ 
+-    [ "${table}" = "nat" ] ||
+-        iptables_error
++	[ "${table}" = "nat" ] ||
++		iptables_error
+ 
+-    case "${chain}" in
++	case "${chain}" in
+     POSTROUTING)
+         [ "${1:-}" = "-j" ] ||
+             iptables_error
+@@ -377,10 +381,19 @@ case "${operation}" in
+         ;;
+     esac
+ 
+-    [ "${jump_option}" = "-j" ] ||
+-        iptables_error
++	[ "${jump_option}" = "-j" ] ||
++		iptables_error
+ 
+-    remove_line "${target}" "${HOOKS}" ||
++	delete_count="$(cat "${DELETE_COUNT}")"
++	no_progress_successes="${MOCK_IPTABLES_DELETE_NO_PROGRESS_SUCCESSES:-0}"
++	if [ "${delete_count}" -lt "${no_progress_successes}" ]; then
++		printf '%s\n' \
++			"$((delete_count + 1))" \
++			>"${DELETE_COUNT}"
++		exit 0
++	fi
++
++	remove_line "${target}" "${HOOKS}" ||
+         iptables_error
+     ;;
+ 
+@@ -434,6 +447,8 @@ IPTABLES
+ 
+     export MOCK_IPTABLES_STATE
+     export MOCK_IPTABLES_FAIL_MASQUERADE=0
++    export MOCK_IPTABLES_DELETE_NO_PROGRESS_SUCCESSES=0
++    export TAILSCALE_SYNOLOGY_TEST_MODE=1
+ 
+     # shellcheck disable=SC1090
+     source "${DEFINITIONS}"
+@@ -521,6 +536,134 @@ test_tailscale_nat_topology_failure_cleanup() {
+     assert_probe_state_clean
+ }
+ 
++test_tailscale_nat_cleanup_rejects_success_without_progress() {
++    local chain="ts-pf-nat-no-progress"
++    local delete_attempts
++    local status
++
++    setup_case
++
++    "${IPTABLES_BIN}" -t nat -N "${chain}"
++    "${IPTABLES_BIN}" -t nat -I POSTROUTING 1 -j "${chain}"
++    : >"${MOCK_IPTABLES_LOG}"
++
++    export MOCK_IPTABLES_DELETE_NO_PROGRESS_SUCCESSES=20
++
++    set +e
++    cleanup_tailscale_nat_preflight "${chain}"
++    status=$?
++    set -e
++
++    assert_nonzero_status "${status}"
++
++    delete_attempts="$(
++        grep -Ec -- \
++            "-t nat -D (POSTROUTING|DEFAULT_POSTROUTING) -j ${chain}" \
++            "${MOCK_IPTABLES_LOG}" ||
++            true
++    )"
++
++    if [ "${delete_attempts}" -gt 1 ]; then
++        fail \
++            "NAT cleanup retried a successful no-progress deletion ${delete_attempts} times"
++    fi
++
++    if [ "$(sed -n '1p' "${MOCK_IPTABLES_LOG}")" != "-t nat -S" ]; then
++        fail "NAT cleanup attempted deletion before checking hook existence"
++    fi
++
++    if [ "$(sed -n '2p' "${MOCK_IPTABLES_LOG}")" != \
++        "-t nat -D DEFAULT_POSTROUTING -j ${chain}" ]; then
++        fail "NAT cleanup did not delete the observed DSM hook"
++    fi
++
++    if [ "$(sed -n '3p' "${MOCK_IPTABLES_LOG}")" != "-t nat -S" ]; then
++        fail "NAT cleanup did not verify state after reported deletion"
++    fi
++}
++
++test_tailscale_nat_cleanup_checks_hook_before_delete() {
++    local chain="ts-pf-nat-no-hook"
++
++    setup_case
++
++    "${IPTABLES_BIN}" -t nat -N "${chain}"
++    : >"${MOCK_IPTABLES_LOG}"
++
++    cleanup_tailscale_nat_preflight "${chain}"
++
++    if grep -F -- \
++        "-t nat -D " \
++        "${MOCK_IPTABLES_LOG}" >/dev/null; then
++        fail "NAT cleanup attempted deletion without an existing hook"
++    fi
++
++    if [ "$(sed -n '1p' "${MOCK_IPTABLES_LOG}")" != "-t nat -S" ]; then
++        fail "NAT cleanup did not inspect hook existence before cleanup"
++    fi
++
++    assert_probe_state_clean
++}
++
++test_tailscale_nat_topology_no_progress_cleans_once() {
++    local delete_attempts
++    local output
++    local status
++
++    setup_case
++
++    export MOCK_IPTABLES_DELETE_NO_PROGRESS_SUCCESSES=20
++
++    set +e
++    output="$(check_tailscale_nat_topology 2>&1)"
++    status=$?
++    set -e
++
++    assert_nonzero_status "${status}"
++    assert_contains \
++        "${output}" \
++        "cannot remove the temporary NAT preflight topology"
++
++    delete_attempts="$(
++        grep -Ec -- \
++            '-t nat -D (POSTROUTING|DEFAULT_POSTROUTING) -j ts-pf-nat-' \
++            "${MOCK_IPTABLES_LOG}" ||
++            true
++    )"
++
++    if [ "${delete_attempts}" -ne 1 ]; then
++        fail \
++            "full NAT topology attempted ${delete_attempts} no-progress deletions, expected 1"
++    fi
++}
++
++test_tailscale_nat_signal_cleans_temporary_state() {
++    local probe_pid
++    local status
++
++    setup_case
++
++    # Invoked indirectly by the sourced lifecycle definitions.
++    # shellcheck disable=SC2329
++    tailscale_nat_preflight_test_checkpoint() {
++        kill -TERM "${BASHPID}"
++    }
++
++    (
++        check_tailscale_nat_topology
++    ) &
++    probe_pid=$!
++
++    set +e
++    wait "${probe_pid}" >/dev/null 2>&1
++    status=$?
++    set -e
++
++    assert_nonzero_status "${status}"
++
++    assert_probe_state_clean
++}
++
+ run_case() {
+     local name="$1"
+     local function_name="$2"
+@@ -551,10 +694,26 @@ run_case \
+     "Tailscale NAT failure cleans up temporary state" \
+     test_tailscale_nat_topology_failure_cleanup
+ 
++run_case \
++    "Tailscale NAT cleanup rejects success without progress" \
++    test_tailscale_nat_cleanup_rejects_success_without_progress
++
++run_case \
++    "Tailscale NAT cleanup checks hook existence before deletion" \
++    test_tailscale_nat_cleanup_checks_hook_before_delete
++
++run_case \
++    "Tailscale NAT topology performs one no-progress cleanup" \
++    test_tailscale_nat_topology_no_progress_cleans_once
++
++run_case \
++    "Tailscale NAT signal cleans temporary state" \
++    test_tailscale_nat_signal_cleans_temporary_state
++
+ printf '\nResults: %s passed, %s failed\n' \
+     "${PASS_COUNT}" \
+     "${FAIL_COUNT}"
+ 
+ if [ "${FAIL_COUNT}" -ne 0 ]; then
+     exit 1
+-fi
+\ No newline at end of file
++fi
+diff --git a/release/dist/synology/tests/root-bootstrap-test.sh b/release/dist/synology/tests/root-bootstrap-test.sh
+index 4ae608626..3278adfdb 100755
+--- a/release/dist/synology/tests/root-bootstrap-test.sh
++++ b/release/dist/synology/tests/root-bootstrap-test.sh
+@@ -130,6 +130,10 @@ setup_fixture() {
+     "${BOOTSTRAP_SOURCE}" \
+     "${PACKAGE_ROOT}/scripts/tailscale-synology-bootstrap"
+ 
++  cp -- \
++    "${BOOTSTRAP_SOURCE}" \
++    "${TARGET_REAL}/bin/tailscale-synology-bootstrap"
++
+   cat >"${TARGET_REAL}/bin/tailscaled" <<'TAILSCALED'
+ #!/bin/sh
+ exit 0
+@@ -144,7 +148,8 @@ TAILSCALED
+     "${PACKAGE_ROOT}/scripts/tailscale-synology-bootstrap"
+ 
+   chmod 0755 \
+-    "${TARGET_REAL}/bin/tailscaled"
++    "${TARGET_REAL}/bin/tailscaled" \
++    "${TARGET_REAL}/bin/tailscale-synology-bootstrap"
+ 
+   : >"${CHOWN_LOG}"
+ 
+@@ -157,6 +162,14 @@ action="${1:-}"
+ 
+ case "${action}" in
+ stop)
++    if [ "${MOCK_STOP_FAIL:-0}" = "1" ]; then
++        exit 1
++    fi
++
++    if [ "${MOCK_STOP_HANG:-0}" = "1" ]; then
++        exec sleep 10
++    fi
++
+     rm -f -- \
+         "${MOCK_PACKAGE_ROOT}/var/tailscaled.pid"
+ 
+@@ -170,9 +183,17 @@ start)
+         exit 1
+     fi
+ 
++    if [ "${MOCK_START_HANG:-0}" = "1" ]; then
++        exec sleep 10
++    fi
++
+     mkdir -p \
+         "${MOCK_PROC_ROOT}/${MOCK_PID}"
+ 
++    ln -sfn \
++        "${MOCK_TAILSCALED}" \
++        "${MOCK_PROC_ROOT}/${MOCK_PID}/exe"
++
+     printf '%s\n' \
+         "${MOCK_PID}" \
+         >"${MOCK_PACKAGE_ROOT}/var/tailscaled.pid"
+@@ -206,14 +227,22 @@ SYNOPKG
+ 
+   MOCK_ID_UID=0
+   MOCK_STAT_UID=0
++  MOCK_TARGET_BOOTSTRAP_UID=0
+   MOCK_DAEMON_UID=0
+   MOCK_START_FAIL=0
++  MOCK_START_HANG=0
++  MOCK_STOP_FAIL=0
++  MOCK_STOP_HANG=0
+   MOCK_PID=4242
+ 
+   export MOCK_PACKAGE_ROOT="${PACKAGE_ROOT}"
+   export MOCK_PROC_ROOT="${FAKE_PROC_ROOT}"
++  export MOCK_TAILSCALED="${TARGET_REAL}/bin/tailscaled"
+   export MOCK_DAEMON_UID
+   export MOCK_START_FAIL
++  export MOCK_START_HANG
++  export MOCK_STOP_FAIL
++  export MOCK_STOP_HANG
+   export MOCK_PID
+   export TAILSCALE_SYNOLOGY_PACKAGE_ROOT="${PACKAGE_ROOT}"
+   export TAILSCALE_SYNOLOGY_SYNOPKG="${MOCK_SYNOPKG}"
+@@ -222,6 +251,8 @@ SYNOPKG
+ }
+ 
+ install_command_mocks() {
++  # Invoked by the sourced bootstrap implementation.
++  # shellcheck disable=SC2329
+   id() {
+     if [ "${1:-}" = "-u" ]; then
+       printf '%s\n' "${MOCK_ID_UID}"
+@@ -234,6 +265,13 @@ install_command_mocks() {
+   stat() {
+     if [ "${1:-}" = "-c" ] &&
+       [ "${2:-}" = "%u" ]; then
++      if [ "${3:-}" = "--" ] &&
++        { [ "${4:-}" = "${TARGET_REAL}/bin/tailscale-synology-bootstrap" ] ||
++          [ "${4:-}" = "${PACKAGE_ROOT}/target/bin/tailscale-synology-bootstrap" ]; }; then
++        printf '%s\n' "${MOCK_TARGET_BOOTSTRAP_UID}"
++        return 0
++      fi
++
+       printf '%s\n' "${MOCK_STAT_UID}"
+       return 0
+     fi
+@@ -241,6 +279,8 @@ install_command_mocks() {
+     command stat "$@"
+   }
+ 
++  # Invoked by the sourced bootstrap implementation.
++  # shellcheck disable=SC2329
+   chown() {
+     printf '%s\n' "$*" >>"${CHOWN_LOG}"
+     return 0
+@@ -248,13 +288,21 @@ install_command_mocks() {
+ }
+ 
+ load_bootstrap() {
+-  # shellcheck disable=SC1090
++  # shellcheck disable=SC1090,SC1091
+   source \
+     "${PACKAGE_ROOT}/scripts/tailscale-synology-bootstrap"
+ 
+   install_command_mocks
+ }
+ 
++load_target_bootstrap() {
++  # shellcheck disable=SC1090,SC1091
++  source \
++    "${TARGET_REAL}/bin/tailscale-synology-bootstrap"
++
++  install_command_mocks
++}
++
+ load_start_stop_definitions() {
+   local definitions="${CASE_ROOT}/start-stop-definitions.sh"
+ 
+@@ -320,7 +368,7 @@ test_process_override_guard() {
+   export TAILSCALE_SYNOLOGY_TEST_MODE=0
+   export TAILSCALE_SYNOLOGY_PROC_ROOT="${FAKE_PROC_ROOT}"
+ 
+-  # shellcheck disable=SC1090
++  # shellcheck disable=SC1090,SC1091
+   source \
+     "${PACKAGE_ROOT}/scripts/tailscale-synology-bootstrap"
+ 
+@@ -414,6 +462,32 @@ test_successful_root_install() {
+   assert_contains "${CAPTURED_OUTPUT}" "Runtime: running, UID=0"
+ }
+ 
++test_package_owned_target_cannot_install_root_runtime() {
++  setup_fixture
++
++  MOCK_TARGET_BOOTSTRAP_UID=1024
++  load_target_bootstrap
++
++  if [ "$(readlink -f -- "${BOOTSTRAP_SOURCE_PATH}")" != \
++    "$(readlink -f -- "${TARGET_REAL}/bin/tailscale-synology-bootstrap")" ]; then
++    fail "target fixture recorded an unexpected bootstrap source: ${BOOTSTRAP_SOURCE_PATH}"
++  fi
++
++  capture_main install
++
++  assert_nonzero_status "${CAPTURED_STATUS}"
++  assert_contains \
++    "${CAPTURED_OUTPUT}" \
++    "initial root bootstrap must use the root-owned package script"
++
++  assert_files_equal \
++    "${PACKAGE_ROOT}/conf/privilege" \
++    "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
++
++  assert_file_absent \
++    "${PACKAGE_ROOT}/var/root-bootstrap.state"
++}
++
+ test_state_hashes() {
+   local state_binary_hash
+   local state_privilege_hash
+@@ -543,6 +617,36 @@ test_non_root_daemon_rolls_back() {
+     "${PACKAGE_ROOT}/var/tailscaled.pid"
+ }
+ 
++test_malformed_daemon_pid_is_rejected() {
++  setup_fixture
++  load_bootstrap
++
++  mkdir -p "${FAKE_PROC_ROOT}/4242"
++  printf 'pid=4242\n' >"${PACKAGE_ROOT}/var/tailscaled.pid"
++
++  if daemon_running; then
++    fail "bootstrap accepted a malformed daemon PID"
++  fi
++}
++
++test_unrelated_daemon_pid_is_rejected() {
++  setup_fixture
++  load_bootstrap
++
++  mkdir -p "${FAKE_PROC_ROOT}/4242"
++  cat >"${CASE_ROOT}/unrelated" <<'UNRELATED'
++#!/bin/sh
++exit 0
++UNRELATED
++  chmod 0755 "${CASE_ROOT}/unrelated"
++  ln -s "${CASE_ROOT}/unrelated" "${FAKE_PROC_ROOT}/4242/exe"
++  printf '4242\n' >"${PACKAGE_ROOT}/var/tailscaled.pid"
++
++  if daemon_running; then
++    fail "bootstrap accepted an unrelated process as tailscaled"
++  fi
++}
++
+ test_failed_start_rolls_back() {
+   setup_fixture
+   load_bootstrap
+@@ -562,6 +666,67 @@ test_failed_start_rolls_back() {
+     "${PACKAGE_ROOT}/var/root-bootstrap.state"
+ }
+ 
++test_hung_package_start_times_out_and_rolls_back() {
++  local started_at
++  local elapsed
++
++  setup_fixture
++  export TAILSCALE_SYNOLOGY_SYNOPKG_TIMEOUT_SECONDS=1
++  load_bootstrap
++
++  MOCK_START_HANG=1
++  export MOCK_START_HANG
++
++  started_at="$(date +%s)"
++  capture_main install
++  elapsed=$(( $(date +%s) - started_at ))
++
++  assert_nonzero_status "${CAPTURED_STATUS}"
++
++  if [ "${elapsed}" -gt 5 ]; then
++    fail "hung package start exceeded the lifecycle deadline (${elapsed}s)"
++  fi
++
++  assert_files_equal \
++    "${PACKAGE_ROOT}/conf/privilege" \
++    "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
++
++  assert_file_absent \
++    "${PACKAGE_ROOT}/var/root-bootstrap.state"
++}
++
++test_hung_package_stop_aborts_before_mutation() {
++  local started_at
++  local elapsed
++
++  setup_fixture
++  export TAILSCALE_SYNOLOGY_SYNOPKG_TIMEOUT_SECONDS=1
++  load_bootstrap
++
++  MOCK_STOP_HANG=1
++  export MOCK_STOP_HANG
++
++  started_at="$(date +%s)"
++  capture_main install
++  elapsed=$(( $(date +%s) - started_at ))
++
++  assert_nonzero_status "${CAPTURED_STATUS}"
++  assert_contains \
++    "${CAPTURED_OUTPUT}" \
++    "DSM rejected or timed out the package stop"
++
++  if [ "${elapsed}" -gt 5 ]; then
++    fail "hung package stop exceeded the lifecycle deadline (${elapsed}s)"
++  fi
++
++  assert_files_equal \
++    "${PACKAGE_ROOT}/conf/privilege" \
++    "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
++
++  assert_file_absent \
++    "${PACKAGE_ROOT}/var/root-bootstrap.state"
++}
++
+ test_remove_restores_safe_state() {
+   perform_successful_install
+ 
+@@ -588,6 +753,16 @@ test_remove_restores_safe_state() {
+     "${CHOWN_LOG}" >/dev/null ||
+     fail "remove did not request restoration to tailscale ownership"
+ 
++  if grep -F -- \
++    "root:root ${PACKAGE_ROOT}/target/bin/tailscale-synology-bootstrap" \
++    "${CHOWN_LOG}" >/dev/null; then
++    fail "remove unexpectedly preserved privileged target-bootstrap ownership"
++  fi
++
++  if [ "$(stat -c %a "${TARGET_REAL}/bin/tailscale-synology-bootstrap")" != "755" ]; then
++    fail "target bootstrap mode was not restored to 0755"
++  fi
++
+ }
+ 
+ run_case() {
+@@ -632,6 +807,10 @@ run_case \
+   "successful root runtime bootstrap" \
+   test_successful_root_install
+ 
++run_case \
++  "package-owned target cannot install root runtime" \
++  test_package_owned_target_cannot_install_root_runtime
++
+ run_case \
+   "state hashes match installed artifacts" \
+   test_state_hashes
+@@ -656,10 +835,26 @@ run_case \
+   "non-root daemon causes rollback" \
+   test_non_root_daemon_rolls_back
+ 
++run_case \
++  "malformed daemon PID is rejected" \
++  test_malformed_daemon_pid_is_rejected
++
++run_case \
++  "unrelated daemon PID is rejected" \
++  test_unrelated_daemon_pid_is_rejected
++
+ run_case \
+   "failed package start causes rollback" \
+   test_failed_start_rolls_back
+ 
++run_case \
++  "hung package start times out and rolls back" \
++  test_hung_package_start_times_out_and_rolls_back
++
++run_case \
++  "hung package stop aborts before mutation" \
++  test_hung_package_stop_aborts_before_mutation
++
+ run_case \
+   "remove restores safe package state" \
+   test_remove_restores_safe_state
+diff --git a/release/dist/synology/tests/start-stop-definitions-test.sh b/release/dist/synology/tests/start-stop-definitions-test.sh
+index f732551bf..ac8fa7a78 100755
+--- a/release/dist/synology/tests/start-stop-definitions-test.sh
++++ b/release/dist/synology/tests/start-stop-definitions-test.sh
+@@ -27,9 +27,31 @@ STDOUT_FILE="${TEST_ROOT}/stdout"
+ STDERR_FILE="${TEST_ROOT}/stderr"
+ 
+ mkdir -p \
++    "${TEST_ROOT}/package/scripts" \
++    "${TEST_ROOT}/proc" \
+     "${TEST_ROOT}/pkgvar" \
+     "${TEST_ROOT}/pkgdest/bin"
+ 
++cat >"${TEST_ROOT}/pkgdest/bin/tailscaled" <<'TAILSCALED'
++#!/bin/sh
++exit 0
++TAILSCALED
++
++cat >"${TEST_ROOT}/unrelated" <<'UNRELATED'
++#!/bin/sh
++exit 0
++UNRELATED
++
++cat >"${TEST_ROOT}/package/scripts/tailscale-netfilter-reconciler" <<'RECONCILER'
++#!/bin/bash
++exit 0
++RECONCILER
++
++chmod 0755 \
++    "${TEST_ROOT}/pkgdest/bin/tailscaled" \
++    "${TEST_ROOT}/unrelated" \
++    "${TEST_ROOT}/package/scripts/tailscale-netfilter-reconciler"
++
+ awk '
+     /^case \$1 in/ {
+         exit
+@@ -42,11 +64,16 @@ awk '
+ 
+ set +e
+ 
++# The single-quoted script is intentionally expanded by the nested Bash.
++# shellcheck disable=SC2016
+ env \
+     SYNOPKG_DSM_VERSION_MAJOR=7 \
+     SYNOPKG_PKGVAR="${TEST_ROOT}/pkgvar" \
+     SYNOPKG_PKGDEST="${TEST_ROOT}/pkgdest" \
+     SYNOPKG_PKGNAME=Tailscale \
++    TAILSCALE_SYNOLOGY_PACKAGE_ROOT="${TEST_ROOT}/package" \
++    TAILSCALE_SYNOLOGY_PROC_ROOT="${TEST_ROOT}/proc" \
++    TAILSCALE_SYNOLOGY_TEST_MODE=1 \
+     bash -u -c '
+         source "$1"
+ 
+@@ -54,8 +81,104 @@ env \
+             "$NETFILTER_LOCALAPI_ATTEMPTS" \
+             "$TUN_WAIT_ATTEMPTS" \
+             "$TUN_WAIT_SECONDS" \
+-            "$RECONCILER_START_ATTEMPTS"
++            "$RECONCILER_START_ATTEMPTS" \
++            "$BOOTSTRAP_COMMAND"
++
++        mkdir -p "$PROC_ROOT/$$"
++
++        printf "%s\n" "$$" >"$PID_FILE"
++        ln -sfn "$2/unrelated" "$PROC_ROOT/$$/exe"
++
++        if daemon_status; then
++            printf "ERROR: unrelated process accepted as tailscaled\n" >&2
++            exit 41
++        fi
++
++        printf "%s\n" "$$" >"$PID_FILE"
++        ln -sfn "$SYNOPKG_PKGDEST/bin/tailscaled" "$PROC_ROOT/$$/exe"
++
++        if ! daemon_status; then
++            printf "ERROR: matching tailscaled process was rejected\n" >&2
++            exit 42
++        fi
++
++        printf "%s\n" "$$" >"$RECONCILER_PID_FILE"
++        printf "%s\0" /bin/bash "$2/unrelated" >"$PROC_ROOT/$$/cmdline"
++
++        if reconciler_status; then
++            printf "ERROR: unrelated process accepted as reconciler\n" >&2
++            exit 43
++        fi
++
++        printf "%s\n" "$$" >"$RECONCILER_PID_FILE"
++        printf "%s\0" /bin/bash "$RECONCILER_SCRIPT" >"$PROC_ROOT/$$/cmdline"
++
++        if ! reconciler_status; then
++            printf "ERROR: matching reconciler process was rejected\n" >&2
++            exit 44
++        fi
++
++        printf "identity-checks-pass\n"
++
++        PROC_ROOT=/proc
++        RECONCILER_START_ATTEMPTS=2
++
++        printf "%s\n" \
++            "#!/bin/bash" \
++            "sleep 0.2" \
++            "exit 0" \
++            >"$RECONCILER_SCRIPT"
++
++        secure_root_path() {
++            return 0
++        }
++
++        if start_reconciler 2>/dev/null; then
++            printf "ERROR: short-lived reconciler passed startup stability check\n" >&2
++            exit 45
++        fi
++
++        printf "stability-check-pass\n"
++
++        daemon_status() {
++            return 1
++        }
++
++        bootstrap_is_current() {
++            return 1
++        }
++
++        service_status >/dev/null 2>&1
++        bootstrap_pending_status=$?
++
++        if [ "${bootstrap_pending_status}" -ne 0 ]; then
++            printf "ERROR: bootstrap-pending service status returned %s, expected 0\n" \
++                "${bootstrap_pending_status}" >&2
++            exit 46
++        fi
++
++        printf "bootstrap-pending-status-check-pass\n"
++
++        daemon_status() {
++            return 0
++        }
++
++        reconciler_status() {
++            return 1
++        }
++
++        service_status >/dev/null 2>&1
++        degraded_status=$?
++
++        if [ "${degraded_status}" -ne 1 ]; then
++            printf "ERROR: degraded service status returned %s, expected 1\n" \
++                "${degraded_status}" >&2
++            exit 47
++        fi
++
++        printf "degraded-status-check-pass\n"
+     ' bash "${DEFINITIONS}" \
++    "${TEST_ROOT}" \
+     >"${STDOUT_FILE}" \
+     2>"${STDERR_FILE}"
+ 
+@@ -84,6 +207,11 @@ printf '%s\n' \
+     10 \
+     1 \
+     10 \
++    "sudo ${TEST_ROOT}/package/scripts/tailscale-synology-bootstrap install" \
++    identity-checks-pass \
++    stability-check-pass \
++    bootstrap-pending-status-check-pass \
++    degraded-status-check-pass \
+     >"${EXPECTED}"
+ 
+ if ! cmp -s \
+diff --git a/tests/releases/shellcheck.sh b/tests/releases/shellcheck.sh
+index 3642477a8..29733ffc4 100755
+--- a/tests/releases/shellcheck.sh
++++ b/tests/releases/shellcheck.sh
+@@ -28,7 +28,12 @@ done < <(
+       -- \
+       '*.sh' \
+       '*.bash'
+-    printf '%s\n' .githooks/pre-commit .githooks/commit-msg
++    printf '%s\n' \
++      .githooks/pre-commit \
++      .githooks/commit-msg \
++      release/dist/synology/files/scripts/start-stop-status \
++      release/dist/synology/files/scripts/tailscale-netfilter-reconciler \
++      release/dist/synology/files/scripts/tailscale-synology-bootstrap
+   } | sort -u
+ )
+ 

@@ -1,0 +1,37 @@
+From 3ad299ce2479d0d080520094ff136b6838401c33 Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Mon, 24 Aug 2026 18:23:02 +1000
+Subject: [PATCH 02/58] synology: use kernel TUN and subnet routing
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ cmd/tailscaled/tailscaled.go | 9 +++------
+ 1 file changed, 3 insertions(+), 6 deletions(-)
+
+diff --git a/cmd/tailscaled/tailscaled.go b/cmd/tailscaled/tailscaled.go
+index fe18731ae..6f0dcede8 100644
+--- a/cmd/tailscaled/tailscaled.go
++++ b/cmd/tailscaled/tailscaled.go
+@@ -83,9 +83,9 @@ func defaultTunName() string {
+ 		return "userspace-networking"
+ 	case "linux":
+ 		if buildfeatures.HasSynology && buildfeatures.HasNetstack && distro.Get() == distro.Synology {
+-			// Try TUN, but fall back to userspace networking if needed.
+-			// See https://github.com/tailscale/tailscale-synology/issues/35
+-			return "tailscale0,userspace-networking"
++			// This fork targets Synology systems with a working TUN device and
++			// the required kernel networking modules. Never silently fall back.
++			return "tailscale0"
+ 		}
+ 	}
+ 	return "tailscale0"
+@@ -725,9 +725,6 @@ func handleSubnetsInNetstack() bool {
+ 	if v, ok := envknob.LookupBool("TS_DEBUG_NETSTACK_SUBNETS"); ok {
+ 		return v
+ 	}
+-	if distro.Get() == distro.Synology {
+-		return true
+-	}
+ 	switch runtime.GOOS {
+ 	case "windows", "darwin", "freebsd", "openbsd", "solaris", "illumos":
+ 		// Enable on Windows and tailscaled-on-macOS (this doesn't

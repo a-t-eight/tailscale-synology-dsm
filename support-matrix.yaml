@@ -1,7 +1,7 @@
 schema_version: 1
 
 platforms:
-  - status: production
+  - status: superseded
     model: DS920+
     synology_platform: geminilake
     package_arch: x86_64
@@ -9,13 +9,31 @@ platforms:
     upstream_version: v1.98.9
     downstream_package_version: 1.98.96-700098096
     release_branch: release/v1.98.9-synology
-    downstream_commit: cc5d96275e9dd76fd8a4f38209a2df91199a425c
+    downstream_commit: 20c86229955a3d03de01901aee1499cab87c571d
     netfilter_package_min_version: 1.0.0-11
     validation:
       upgrade: passed
       controlled_restart: passed
       tun_reconstruction: passed
       reboot: passed
+      ipv4_netfilter: passed
+      ipv6_netfilter: passed
+
+  - status: production
+    model: DS920+
+    synology_platform: geminilake
+    package_arch: x86_64
+    dsm_min_version: 7.3-86009
+    upstream_version: v1.98.9
+    downstream_package_version: 1.98.96-700098097
+    release_branch: release/v1.98.9-r2-synology
+    downstream_commit: 0fad8b81a3e0eb86c457bc79c474bcc213834c43
+    netfilter_package_min_version: 1.1.0-2
+    validation:
+      upgrade: passed
+      controlled_restart: passed
+      tun_reconstruction: passed
+      reboot: not_repeated_ci_only
       ipv4_netfilter: passed
       ipv6_netfilter: passed
 

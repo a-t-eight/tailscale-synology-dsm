@@ -1,0 +1,116 @@
+From edbeea996d20970dc94a8f80a86f11569293a48b Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Mon, 24 Aug 2026 18:23:13 +1000
+Subject: [PATCH 35/58] test: enforce canonical ShellCheck diagnostics
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ .../2026-08-23-pre-cleanup-manifest.md        |  2 +-
+ scripts/release/validate-release.sh           |  3 +-
+ tests/README.md                               |  9 ++++
+ tests/releases/shellcheck.sh                  | 42 +++++++++++++++++++
+ 4 files changed, 54 insertions(+), 2 deletions(-)
+ create mode 100755 tests/releases/shellcheck.sh
+
+diff --git a/docs/cleanup/2026-08-23-pre-cleanup-manifest.md b/docs/cleanup/2026-08-23-pre-cleanup-manifest.md
+index 0bb645af2..4dcd4e0f2 100644
+--- a/docs/cleanup/2026-08-23-pre-cleanup-manifest.md
++++ b/docs/cleanup/2026-08-23-pre-cleanup-manifest.md
+@@ -11,7 +11,7 @@ This manifest freezes the cleanup decision before any deletion. Cleanup is limit
+ - Pre-cleanup feature HEAD: `20899f9110a389a611c5557af07ccbf511eb02d6`
+ - Follow-up alias-cleanup feature HEAD: `0c8d38579085ca4e1419b51471be41cb76df5c92`
+ - Clean candidate base: `8c9fe5239ee57a89ce687fc8c7608d3df91f6ede`
+-- The focused preparation tests, all Synology shell tests, offline relevant Go tests, shell syntax and static analysis, canonical patch checksum, historical checksum inventory, and accepted-source round trip passed before cleanup.
++- The focused preparation tests, all Synology shell tests, offline relevant Go tests, shell syntax, error-level static analysis, canonical patch checksum, historical checksum inventory, and accepted-source round trip passed before cleanup. The original static-analysis invocation did not enforce informational SC1091/SC2329 diagnostics; the follow-up canonical command does.
+ - The canonical seven protected blobs were unchanged from the candidate before cleanup.
+ 
+ ## Keep
+diff --git a/scripts/release/validate-release.sh b/scripts/release/validate-release.sh
+index 1fe827b70..3560d26c1 100755
+--- a/scripts/release/validate-release.sh
++++ b/scripts/release/validate-release.sh
+@@ -7,7 +7,7 @@ SCRIPT_DIR="$(
+     pwd
+ )"
+ 
+-# shellcheck source=common.sh
++# shellcheck source=scripts/release/common.sh
+ . "${SCRIPT_DIR}/common.sh"
+ 
+ CONTROL_WORKTREE="$(
+@@ -37,6 +37,7 @@ Usage:
+ USAGE
+ }
+ 
++# shellcheck disable=SC2329 # Invoked by the EXIT trap below.
+ cleanup() {
+   if [ -n "$TEMP_WORKTREE" ] &&
+     [ -e "$TEMP_WORKTREE" ]; then
+diff --git a/tests/README.md b/tests/README.md
+index a52d36f2e..ed68c51b9 100644
+--- a/tests/README.md
++++ b/tests/README.md
+@@ -21,6 +21,15 @@ Source-worktree workflow checks are:
+   fixtures and proves signed ordered replay, review artifacts, patch round
+   trip, identity mismatch rejection, conflict cleanup and absence of remote,
+   tag or SPK side effects.
++- `releases/shellcheck.sh` — is the canonical changed-shell static-analysis
++  command. It runs ShellCheck with `--severity=style`, so error, warning,
++  information, and style diagnostics are all visible and enforced.
++
++Run the canonical command from the repository root:
++
++```text
++bash tests/releases/shellcheck.sh
++```
+ 
+ `releases/validate-production-contract.sh` builds disposable local fixtures for
+ the accepted release identity. It distinguishes living accepted identity from
+diff --git a/tests/releases/shellcheck.sh b/tests/releases/shellcheck.sh
+new file mode 100755
+index 000000000..3642477a8
+--- /dev/null
++++ b/tests/releases/shellcheck.sh
+@@ -0,0 +1,42 @@
++#!/usr/bin/env bash
++set -u
++
++REPO_ROOT="$(
++  cd \
++    "$(dirname "${BASH_SOURCE[0]}")/../.." &&
++    pwd
++)"
++BASELINE="$(
++  python3 - "$REPO_ROOT/release/upgrade-baseline.json" << 'PY'
++import json
++import sys
++from pathlib import Path
++
++print(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["candidate"]["commit"])
++PY
++)"
++SHELL_FILES=()
++
++while IFS= read -r shell_file; do
++  [ -f "$REPO_ROOT/$shell_file" ] && SHELL_FILES+=("$shell_file")
++done < <(
++  {
++    git -C "$REPO_ROOT" diff \
++      --name-only \
++      --diff-filter=ACMR \
++      "$BASELINE" \
++      -- \
++      '*.sh' \
++      '*.bash'
++    printf '%s\n' .githooks/pre-commit .githooks/commit-msg
++  } | sort -u
++)
++
++[ "${#SHELL_FILES[@]}" -gt 0 ] || {
++  echo "FAIL: changed shell inventory is empty." >&2
++  exit 1
++}
++
++cd "$REPO_ROOT" || exit 1
++shellcheck --severity=style "${SHELL_FILES[@]}" || exit 1
++echo "PASS: canonical changed-shell ShellCheck passed at every severity."

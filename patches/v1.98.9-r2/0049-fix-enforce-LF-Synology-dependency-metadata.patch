@@ -1,0 +1,68 @@
+From ef0bd07b4e52b9bb06e89b674a53084ae4087e93 Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Mon, 24 Aug 2026 18:23:16 +1000
+Subject: [PATCH 49/58] fix: enforce LF Synology dependency metadata
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ .gitattributes                                |  1 +
+ .../github-actions-fork-portability.sh        | 38 +++++++++++++++++++
+ 2 files changed, 39 insertions(+)
+
+diff --git a/.gitattributes b/.gitattributes
+index 4559ef5b3..91b0f9341 100644
+--- a/.gitattributes
++++ b/.gitattributes
+@@ -1,5 +1,6 @@
+ go.mod filter=go-mod
+ *.go  diff=golang
++release/dist/synology/files/PKG_DEPS text eol=lf
+ 
+ # Immutable historical patch payloads preserve their checksum-locked bytes.
+ patches/v1.98.9/*.patch whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
+diff --git a/tests/releases/github-actions-fork-portability.sh b/tests/releases/github-actions-fork-portability.sh
+index e3267d43b..5e1f56501 100755
+--- a/tests/releases/github-actions-fork-portability.sh
++++ b/tests/releases/github-actions-fork-portability.sh
+@@ -78,3 +78,41 @@ if failures:
+ 
+ print("PASS: GitHub Actions jobs use fork-portable runners and fuzz ownership.")
+ PY
++
++PKG_DEPS_PATH="release/dist/synology/files/PKG_DEPS"
++ATTRIBUTES="$(
++  git \
++    -C "$REPO_ROOT" \
++    check-attr \
++    text \
++    eol \
++    -- \
++    "$PKG_DEPS_PATH"
++)"
++ATTRIBUTES_RC=$?
++
++if [ "$ATTRIBUTES_RC" -ne 0 ]; then
++  printf 'FAIL: could not read effective Git attributes for %s\n' \
++    "$PKG_DEPS_PATH" >&2
++  exit "$ATTRIBUTES_RC"
++fi
++
++TEXT_ATTRIBUTE="$(
++  printf '%s\n' "$ATTRIBUTES" |
++    awk '$2 == "text:" { print $3 }'
++)"
++EOL_ATTRIBUTE="$(
++  printf '%s\n' "$ATTRIBUTES" |
++    awk '$2 == "eol:" { print $3 }'
++)"
++
++if [ "$TEXT_ATTRIBUTE" != "set" ] ||
++  [ "$EOL_ATTRIBUTE" != "lf" ]; then
++  printf 'FAIL: %s must have effective attributes text=set and eol=lf; got text=%s eol=%s\n' \
++    "$PKG_DEPS_PATH" \
++    "$TEXT_ATTRIBUTE" \
++    "$EOL_ATTRIBUTE" >&2
++  exit 1
++fi
++
++echo "PASS: PKG_DEPS uses LF checkout bytes on every platform."

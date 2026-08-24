@@ -1,0 +1,33 @@
+From 01a6c8fdfbf4685d1cd7fc99b845067c5ec8e1fd Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Mon, 24 Aug 2026 18:23:16 +1000
+Subject: [PATCH 47/58] fix: add required Synology Go license headers
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ release/dist/synology/package_revision.go | 3 +++
+ release/dist/synology/pkgs_test.go        | 3 +++
+ 2 files changed, 6 insertions(+)
+
+diff --git a/release/dist/synology/package_revision.go b/release/dist/synology/package_revision.go
+index 5cb5fe472..7a93562bc 100644
+--- a/release/dist/synology/package_revision.go
++++ b/release/dist/synology/package_revision.go
+@@ -1,3 +1,6 @@
++// Copyright (c) Tailscale Inc & contributors
++// SPDX-License-Identifier: BSD-3-Clause
++
+ package synology
+ 
+ const synologyPackageRevision int64 = 2
+diff --git a/release/dist/synology/pkgs_test.go b/release/dist/synology/pkgs_test.go
+index 1b2d05973..317b6b356 100644
+--- a/release/dist/synology/pkgs_test.go
++++ b/release/dist/synology/pkgs_test.go
+@@ -1,3 +1,6 @@
++// Copyright (c) Tailscale Inc & contributors
++// SPDX-License-Identifier: BSD-3-Clause
++
+ package synology
+ 
+ import (

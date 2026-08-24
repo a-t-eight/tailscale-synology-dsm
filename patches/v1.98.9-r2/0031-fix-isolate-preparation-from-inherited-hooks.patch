@@ -1,0 +1,117 @@
+From 77adfc0db8fa58d6bfb1f6f229fe32a365006b69 Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Mon, 24 Aug 2026 18:23:11 +1000
+Subject: [PATCH 31/58] fix: isolate preparation from inherited hooks
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ scripts/release/common.sh                  |  7 +++++++
+ scripts/release/prepare-worktree.sh        |  7 ++++---
+ tests/releases/prepare-version-workflow.sh | 23 ++++++++++++++++++++++
+ 3 files changed, 34 insertions(+), 3 deletions(-)
+
+diff --git a/scripts/release/common.sh b/scripts/release/common.sh
+index 7a62b27ee..7f1e3ce90 100644
+--- a/scripts/release/common.sh
++++ b/scripts/release/common.sh
+@@ -30,6 +30,13 @@ release_clean_git() {
+   )
+ }
+ 
++release_hookless_git() {
++  release_clean_git \
++    -c \
++    core.hooksPath=/dev/null \
++    "$@"
++}
++
+ release_require_command() {
+   command_name="$1"
+ 
+diff --git a/scripts/release/prepare-worktree.sh b/scripts/release/prepare-worktree.sh
+index 820e252dd..2df705554 100755
+--- a/scripts/release/prepare-worktree.sh
++++ b/scripts/release/prepare-worktree.sh
+@@ -465,7 +465,7 @@ while lines and not lines[-1]:
+ path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+ PY
+ 
+-    release_clean_git \
++    release_hookless_git \
+       -C "$TARGET_WORKTREE" \
+       commit \
+       -S \
+@@ -559,7 +559,7 @@ PY
+     exit "$ROUND_WORKTREE_RC"
+   fi
+ 
+-  release_clean_git \
++  release_hookless_git \
+     -C "$ROUND_TRIP_WORKTREE" \
+     am \
+     --3way \
+@@ -567,7 +567,7 @@ PY
+     > /dev/null
+   ROUND_APPLY_RC=$?
+   if [ "$ROUND_APPLY_RC" -ne 0 ]; then
+-    release_clean_git \
++    release_hookless_git \
+       -C "$ROUND_TRIP_WORKTREE" \
+       am \
+       --abort \
+@@ -739,6 +739,7 @@ lines.extend(
+         "",
+         "## Validation evidence",
+         "",
++        "- Internal commit/apply hooks: disabled",
+         "- Source range: linear and ordered",
+         "- Prepared commits: signed with one matching sign-off each",
+         "- Patch series: mail format with verified SHA-256 digests",
+diff --git a/tests/releases/prepare-version-workflow.sh b/tests/releases/prepare-version-workflow.sh
+index 64e632164..84cbf5556 100755
+--- a/tests/releases/prepare-version-workflow.sh
++++ b/tests/releases/prepare-version-workflow.sh
+@@ -84,6 +84,8 @@ create_success_fixture() {
+   PREPARED_WORKTREE="${TEMP_ROOT}/prepared"
+   ARTIFACTS="${TEMP_ROOT}/artifacts"
+   LOG="${TEMP_ROOT}/prepare.log"
++  HOOKS_DIR="${TEMP_ROOT}/inherited-hooks"
++  HOOK_EVIDENCE="${TEMP_ROOT}/inherited-hooks.log"
+ 
+   git init --bare --initial-branch=main "$BARE_ORIGIN" > /dev/null 2>&1 ||
+     fail "could not create bare origin"
+@@ -132,6 +134,17 @@ create_success_fixture() {
+   git_fixture push origin main previous-release --tags > /dev/null 2>&1 ||
+     fail "could not seed fixture origin"
+ 
++  mkdir -p "$HOOKS_DIR"
++  for hook_name in post-commit post-applypatch; do
++    cat > "$HOOKS_DIR/$hook_name" << 'HOOK'
++#!/bin/sh
++printf '%s\n' "$(basename "$0")" >> "${HOOK_EVIDENCE:?}"
++HOOK
++    chmod 0755 "$HOOKS_DIR/$hook_name"
++  done
++  export HOOK_EVIDENCE
++  git_fixture config core.hooksPath "$HOOKS_DIR"
++
+   REMOTE_REFS_BEFORE="$(snapshot_refs "$BARE_ORIGIN")"
+   TAG_REFS_BEFORE="$(git_fixture show-ref --tags | sort)"
+ 
+@@ -157,6 +170,16 @@ create_success_fixture() {
+   assert_file "$ARTIFACTS/patches/series"
+   assert_file "$ARTIFACTS/preparation-report.md"
+ 
++  if [ -e "$HOOK_EVIDENCE" ]; then
++    sed -n '1,80p' "$HOOK_EVIDENCE" >&2
++    fail "prepare-version executed inherited Git hooks"
++  fi
++  if ! grep -Fxq \
++    -- '- Internal commit/apply hooks: disabled' \
++    "$ARTIFACTS/preparation-report.md"; then
++    fail "preparation report does not record internal hook isolation"
++  fi
++
+   PREPARED_HEAD="$(git -C "$PREPARED_WORKTREE" rev-parse HEAD)"
+   PREPARED_TREE="$(git -C "$PREPARED_WORKTREE" rev-parse 'HEAD^{tree}')"
+   PREPARED_BASE="$(git -C "$PREPARED_WORKTREE" rev-parse 'HEAD~2')"

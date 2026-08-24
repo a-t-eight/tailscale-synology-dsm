@@ -11,21 +11,21 @@
     "commit": "6c167d40fa37aeb51afa7ff336730670ea4762bf"
   },
   "downstream": {
-    "revision": "r1",
-    "release_commit": "20c86229955a3d03de01901aee1499cab87c571d",
-    "release_tree": "6d022c18f27a42aab553697c69c852bebd8594b8"
+    "revision": "r2",
+    "release_commit": "0fad8b81a3e0eb86c457bc79c474bcc213834c43",
+    "release_tree": "33f5c5927ae4db54b9d582650ed31cc6a2eb7161"
   },
   "package": {
     "identifier": "Tailscale",
     "version": "1.98.96",
-    "build_number": "700098096",
-    "full_version": "1.98.96-700098096",
+    "build_number": "700098097",
+    "full_version": "1.98.96-700098097",
     "architecture": "x86_64",
-    "filename": "tailscale-x86_64-1.98.96-700098096-dsm7.spk",
-    "sha256": "bed218b4d0099102e9c3be18456d8a94be9a92b4a29295a9dab33932570cbce0"
+    "filename": "tailscale-x86_64-1.98.96-700098097-dsm7.spk",
+    "sha256": "f947a1747521c50edf49baf597cc18b512b3bb009c3b7afe963fa326ef2d6c16"
   },
   "synology": {
-    "minimum_dsm": "7.3-81180",
+    "minimum_dsm": "7.3-86009",
     "tested_models": [
       "DS920+"
     ],
@@ -35,49 +35,95 @@
     "architectures": [
       "x86_64"
     ],
-    "netfilter_dependency": "tailscale-netfilter-modules >= 1.0.0-11"
+    "netfilter_dependency": "iptables-netfilter-extensions >= 1.1.0-2"
   },
   "branches": {
-    "work": "work/v1.98.9-synology",
-    "release": "release/v1.98.9-synology"
+    "work": "work/v1.98.9-synology-r2",
+    "release": "release/v1.98.9-r2-synology"
   },
   "tags": {
-    "release": "release/synology-v1.98.96-r1"
+    "release": "release/synology-v1.98.96-r2"
   },
   "paths": {
-    "patch_series": "patches/v1.98.9",
+    "patch_series": "patches/v1.98.9-r2",
     "build_entrypoint": "tool/build-synology-root-bootstrap.sh",
-    "build_output": "build/synology/v1.98.9-final",
-    "evidence": "tests/releases/v1.98.9",
-    "release_record": "docs/releases/v1.98.96-r1/README.md",
+    "build_output": "build/synology/v1.98.9-r2-final",
+    "evidence": "tests/releases/v1.98.9-r2",
+    "release_record": "docs/releases/v1.98.96-r2/README.md",
     "spk_inspector": "scripts/release/inspect-spk.sh"
   },
   "validation": {
     "go_packages": [
+      "./release/dist/synology",
       "./cmd/tailscale/cli",
-      "./ipn/ipnlocal"
+      "./cmd/tailscaled",
+      "./ipn/ipnlocal",
+      "./util/linuxfw",
+      "./wgengine/router"
     ],
-    "patch_series_format": "raw-diff",
-    "accepted_legacy_no_signoff_commits": [
-      "8a2204fa027bd56bb27d1e7f6af696e4eefa8c1a",
-      "1c5dcbe5cc7f6c1b237e74ca721bc10f2548506a",
-      "46c6f760abf06370ce5b4cfc0e878e2c854c4522",
-      "a2ac2a275f4b2f0d7f786ca670d8040c83a6ae73",
-      "01d9071ddceae34502978656f1f36b26906841ec",
-      "4d7586ff0238a41fc627cf905af0bdcae1c67d0e",
-      "456f90c5bf5c383f37ab2f0ca6b7f0531730a140",
-      "f7f177695b8d5ade4107536afb2e0f164cde3b7e",
-      "a471b0eb42e8487b47aa051b1198ba536e250669",
-      "a106ddb72822c61cefd068fef64ea1a473c47fae",
-      "ffcabae3653570468ce490d7e77403e9576b904c",
-      "6c9b329bc322f39c29be89b89408c65bfccea545"
-    ],
+    "patch_series_format": "mail",
+    "accepted_legacy_no_signoff_commits": [],
     "patch_apply_files": [
-      "release-tree.patch"
+      "0001-synology-permit-routing-and-netfilter-preferences.patch",
+      "0002-synology-use-kernel-TUN-and-subnet-routing.patch",
+      "0003-synology-enable-the-Linux-netfilter-backend.patch",
+      "0004-build-add-v1.98.9-Synology-netfilter-patch.patch",
+      "0005-synology-require-kernel-TUN-during-package-startup.patch",
+      "0006-synology-force-kernel-networking-in-the-SPK-launcher.patch",
+      "0007-synology-package-safe-and-root-privilege-manifests.patch",
+      "0008-synology-add-administrator-root-runtime-bootstrap.patch",
+      "0009-synology-gate-startup-on-administrator-bootstrap.patch",
+      "0010-synology-verify-root-runtime-prerequisites.patch",
+      "0011-build-produce-and-compare-Synology-package-variants.patch",
+      "0012-test-cover-Synology-root-runtime-bootstrap.patch",
+      "0013-synology-require-netfilter-module-package.patch",
+      "0014-synology-rebuild-missing-netfilter-hooks.patch",
+      "0015-synology-reconcile-netfilter-after-startup.patch",
+      "0016-synology-supervise-netfilter-reconciliation.patch",
+      "0017-synology-avoid-reconciler-broken-pipe-diagnostics.patch",
+      "0018-synology-harden-boot-networking-startup.patch",
+      "0019-build-make-release-artifacts-reproducible.patch",
+      "0020-release-prepare-Synology-r2-package.patch",
+      "0021-docs-design-agent-upgrade-workflow.patch",
+      "0022-chore-promote-Synology-release-controls.patch",
+      "0023-docs-define-agent-upgrade-contracts.patch",
+      "0024-feat-prepare-pinned-Synology-versions.patch",
+      "0025-test-enforce-fail-closed-version-preparation.patch",
+      "0026-docs-add-version-preparation-runbook.patch",
+      "0027-chore-complete-source-validation-controls.patch",
+      "0028-fix-classify-protected-patch-adjunct.patch",
+      "0029-docs-record-pre-cleanup-manifest.patch",
+      "0030-docs-record-post-cleanup-inventory.patch",
+      "0031-fix-isolate-preparation-from-inherited-hooks.patch",
+      "0032-fix-constrain-control-only-hook-setup.patch",
+      "0033-docs-inventory-follow-up-cleanup-targets.patch",
+      "0034-docs-record-follow-up-cleanup-state.patch",
+      "0035-test-enforce-canonical-ShellCheck-diagnostics.patch",
+      "0036-docs-normalize-Markdown-end-of-file-whitespace.patch",
+      "0037-test-enforce-read-only-mismatch-stop.patch",
+      "0038-docs-require-complete-preparation-handoff.patch",
+      "0039-fix-fail-closed-on-preparation-output-conflicts.patch",
+      "0040-fix-bind-control-hooks-to-one-worktree-authority.patch",
+      "0041-fix-retain-release-validation-in-control-authority.patch",
+      "0042-test-scope-full-range-whitespace-exemptions.patch",
+      "0043-docs-correct-cleanup-target-grouping.patch",
+      "0044-fix-suppress-inherited-worktree-hooks.patch",
+      "0045-fix-fail-closed-on-round-trip-cleanup.patch",
+      "0046-fix-suppress-legacy-worktree-hooks.patch",
+      "0047-fix-add-required-Synology-Go-license-headers.patch",
+      "0048-ci-use-fork-portable-GitHub-Actions.patch",
+      "0049-fix-enforce-LF-Synology-dependency-metadata.patch",
+      "0050-ci-allow-intentional-fork-job-skips.patch",
+      "0051-ci-add-focused-Synology-product-gate.patch",
+      "0052-fix-make-artifact-installation-coreutils-compatible.patch",
+      "0053-fix-cover-trapped-cleanup-ShellCheck-rules.patch",
+      "0054-fix-correct-Synology-dependency-minimum.patch",
+      "0055-synology-expose-attended-bootstrap-command.patch",
+      "0056-synology-harden-DSM-root-runtime-lifecycle.patch",
+      "0057-docs-record-DSM-7.4.1-bootstrap-hardening.patch",
+      "0058-ci-make-release-gates-deterministic.patch"
     ],
-    "patch_reference_files": [
-      "maintenance.patch"
-    ],
+    "patch_reference_files": [],
     "ssh_allowed_signers_path": ".github/allowed_signers",
     "ssh_allowed_signers_sha256": "7f6e0b0e70dd002171512380426103ca322c28a30ed2bde5815395f3c7e329c8",
     "ssh_signer_fingerprints": [

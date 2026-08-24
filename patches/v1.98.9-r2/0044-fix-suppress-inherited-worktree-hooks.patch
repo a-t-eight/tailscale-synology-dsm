@@ -1,0 +1,46 @@
+From 5550e92a35bb9dcd071e1a40c91c8bfd53cf6e58 Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Mon, 24 Aug 2026 18:23:15 +1000
+Subject: [PATCH 44/58] fix: suppress inherited worktree hooks
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ scripts/release/prepare-worktree.sh        | 4 ++--
+ tests/releases/prepare-version-workflow.sh | 2 +-
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/scripts/release/prepare-worktree.sh b/scripts/release/prepare-worktree.sh
+index 94bfcd8ce..711446914 100755
+--- a/scripts/release/prepare-worktree.sh
++++ b/scripts/release/prepare-worktree.sh
+@@ -400,7 +400,7 @@ prepare_version() (
+     exit 0
+   fi
+ 
+-  release_clean_git \
++  release_hookless_git \
+     -C "$SOURCE_REPO" \
+     worktree \
+     add \
+@@ -552,7 +552,7 @@ PY
+ 
+   ROUND_TRIP_PARENT="$(mktemp -d /tmp/tailscale-version-round-trip.XXXXXX)"
+   ROUND_TRIP_WORKTREE="${ROUND_TRIP_PARENT}/worktree"
+-  release_clean_git \
++  release_hookless_git \
+     -C "$SOURCE_REPO" \
+     worktree \
+     add \
+diff --git a/tests/releases/prepare-version-workflow.sh b/tests/releases/prepare-version-workflow.sh
+index 090f2a2b1..b75b9fb0b 100755
+--- a/tests/releases/prepare-version-workflow.sh
++++ b/tests/releases/prepare-version-workflow.sh
+@@ -135,7 +135,7 @@ create_success_fixture() {
+     fail "could not seed fixture origin"
+ 
+   mkdir -p "$HOOKS_DIR"
+-  for hook_name in post-commit post-applypatch; do
++  for hook_name in post-checkout post-commit post-applypatch; do
+     cat > "$HOOKS_DIR/$hook_name" << 'HOOK'
+ #!/bin/sh
+ printf '%s\n' "$(basename "$0")" >> "${HOOK_EVIDENCE:?}"

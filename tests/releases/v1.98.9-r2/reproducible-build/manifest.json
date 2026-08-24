@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "release_commit": "0fad8b81a3e0eb86c457bc79c474bcc213834c43",
+  "release_tree": "33f5c5927ae4db54b9d582650ed31cc6a2eb7161",
+  "external_evidence_id": "tailscale-r2-ci-fix-0fad8b81-20260824T170600Z",
+  "sideload": {
+    "filename": "tailscale-x86_64-1.98.96-700098097-dsm7.spk",
+    "sha256": "f947a1747521c50edf49baf597cc18b512b3bb009c3b7afe963fa326ef2d6c16",
+    "independent_builds_identical": true
+  },
+  "package_center_reference": {
+    "filename": "tailscale-x86_64-1.98.96-720098097-dsm7-2.spk",
+    "sha256": "d51dd54def1015bee1c6011a4be7aa6d9b5c9d19b440292276347f861c7d071e",
+    "independent_builds_identical": true
+  },
+  "source_evidence_checksums_valid": true,
+  "verdict": "PASS"
+}

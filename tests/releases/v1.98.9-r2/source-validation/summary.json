@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "upstream_commit": "6c167d40fa37aeb51afa7ff336730670ea4762bf",
+  "release_commit": "0fad8b81a3e0eb86c457bc79c474bcc213834c43",
+  "release_tree": "33f5c5927ae4db54b9d582650ed31cc6a2eb7161",
+  "downstream_commit_count": 58,
+  "valid_signature_count": 58,
+  "matching_single_signoff_count": 58,
+  "patch_format": "mail",
+  "patch_count": 58,
+  "patch_round_trip_tree": "33f5c5927ae4db54b9d582650ed31cc6a2eb7161",
+  "patch_round_trip": "PASS",
+  "shellcheck_version": "0.11.0",
+  "golangci_lint_version": "2.10.1",
+  "github_checks": {
+    "synology-product": "PASS",
+    "lint": "PASS",
+    "vet": "PASS",
+    "checklocks": "PASS"
+  },
+  "sealed_review_bundle": "tailscale-synology-review-v1.98.9-r2-dsm741-ci-fix-0fad8b81",
+  "sealed_review_bundle_sha256sums_digest": "ec0ed1ec021175b5c3882b19a0e7935091c7d103a1a660209b96a26d4fd2244e",
+  "verdict": "PASS"
+}

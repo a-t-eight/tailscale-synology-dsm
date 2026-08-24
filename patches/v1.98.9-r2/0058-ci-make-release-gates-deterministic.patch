@@ -1,0 +1,194 @@
+From 0fad8b81a3e0eb86c457bc79c474bcc213834c43 Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Tue, 25 Aug 2026 03:02:54 +1000
+Subject: [PATCH 58/58] ci: make release gates deterministic
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ .github/workflows/golangci-lint.yml           | 25 ++++++--
+ .github/workflows/synology-product.yml        | 22 +++++++
+ .../github-actions-fork-portability.sh        | 63 ++++++++++++++++++-
+ 3 files changed, 105 insertions(+), 5 deletions(-)
+
+diff --git a/.github/workflows/golangci-lint.yml b/.github/workflows/golangci-lint.yml
+index 66b8497e6..de836b94d 100644
+--- a/.github/workflows/golangci-lint.yml
++++ b/.github/workflows/golangci-lint.yml
+@@ -28,6 +28,26 @@ jobs:
+     runs-on: ubuntu-latest
+     steps:
+       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
++        with:
++          fetch-depth: 0
++          persist-credentials: false
++
++      - name: Resolve lint baseline
++        id: lint-base
++        shell: bash
++        env:
++          EVENT_NAME: ${{ github.event_name }}
++          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
++        run: |
++          set -euo pipefail
++
++          if [ "$EVENT_NAME" = "pull_request" ]; then
++            lint_base="$(git merge-base HEAD "$PR_BASE_SHA")"
++          else
++            lint_base="$(git rev-parse HEAD^)"
++          fi
++          git cat-file -e "${lint_base}^{commit}"
++          printf 'sha=%s\n' "$lint_base" >> "$GITHUB_OUTPUT"
+ 
+       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+         with:
+@@ -39,9 +59,6 @@ jobs:
+         with:
+           version: v2.10.1
+ 
+-          # Show only new issues if it's a pull request.
+-          only-new-issues: true
+-
+           # Loading packages with a cold cache takes a while:
+-          args: --timeout=10m
++          args: --timeout=10m --new-from-rev=${{ steps.lint-base.outputs.sha }}
+           
+diff --git a/.github/workflows/synology-product.yml b/.github/workflows/synology-product.yml
+index b2012a5af..800fa1777 100644
+--- a/.github/workflows/synology-product.yml
++++ b/.github/workflows/synology-product.yml
+@@ -20,6 +20,28 @@ jobs:
+         with:
+           fetch-depth: 0
+           persist-credentials: false
++      - name: Install ShellCheck 0.11.0
++        shell: bash
++        env:
++          SHELLCHECK_VERSION: v0.11.0
++          SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
++        run: |
++          set -euo pipefail
++
++          archive="$RUNNER_TEMP/shellcheck.tar.xz"
++          shellcheck_dir="$RUNNER_TEMP/shellcheck-${SHELLCHECK_VERSION}"
++          curl \
++            --fail \
++            --location \
++            --silent \
++            --show-error \
++            --output "$archive" \
++            "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
++          printf '%s  %s\n' "$SHELLCHECK_SHA256" "$archive" |
++            sha256sum --check -
++          tar -xJf "$archive" -C "$RUNNER_TEMP"
++          echo "$shellcheck_dir" >> "$GITHUB_PATH"
++          "$shellcheck_dir/shellcheck" --version
+       - name: Validate Synology product
+         shell: bash
+         run: |
+diff --git a/tests/releases/github-actions-fork-portability.sh b/tests/releases/github-actions-fork-portability.sh
+index 61d7e6e43..171f9ebf9 100755
+--- a/tests/releases/github-actions-fork-portability.sh
++++ b/tests/releases/github-actions-fork-portability.sh
+@@ -12,7 +12,8 @@ python3 - \
+   "${REPO_ROOT}/.github/workflows/test.yml" \
+   "${REPO_ROOT}/.github/workflows/synology-product.yml" \
+   "${REPO_ROOT}/.github/workflows/docker-file-build.yml" \
+-  "${REPO_ROOT}/.github/workflows/natlab-integrationtest.yml" << 'PY'
++  "${REPO_ROOT}/.github/workflows/natlab-integrationtest.yml" \
++  "${REPO_ROOT}/.github/workflows/golangci-lint.yml" << 'PY'
+ import re
+ import sys
+ from pathlib import Path
+@@ -139,12 +140,14 @@ test_path = Path(sys.argv[2])
+ synology_product_path = Path(sys.argv[3])
+ docker_path = Path(sys.argv[4])
+ natlab_path = Path(sys.argv[5])
++golangci_lint_path = Path(sys.argv[6])
+ 
+ vet_workflow = read_workflow(vet_path)
+ test_workflow = read_workflow(test_path)
+ synology_product_workflow = read_workflow(synology_product_path)
+ docker_workflow = read_workflow(docker_path)
+ natlab_workflow = read_workflow(natlab_path)
++golangci_lint_workflow = read_workflow(golangci_lint_path)
+ 
+ vet = job_block(vet_workflow, "vet")
+ windows = job_block(test_workflow, "windows")
+@@ -152,6 +155,7 @@ fuzz = job_block(test_workflow, "fuzz")
+ merge_blocker = job_block(test_workflow, "merge_blocker")
+ check_mergeability_strict = job_block(test_workflow, "check_mergeability_strict")
+ check_mergeability = job_block(test_workflow, "check_mergeability")
++golangci_lint = job_block(golangci_lint_workflow, "golangci")
+ 
+ failures: list[str] = []
+ 
+@@ -295,12 +299,69 @@ else:
+                 "synology-product must fail clearly when ShellCheck is unavailable"
+             )
+ 
++        shellcheck_contract = [
++            "SHELLCHECK_VERSION: v0.11.0",
++            (
++                "SHELLCHECK_SHA256: "
++                "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"
++            ),
++            (
++                "https://github.com/koalaman/shellcheck/releases/download/"
++                "${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
++            ),
++            "sha256sum --check -",
++            'echo "$shellcheck_dir" >> "$GITHUB_PATH"',
++            '"$shellcheck_dir/shellcheck" --version',
++        ]
++        for snippet in shellcheck_contract:
++            if snippet not in product:
++                failures.append(
++                    "synology-product must install checksum-pinned "
++                    f"ShellCheck 0.11.0: {snippet}"
++                )
++
+ assert_triggers(
+     failures,
+     "full CI workflow",
+     test_workflow,
+     ["push", "merge_group", "workflow_dispatch"],
+ )
++assert_triggers(
++    failures,
++    "golangci-lint workflow",
++    golangci_lint_workflow,
++    ["pull_request", "workflow_dispatch"],
++)
++
++lint_checkout_uses = re.findall(
++    r"(?m)^      - uses:\s*actions/checkout@([^\s#]+)",
++    golangci_lint,
++)
++if lint_checkout_uses != ["de0fac2e4500dabe0009e67214ff5f5447ce83dd"]:
++    failures.append(
++        "golangci-lint must use exactly one checksum-pinned checkout "
++        f"(observed: {lint_checkout_uses!r})"
++    )
++
++lint_contract = [
++    "fetch-depth: 0",
++    "id: lint-base",
++    'git merge-base HEAD "$PR_BASE_SHA"',
++    'git rev-parse HEAD^',
++    'git cat-file -e "${lint_base}^{commit}"',
++    "--new-from-rev=${{ steps.lint-base.outputs.sha }}",
++]
++for snippet in lint_contract:
++    if snippet not in golangci_lint:
++        failures.append(
++            "golangci-lint must derive its baseline locally for oversized "
++            f"pull requests: {snippet}"
++        )
++
++if "only-new-issues: true" in golangci_lint:
++    failures.append(
++        "golangci-lint must not request GitHub's size-limited PR diff"
++    )
+ assert_triggers(
+     failures,
+     "Dockerfile build workflow",

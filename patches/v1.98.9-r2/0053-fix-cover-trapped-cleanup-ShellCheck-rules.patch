@@ -1,0 +1,23 @@
+From 650bae44ae0413eba267ca12519110defc3f65ca Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Mon, 24 Aug 2026 18:23:17 +1000
+Subject: [PATCH 53/58] fix: cover trapped cleanup ShellCheck rules
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ scripts/release/prepare-worktree.sh | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/scripts/release/prepare-worktree.sh b/scripts/release/prepare-worktree.sh
+index 7b3714911..e372a086c 100755
+--- a/scripts/release/prepare-worktree.sh
++++ b/scripts/release/prepare-worktree.sh
+@@ -65,7 +65,7 @@ prepare_version() (
+       grep -Fxq "worktree ${ROUND_TRIP_WORKTREE}"
+   }
+ 
+-  # shellcheck disable=SC2329 # Invoked by the EXIT trap below.
++  # shellcheck disable=SC2317,SC2329 # Invoked by the EXIT trap below.
+   cleanup_prepare_version() {
+     if [ -n "$MESSAGE_FILE" ] &&
+       [ -f "$MESSAGE_FILE" ]; then

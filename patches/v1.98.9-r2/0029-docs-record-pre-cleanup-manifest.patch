@@ -1,0 +1,98 @@
+From 94012597cd013575da1a4c3941ce79df59a706c7 Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Mon, 24 Aug 2026 18:23:11 +1000
+Subject: [PATCH 29/58] docs: record pre-cleanup manifest
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ .../2026-08-23-pre-cleanup-manifest.md        | 81 +++++++++++++++++++
+ 1 file changed, 81 insertions(+)
+ create mode 100644 docs/cleanup/2026-08-23-pre-cleanup-manifest.md
+
+diff --git a/docs/cleanup/2026-08-23-pre-cleanup-manifest.md b/docs/cleanup/2026-08-23-pre-cleanup-manifest.md
+new file mode 100644
+index 000000000..49f32b32f
+--- /dev/null
++++ b/docs/cleanup/2026-08-23-pre-cleanup-manifest.md
+@@ -0,0 +1,81 @@
++# Pre-cleanup manifest: agent upgrade workflow
++
++Date: 2026-08-23 (Australia/Sydney)
++
++This manifest freezes the cleanup decision before any deletion. Cleanup is limited to exact targets whose retained equivalent and lack of unique product changes were verified. No NAS, remote, publication, tag, release, or dependency-SPK action is in scope.
++
++## Implementation gate
++
++- Feature branch: `codex/agent-upgrade-workflow`
++- Feature worktree: `/home/ateight/development/tailscale-synology-unjailed/tailscale-synology-agent-upgrade-workflow`
++- Pre-cleanup feature HEAD: `20899f9110a389a611c5557af07ccbf511eb02d6`
++- Clean candidate base: `8c9fe5239ee57a89ce687fc8c7608d3df91f6ede`
++- The focused preparation tests, all Synology shell tests, offline relevant Go tests, shell syntax and static analysis, canonical patch checksum, historical checksum inventory, and accepted-source round trip passed before cleanup.
++- The canonical seven protected blobs were unchanged from the candidate before cleanup.
++
++## Keep
++
++The following are retained without modification:
++
++- Accepted source/base worktree and branch:
++  `/home/ateight/development/tailscale-synology-unjailed/tailscale-synology-dsm`, `release/v1.98.9-synology`, `20c86229955a3d03de01901aee1499cab87c571d`.
++- Clean r2 candidate worktree and branch:
++  `/home/ateight/development/tailscale-synology-unjailed/tailscale-synology-dsm-r2`, `work/release-v1.98.9-synology-r2`, `8c9fe5239ee57a89ce687fc8c7608d3df91f6ede`.
++- Control worktree and branch:
++  `/home/ateight/development/tailscale-synology-unjailed/tailscale-synology-dsm-control`, `synology/main`, `891f03cea97aaa06009e9f8d7ee7494b7e1e4340`.
++- Contract worktree and branch:
++  `/home/ateight/development/tailscale-synology-unjailed/tailscale-synology-dsm-contract`, `governance/accepted-production-contract`, `e6cc919d7fc5ee35e14bb1aa56d33ec782c2c016`.
++- This feature worktree and branch, the complete shared Git history, canonical patches and checksums, release manifests and scripts, tests, runbooks, contracts, accepted SPKs, and current-release build evidence.
++- The Mac planning checkout, which is outside this cleanup and must not be touched.
++
++## Remove
++
++Only these exact targets are approved for removal:
++
++1. `/home/ateight/development/tailscale-synology-unjailed/evidence/tailscale-r2-isolated-gocross-20260822T013718Z`
++2. `/home/ateight/development/tailscale-synology-unjailed/evidence/tailscale-r2-isolated-gocross-20260822T020519Z`
++3. `/home/ateight/development/tailscale-synology-unjailed/synology-netfilter-v1.98.9.patch`
++4. `/home/ateight/development/tailscale-synology-unjailed/synology-netfilter-v1.98.9.patch.sha256`
++
++The first two targets are registered detached Git worktrees. They will be removed with Git's worktree command, then stale administrative entries will be pruned. The final two targets are redundant workspace-root copies, not tracked files in the feature worktree.
++
++## Removal proof
++
++For each detached evidence worktree:
++
++- detached HEAD is `20c86229955a3d03de01901aee1499cab87c571d`;
++- the index is byte-for-byte equal to candidate tree `8c9fe5239ee57a89ce687fc8c7608d3df91f6ede` (`git diff --cached --quiet` succeeded);
++- the working tree equals the index (`git diff --quiet` succeeded);
++- there are zero untracked files; and
++- the only staged paths relative to the accepted source are the same five candidate paths:
++  `release/dist/synology/files/PKG_DEPS`,
++  `release/dist/synology/package_revision.go`,
++  `release/dist/synology/pkgs.go`,
++  `release/dist/synology/pkgs_test.go`, and
++  `tool/build-synology-root-bootstrap.sh`.
++
++Consequently, neither detached worktree contains a unique product change. Its complete tree remains available through the retained candidate commit and r2 worktree.
++
++For the redundant patch copies:
++
++- workspace-root patch size: 6,781 bytes;
++- canonical `patches/v1.98.9/synology-netfilter.patch` size: 6,781 bytes;
++- both patch SHA-256 values: `ad577d4032e3c14fa37b284b7e5116c364122471b1d9fdc2c906bf8ae198920f`;
++- the root checksum file records that same digest for the root basename;
++- canonical checksum file SHA-256: `b0a7641e8297c79ea2c40ffddc82632cfbdaf83029b4552e42572b227a2b7fe4`;
++- root checksum file SHA-256: `69e55e7e72229178c3d1fbb473aaddec7850c381cbf4505c8f09b2949397a629`.
++
++The checksum files differ only because they name different patch basenames. The canonical in-repository patch and checksum will remain tracked and will be revalidated after deletion.
++
++## Retained as ambiguous
++
++No authoritative exact enumeration proves that the following historical or temporary-looking roots are abandoned without unique accepted-release evidence. They are therefore deliberately retained:
++
++- `/tmp/ts-r2-preflight.L5rExv` and other Tailscale/Synology temporary roots under `/tmp`;
++- `/home/ateight/development/tailscale-synology-unjailed/evidence/sdd-r2-controller`;
++- `/home/ateight/development/tailscale-synology-unjailed/evidence/tailscale-r2-license-header-correction-controller-20260822T072104Z`;
++- `/home/ateight/development/tailscale-synology-unjailed/archive/codex-execution-scripts`;
++- workspace reconciliation roots matching `.tailscale-synology-v1.98.9-reconcile-*`; and
++- finalization, recovery, preflight, controller, correction, and evidence directories not named in the approved removal list above.
++
++These targets may contain durable audit, controller, recovery, or build evidence. A later cleanup may remove them only after an explicit target list and uniqueness review.

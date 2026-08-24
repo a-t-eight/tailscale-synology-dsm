@@ -1,0 +1,169 @@
+From d92f28153cff3e86681c60be91827ff0a386c783 Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Mon, 24 Aug 2026 18:23:12 +1000
+Subject: [PATCH 32/58] fix: constrain control-only hook setup
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ .githooks/README.md                  |  5 ++
+ scripts/README.md                    |  6 +-
+ scripts/setup-worktree.sh            | 10 +++-
+ tests/releases/control-pre-commit.sh | 88 ++++++++++++++++++++++++++++
+ 4 files changed, 106 insertions(+), 3 deletions(-)
+ create mode 100755 tests/releases/control-pre-commit.sh
+
+diff --git a/.githooks/README.md b/.githooks/README.md
+index 2f1fe361d..2563fc607 100644
+--- a/.githooks/README.md
++++ b/.githooks/README.md
+@@ -3,6 +3,11 @@
+ Version-controlled hooks provide advisory local checks. Remote validation
+ remains authoritative because Git permits local hooks to be bypassed.
+ 
++These hooks are selected directly only for a complete control-only worktree
++that contains `scripts/validate-repository.sh`. Source, accepted, work, and
++release worktrees use the role-specific wrappers created by
++`scripts/setup-worktree.sh`.
++
+ Implemented hooks:
+ 
+ - `pre-commit`
+diff --git a/scripts/README.md b/scripts/README.md
+index a488ac23c..ba37fc3cc 100644
+--- a/scripts/README.md
++++ b/scripts/README.md
+@@ -10,8 +10,10 @@
+   manifest-driven control workflow.
+ - `release/common.sh` contains strict manifest, patch and worktree helpers used
+   by both modes.
+-- `setup-worktree.sh` configures repository-owned hooks and signing for a
+-  control, work, release or accepted worktree.
++- `setup-worktree.sh` configures repository-owned hooks and signing. The
++  `control` role is limited to the separate complete control-only tree that
++  contains `scripts/validate-repository.sh`; this promoted source-worktree layer
++  uses the `accepted`, `work`, or `release` roles with that control tree.
+ 
+ Preparation never fetches, pushes, tags, builds either SPK, publishes, installs
+ on a NAS or changes NAS state. See
+diff --git a/scripts/setup-worktree.sh b/scripts/setup-worktree.sh
+index cad71fb11..823facc74 100755
+--- a/scripts/setup-worktree.sh
++++ b/scripts/setup-worktree.sh
+@@ -18,7 +18,9 @@ Usage:
+     [--dry-run]
+ 
+ Control worktrees use their own committed .githooks directory. Source, work and
+-release worktrees receive generated wrappers in the common Git directory.
++release worktrees receive generated wrappers in the common Git directory. The
++control role is available only when the selected worktree contains the complete
++control-only validator at scripts/validate-repository.sh.
+ USAGE
+ }
+ 
+@@ -115,6 +117,12 @@ WORKTREE_ROOT="$(
+     --show-toplevel
+ )"
+ 
++if [ "$ROLE" = "control" ] &&
++  [ ! -x "$WORKTREE_ROOT/scripts/validate-repository.sh" ]; then
++  fail "control role requires scripts/validate-repository.sh in the selected worktree"
++  exit 1
++fi
++
+ path_id="$(
+   printf '%s\n' \
+     "$WORKTREE_ROOT" |
+diff --git a/tests/releases/control-pre-commit.sh b/tests/releases/control-pre-commit.sh
+new file mode 100755
+index 000000000..ecb1e3996
+--- /dev/null
++++ b/tests/releases/control-pre-commit.sh
+@@ -0,0 +1,88 @@
++#!/usr/bin/env bash
++set -u
++
++REPO_ROOT="$(
++  cd \
++    "$(dirname "${BASH_SOURCE[0]}")/../.." &&
++    pwd
++)"
++TEMP_ROOT=""
++SOURCE_LOG="$(mktemp /tmp/tailscale-source-control-role.XXXXXX)"
++
++fail() {
++  printf 'FAIL: %s\n' "$1" >&2
++  exit 1
++}
++
++cleanup() {
++  rm -f -- "$SOURCE_LOG"
++  if [ -n "$TEMP_ROOT" ] &&
++    [[ "$TEMP_ROOT" == /tmp/tailscale-control-hook-test.* ]]; then
++    rm -rf -- "$TEMP_ROOT"
++  fi
++}
++
++trap cleanup EXIT
++
++hooks_before="$(
++  git -C "$REPO_ROOT" config --worktree --get core.hooksPath 2> /dev/null ||
++    true
++)"
++if bash "$REPO_ROOT/scripts/setup-worktree.sh" \
++  --worktree "$REPO_ROOT" \
++  --control-worktree "$REPO_ROOT" \
++  --role control \
++  --dry-run \
++  > "$SOURCE_LOG" 2>&1; then
++  fail "unified source tree accepted the control-only role"
++fi
++grep -Fxq \
++  "FAIL: control role requires scripts/validate-repository.sh in the selected worktree" \
++  "$SOURCE_LOG" || fail "source-tree rejection omitted the exact diagnostic"
++hooks_after="$(
++  git -C "$REPO_ROOT" config --worktree --get core.hooksPath 2> /dev/null ||
++    true
++)"
++[ "$hooks_after" = "$hooks_before" ] ||
++  fail "rejected control-role setup changed the hooks path"
++
++TEMP_ROOT="$(mktemp -d /tmp/tailscale-control-hook-test.XXXXXX)"
++FIXTURE_ROOT="${TEMP_ROOT}/control"
++HOOK_RECORD="${TEMP_ROOT}/hook-record"
++
++git init -b main "$FIXTURE_ROOT" > /dev/null 2>&1 ||
++  fail "could not create control-role fixture"
++mkdir -p "$FIXTURE_ROOT/.githooks" "$FIXTURE_ROOT/scripts"
++cp "$REPO_ROOT/.githooks/pre-commit" "$FIXTURE_ROOT/.githooks/pre-commit"
++cp "$REPO_ROOT/.githooks/commit-msg" "$FIXTURE_ROOT/.githooks/commit-msg"
++cp "$REPO_ROOT/scripts/setup-worktree.sh" "$FIXTURE_ROOT/scripts/setup-worktree.sh"
++cat > "$FIXTURE_ROOT/scripts/validate-repository.sh" << 'VALIDATOR'
++#!/usr/bin/env bash
++printf '%s\n' "$*" > "${HOOK_RECORD:?}"
++VALIDATOR
++chmod 0755 \
++  "$FIXTURE_ROOT/.githooks/pre-commit" \
++  "$FIXTURE_ROOT/.githooks/commit-msg" \
++  "$FIXTURE_ROOT/scripts/setup-worktree.sh" \
++  "$FIXTURE_ROOT/scripts/validate-repository.sh"
++
++bash "$FIXTURE_ROOT/scripts/setup-worktree.sh" \
++  --worktree "$FIXTURE_ROOT" \
++  --control-worktree "$FIXTURE_ROOT" \
++  --role control \
++  > /dev/null || fail "complete control-role setup failed"
++asserted_hooks="$(
++  git -C "$FIXTURE_ROOT" config --worktree --get core.hooksPath
++)"
++[ "$asserted_hooks" = "$FIXTURE_ROOT/.githooks" ] ||
++  fail "complete control role did not select repository-owned hooks"
++
++export HOOK_RECORD
++(
++  cd "$FIXTURE_ROOT" || exit 1
++  bash .githooks/pre-commit
++) || fail "direct control pre-commit invocation failed"
++[ "$(<"$HOOK_RECORD")" = "--fast --staged-secrets" ] ||
++  fail "control pre-commit passed unexpected validator arguments"
++
++echo "PASS: source trees reject control role and complete control trees run their hook."

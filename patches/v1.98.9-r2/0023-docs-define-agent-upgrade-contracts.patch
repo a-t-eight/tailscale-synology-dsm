@@ -1,0 +1,804 @@
+From a8e1fbbaf713b772129064a75c235ad2f450c451 Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Mon, 24 Aug 2026 18:23:09 +1000
+Subject: [PATCH 23/58] docs: define agent upgrade contracts
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ AGENTS.md                                     |  14 +
+ docs/product/unjailed-synology-contract.md    |  44 +++
+ docs/runbooks/agent-version-preparation.md    |  85 ++++++
+ docs/templates/agent-evidence-report.md       |  49 +++
+ release/upgrade-baseline.json                 |  65 ++++
+ release/version-preparation.schema.json       | 287 ++++++++++++++++++
+ .../releases/version-preparation-contract.sh  | 194 ++++++++++++
+ 7 files changed, 738 insertions(+)
+ create mode 100644 docs/product/unjailed-synology-contract.md
+ create mode 100644 docs/runbooks/agent-version-preparation.md
+ create mode 100644 docs/templates/agent-evidence-report.md
+ create mode 100644 release/upgrade-baseline.json
+ create mode 100644 release/version-preparation.schema.json
+ create mode 100755 tests/releases/version-preparation-contract.sh
+
+diff --git a/AGENTS.md b/AGENTS.md
+index 901c81709..39c527272 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -98,3 +98,17 @@ Agents and automation must not:
+ - publish a stable production release;
+ - approve their own changes;
+ - bypass a failed required validation.
++
++## Agent version preparation
++
++- Start from `release/upgrade-baseline.json` and stop if any protected blob or
++  Synology product-contract value differs.
++- Use the single deep interface documented in
++  `docs/runbooks/agent-version-preparation.md`; require an explicit local
++  upstream tag and full commit SHA.
++- Keep preparation in an isolated worktree and keep each logical downstream
++  change in its original order.
++- Treat `manifest.json`, `SHA256SUMS`, the ordered mail patches and
++  `preparation-report.md` as review inputs, not release approval.
++- Never fetch, push, create a pull request or tag, build either SPK, publish,
++  install on a NAS or mutate NAS networking as part of preparation.
+diff --git a/docs/product/unjailed-synology-contract.md b/docs/product/unjailed-synology-contract.md
+new file mode 100644
+index 000000000..0c757840d
+--- /dev/null
++++ b/docs/product/unjailed-synology-contract.md
+@@ -0,0 +1,44 @@
++# Unjailed Tailscale for Synology DSM
++
++## Product behavior
++
++The unjailed package runs `tailscaled` with the kernel networking behavior that
++Tailscale uses on Linux rather than DSM's historical userspace-only package
++mode. On supported DSM systems it:
++
++- uses `/dev/net/tun` and exposes the `tailscale0` kernel interface;
++- uses the Linux netfilter backend for routing, forwarding and NAT;
++- preserves routing and netfilter preferences accepted by `tailscale up`;
++- supports subnet-routing behavior through the kernel router;
++- requires an administrator-installed root runtime before package startup;
++- verifies the root runtime and repairs required Tailscale netfilter hooks.
++
++Package startup fails closed when TUN, root-runtime or required netfilter
++prerequisites are unavailable. Agent workflows must not run bootstrap or alter
++those prerequisites on a NAS.
++
++## r2 and later package contract
++
++The dependency file is exactly:
++
++```text
++[iptables-netfilter-extensions]
++pkg_min_ver=1.1.0-3
++os_min_ver=7.3-86009
++```
++
++Tailscale package metadata uses `os_min_ver="7.3-86009"`. Production r2 and
++later lineage omits `os_max_ver`; an empty or widened maximum is not a
++substitute for omission.
++
++The dependency declaration is only a declaration. This repository does not
++build, install or publish the `iptables-netfilter-extensions` SPK as part of a
++Tailscale version preparation.
++
++## Preservation boundary
++
++`release/upgrade-baseline.json` records the accepted candidate and the five
++core unjailed source blobs plus the canonical patch/checksum. Version-workflow
++changes validate those seven identities but do not recreate or modify them.
++Any identity difference is a stop condition requiring separate product review.
++
+diff --git a/docs/runbooks/agent-version-preparation.md b/docs/runbooks/agent-version-preparation.md
+new file mode 100644
+index 000000000..6ea05e466
+--- /dev/null
++++ b/docs/runbooks/agent-version-preparation.md
+@@ -0,0 +1,85 @@
++# Agent version preparation
++
++## Purpose
++
++Use `scripts/release/prepare-worktree.sh prepare-version` to replay the current
++ordered Synology logical history onto one explicitly pinned upstream version.
++The command works only with local Git objects, creates an isolated worktree and
++emits review artifacts after validating a mail-patch round trip.
++
++This is preparation, not release or publication.
++
++## Preconditions
++
++1. Start in a clean worktree that descends from the accepted candidate.
++2. Run `bash tests/releases/version-preparation-contract.sh`.
++3. Make the selected upstream tag and commit available locally through a
++   separately reviewed fetch process. The preparation command never fetches.
++4. Identify the exact previous upstream base and previous downstream tip.
++5. Configure working SSH commit signing and the repository-owned hooks.
++6. Select target branch, target worktree and output paths that do not exist.
++
++## Read-only plan
++
++The identities below are examples only:
++
++```text
++bash scripts/release/prepare-worktree.sh prepare-version \
++  --source-repo /path/to/tailscale-source \
++  --upstream-tag v2.0.0 \
++  --upstream-commit 1111111111111111111111111111111111111111 \
++  --previous-upstream-commit 2222222222222222222222222222222222222222 \
++  --previous-release-commit 3333333333333333333333333333333333333333 \
++  --new-version 2.0.0 \
++  --downstream-revision r1 \
++  --target-branch work/v2.0.0-synology-r1 \
++  --target-worktree /path/to/work-v2.0.0-synology-r1 \
++  --output-root /path/to/review/v2.0.0-r1 \
++  --plan-only
++```
++
++Review the peeled tag, old base, ordered source commits, new branch/worktree and
++artifact path. A plan creates no ref, worktree or artifact.
++
++## Confirmed preparation
++
++Repeat the reviewed command with `--confirm-create` instead of `--plan-only`.
++The command:
++
++1. creates the target branch/worktree at the exact new upstream commit;
++2. replays each old logical commit in order;
++3. signs each new commit with exactly one current-identity sign-off;
++4. exports ordered mail patches;
++5. applies them to a temporary detached worktree;
++6. requires the round-trip tree to equal the prepared tree;
++7. atomically installs the review artifact directory.
++
++On a replay conflict, the command aborts the cherry-pick, emits no final
++artifact directory and leaves the isolated worktree for review. Do not edit a
++generated patch. Resolve the logical source adaptation in its worktree, keep
++the commit boundary, then regenerate the complete export.
++
++## Review artifact gate
++
++Require these files:
++
++```text
++manifest.json
++SHA256SUMS
++patches/series
++patches/0001-*.patch
++preparation-report.md
++```
++
++Validate checksums, strict manifest/schema conformance, source and prepared
++identities, ordered commits, signatures, one sign-off per commit, fixed
++Synology package contract and round-trip tree equality. Use `git range-diff` to
++review logical equivalence to the previous stack.
++
++## Handoff boundary
++
++The agent may draft review notes. Creating or updating a pull request requires
++separate authorization. Building either SPK, tagging, releasing, publishing,
++installing on a NAS, running bootstrap, changing firewall/netfilter state and
++rebooting are outside this workflow.
++
+diff --git a/docs/templates/agent-evidence-report.md b/docs/templates/agent-evidence-report.md
+new file mode 100644
+index 000000000..8740dd664
+--- /dev/null
++++ b/docs/templates/agent-evidence-report.md
+@@ -0,0 +1,49 @@
++# Synology version preparation evidence
++
++## Change summary
++
++- Upstream tag and full commit:
++- Previous upstream commit:
++- Previous downstream tip:
++- New version and downstream revision:
++- Prepared branch, commit and tree:
++
++## Ordered logical history
++
++List each source commit beside its prepared commit and subject in replay order.
++
++## Validation evidence
++
++- Baseline/protected-blob contract:
++- Commit signatures and single sign-offs:
++- Focused Go and Synology shell tests:
++- Mail-patch checksum verification:
++- Patch round-trip tree equality:
++- Range-diff review:
++
++## Fixed product contract
++
++- Dependency section: `iptables-netfilter-extensions`
++- Dependency minimum: `1.1.0-3`
++- Dependency DSM minimum: `7.3-86009`
++- Tailscale DSM minimum: `7.3-86009`
++- Production `os_max_ver`: absent
++
++## Risks and reviewer attention
++
++Describe upstream conflicts, deliberately changed logical behavior, deferred
++hardware validation and any unavailable optional validator.
++
++## Prohibited side effects
++
++Confirm that preparation did not fetch, push, create a pull request or tag,
++build either SPK, release, publish, install on a NAS, run root bootstrap, alter
++firewall/netfilter state or reboot DSM.
++
++## Verdict
++
++Use one verdict:
++
++- `PASS — ready for independent source review`
++- `STOP — identity, replay or validation failure`
++- `DEFERRED — outside version-preparation scope`
+diff --git a/release/upgrade-baseline.json b/release/upgrade-baseline.json
+new file mode 100644
+index 000000000..310f6fab4
+--- /dev/null
++++ b/release/upgrade-baseline.json
+@@ -0,0 +1,65 @@
++{
++  "schema_version": 1,
++  "candidate": {
++    "commit": "8c9fe5239ee57a89ce687fc8c7608d3df91f6ede",
++    "tree": "6d171c2a01c0fafb9567f3f4bc49bdd4f7ff7392"
++  },
++  "protected_blobs": [
++    {
++      "path": "cmd/tailscale/cli/up.go",
++      "git_blob": "ace6ac3dbdcc42f18e3dadfacbc65cee1b1df311",
++      "sha256": "5da19848c5a76a2242c300b8accf6ae2100d96589d66869eb374fc12337e31c1"
++    },
++    {
++      "path": "cmd/tailscaled/tailscaled.go",
++      "git_blob": "6f0dcede86551dfb142f5a2a6944de92c1ecd756",
++      "sha256": "684e79377cbbe79dc3d3ad7bc8400f26101d1d958ce78a9a724ab4a3d1571990"
++    },
++    {
++      "path": "ipn/ipnlocal/local.go",
++      "git_blob": "b84205d914f2e47e4cefda1a4a0ce98202cd552f",
++      "sha256": "dbbec62dd501abb1262593e19b70868d3b5ca478d6a9d9e7848d1cfb1256a570"
++    },
++    {
++      "path": "util/linuxfw/iptables_runner.go",
++      "git_blob": "03d9b87a8c0c35d655e60b4456ba136116b6afd2",
++      "sha256": "96d2122b8929433cb0ac987587ebf969406fb3d64067378b2b3975b810aeb137"
++    },
++    {
++      "path": "wgengine/router/osrouter/router_linux.go",
++      "git_blob": "c48749734c5618bfe3973afbb2d00f75b34e0d13",
++      "sha256": "54339503f0d7e5598aa3b507a7c685408bcd84d6580bde69acf19a5e60154da0"
++    },
++    {
++      "path": "patches/v1.98.9/synology-netfilter.patch",
++      "git_blob": "b0a9474448b0f5bac5b24229ffe6827c4eebe897",
++      "sha256": "ad577d4032e3c14fa37b284b7e5116c364122471b1d9fdc2c906bf8ae198920f"
++    },
++    {
++      "path": "patches/v1.98.9/synology-netfilter.patch.sha256",
++      "git_blob": "5b88bba7a6ac4b8cea5d307bee5cdc9769e70ad4",
++      "sha256": "b0a7641e8297c79ea2c40ffddc82632cfbdaf83029b4552e42572b227a2b7fe4"
++    }
++  ],
++  "synology_contract": {
++    "dependency_section": "iptables-netfilter-extensions",
++    "dependency_minimum": "1.1.0-3",
++    "dependency_os_minimum": "7.3-86009",
++    "tailscale_os_minimum": "7.3-86009",
++    "os_max_ver_allowed": false
++  },
++  "safety": {
++    "allow_fetch": false,
++    "allow_push": false,
++    "allow_pull_request": false,
++    "allow_tag": false,
++    "allow_release": false,
++    "allow_publish": false,
++    "allow_spk_build": false,
++    "allow_dependency_spk_build": false,
++    "allow_nas_install": false,
++    "allow_root_bootstrap": false,
++    "allow_firewall_mutation": false,
++    "allow_reboot": false
++  }
++}
+diff --git a/release/version-preparation.schema.json b/release/version-preparation.schema.json
+new file mode 100644
+index 000000000..65106ed11
+--- /dev/null
++++ b/release/version-preparation.schema.json
+@@ -0,0 +1,287 @@
++{
++  "$schema": "https://json-schema.org/draft/2020-12/schema",
++  "$id": "https://a-t-eight.github.io/tailscale-synology-dsm/version-preparation.schema.json",
++  "title": "Tailscale Synology version preparation evidence",
++  "type": "object",
++  "additionalProperties": false,
++  "required": [
++    "schema_version",
++    "source",
++    "upstream",
++    "version",
++    "prepared",
++    "logical_commits",
++    "patches",
++    "synology_contract",
++    "validation",
++    "safety"
++  ],
++  "properties": {
++    "schema_version": {
++      "const": 1
++    },
++    "source": {
++      "type": "object",
++      "additionalProperties": false,
++      "required": [
++        "repository",
++        "previous_upstream_commit",
++        "previous_release_commit"
++      ],
++      "properties": {
++        "repository": {
++          "type": "string",
++          "minLength": 1
++        },
++        "previous_upstream_commit": {
++          "$ref": "#/$defs/gitSha"
++        },
++        "previous_release_commit": {
++          "$ref": "#/$defs/gitSha"
++        }
++      }
++    },
++    "upstream": {
++      "type": "object",
++      "additionalProperties": false,
++      "required": [
++        "tag",
++        "commit"
++      ],
++      "properties": {
++        "tag": {
++          "type": "string",
++          "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"
++        },
++        "commit": {
++          "$ref": "#/$defs/gitSha"
++        }
++      }
++    },
++    "version": {
++      "type": "object",
++      "additionalProperties": false,
++      "required": [
++        "upstream",
++        "downstream_revision"
++      ],
++      "properties": {
++        "upstream": {
++          "type": "string",
++          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"
++        },
++        "downstream_revision": {
++          "type": "string",
++          "pattern": "^r[1-9][0-9]*$"
++        }
++      }
++    },
++    "prepared": {
++      "type": "object",
++      "additionalProperties": false,
++      "required": [
++        "branch",
++        "commit",
++        "tree",
++        "worktree"
++      ],
++      "properties": {
++        "branch": {
++          "type": "string",
++          "pattern": "^work/v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?-synology-r[1-9][0-9]*$"
++        },
++        "commit": {
++          "$ref": "#/$defs/gitSha"
++        },
++        "tree": {
++          "$ref": "#/$defs/gitSha"
++        },
++        "worktree": {
++          "type": "string",
++          "minLength": 1
++        }
++      }
++    },
++    "logical_commits": {
++      "type": "array",
++      "minItems": 1,
++      "items": {
++        "type": "object",
++        "additionalProperties": false,
++        "required": [
++          "order",
++          "source_commit",
++          "prepared_commit",
++          "subject"
++        ],
++        "properties": {
++          "order": {
++            "type": "integer",
++            "minimum": 1
++          },
++          "source_commit": {
++            "$ref": "#/$defs/gitSha"
++          },
++          "prepared_commit": {
++            "$ref": "#/$defs/gitSha"
++          },
++          "subject": {
++            "type": "string",
++            "minLength": 1
++          }
++        }
++      }
++    },
++    "patches": {
++      "type": "array",
++      "minItems": 1,
++      "items": {
++        "type": "object",
++        "additionalProperties": false,
++        "required": [
++          "order",
++          "filename",
++          "sha256"
++        ],
++        "properties": {
++          "order": {
++            "type": "integer",
++            "minimum": 1
++          },
++          "filename": {
++            "type": "string",
++            "pattern": "^[0-9]{4}-.+\\.patch$"
++          },
++          "sha256": {
++            "$ref": "#/$defs/sha256"
++          }
++        }
++      }
++    },
++    "synology_contract": {
++      "type": "object",
++      "additionalProperties": false,
++      "required": [
++        "dependency_section",
++        "dependency_minimum",
++        "dependency_os_minimum",
++        "tailscale_os_minimum",
++        "os_max_ver_allowed"
++      ],
++      "properties": {
++        "dependency_section": {
++          "const": "iptables-netfilter-extensions"
++        },
++        "dependency_minimum": {
++          "const": "1.1.0-3"
++        },
++        "dependency_os_minimum": {
++          "const": "7.3-86009"
++        },
++        "tailscale_os_minimum": {
++          "const": "7.3-86009"
++        },
++        "os_max_ver_allowed": {
++          "const": false
++        }
++      }
++    },
++    "validation": {
++      "type": "object",
++      "additionalProperties": false,
++      "required": [
++        "source_range_linear",
++        "signed_commits",
++        "single_signoff_commits",
++        "patch_round_trip",
++        "round_trip_tree"
++      ],
++      "properties": {
++        "source_range_linear": {
++          "const": true
++        },
++        "signed_commits": {
++          "const": true
++        },
++        "single_signoff_commits": {
++          "const": true
++        },
++        "patch_round_trip": {
++          "const": true
++        },
++        "round_trip_tree": {
++          "$ref": "#/$defs/gitSha"
++        }
++      }
++    },
++    "safety": {
++      "$ref": "#/$defs/safety"
++    }
++  },
++  "$defs": {
++    "gitSha": {
++      "type": "string",
++      "pattern": "^[0-9a-f]{40}$"
++    },
++    "sha256": {
++      "type": "string",
++      "pattern": "^[0-9a-f]{64}$"
++    },
++    "safety": {
++      "type": "object",
++      "additionalProperties": false,
++      "required": [
++        "allow_fetch",
++        "allow_push",
++        "allow_pull_request",
++        "allow_tag",
++        "allow_release",
++        "allow_publish",
++        "allow_spk_build",
++        "allow_dependency_spk_build",
++        "allow_nas_install",
++        "allow_root_bootstrap",
++        "allow_firewall_mutation",
++        "allow_reboot"
++      ],
++      "properties": {
++        "allow_fetch": {
++          "const": false
++        },
++        "allow_push": {
++          "const": false
++        },
++        "allow_pull_request": {
++          "const": false
++        },
++        "allow_tag": {
++          "const": false
++        },
++        "allow_release": {
++          "const": false
++        },
++        "allow_publish": {
++          "const": false
++        },
++        "allow_spk_build": {
++          "const": false
++        },
++        "allow_dependency_spk_build": {
++          "const": false
++        },
++        "allow_nas_install": {
++          "const": false
++        },
++        "allow_root_bootstrap": {
++          "const": false
++        },
++        "allow_firewall_mutation": {
++          "const": false
++        },
++        "allow_reboot": {
++          "const": false
++        }
++      }
++    }
++  }
++}
+diff --git a/tests/releases/version-preparation-contract.sh b/tests/releases/version-preparation-contract.sh
+new file mode 100755
+index 000000000..261bcfaf3
+--- /dev/null
++++ b/tests/releases/version-preparation-contract.sh
+@@ -0,0 +1,194 @@
++#!/usr/bin/env bash
++set -u
++
++REPO_ROOT="$(
++  cd \
++    "$(dirname "${BASH_SOURCE[0]}")/../.." &&
++    pwd
++)"
++BASELINE="${REPO_ROOT}/release/upgrade-baseline.json"
++SCHEMA="${REPO_ROOT}/release/version-preparation.schema.json"
++
++fail() {
++  printf 'FAIL: %s\n' "$1" >&2
++  exit 1
++}
++
++for required_path in "$BASELINE" "$SCHEMA"; do
++  if [ ! -s "$required_path" ]; then
++    fail "required version-preparation contract is unavailable: ${required_path}"
++  fi
++done
++
++python3 - "$REPO_ROOT" "$BASELINE" "$SCHEMA" << 'PY'
++import hashlib
++import json
++import re
++import subprocess
++import sys
++from pathlib import Path
++
++
++def reject_duplicate_members(pairs):
++    result = {}
++    for key, value in pairs:
++        if key in result:
++            raise ValueError(f"duplicate JSON member: {key}")
++        result[key] = value
++    return result
++
++
++def reject_constant(value):
++    raise ValueError(f"non-standard JSON constant: {value}")
++
++
++def load(path):
++    return json.loads(
++        path.read_text(encoding="utf-8"),
++        object_pairs_hook=reject_duplicate_members,
++        parse_constant=reject_constant,
++    )
++
++
++root = Path(sys.argv[1])
++baseline = load(Path(sys.argv[2]))
++schema = load(Path(sys.argv[3]))
++
++expected_top = {
++    "schema_version",
++    "candidate",
++    "protected_blobs",
++    "synology_contract",
++    "safety",
++}
++if set(baseline) != expected_top:
++    raise SystemExit(f"baseline top-level fields differ: {sorted(baseline)}")
++if baseline["schema_version"] != 1:
++    raise SystemExit("baseline schema_version must equal 1")
++
++candidate = baseline["candidate"]
++if candidate != {
++    "commit": "8c9fe5239ee57a89ce687fc8c7608d3df91f6ede",
++    "tree": "6d171c2a01c0fafb9567f3f4bc49bdd4f7ff7392",
++}:
++    raise SystemExit("candidate identity differs from the accepted r2 candidate")
++
++expected_blobs = {
++    "cmd/tailscale/cli/up.go": (
++        "ace6ac3dbdcc42f18e3dadfacbc65cee1b1df311",
++        "5da19848c5a76a2242c300b8accf6ae2100d96589d66869eb374fc12337e31c1",
++    ),
++    "cmd/tailscaled/tailscaled.go": (
++        "6f0dcede86551dfb142f5a2a6944de92c1ecd756",
++        "684e79377cbbe79dc3d3ad7bc8400f26101d1d958ce78a9a724ab4a3d1571990",
++    ),
++    "ipn/ipnlocal/local.go": (
++        "b84205d914f2e47e4cefda1a4a0ce98202cd552f",
++        "dbbec62dd501abb1262593e19b70868d3b5ca478d6a9d9e7848d1cfb1256a570",
++    ),
++    "util/linuxfw/iptables_runner.go": (
++        "03d9b87a8c0c35d655e60b4456ba136116b6afd2",
++        "96d2122b8929433cb0ac987587ebf969406fb3d64067378b2b3975b810aeb137",
++    ),
++    "wgengine/router/osrouter/router_linux.go": (
++        "c48749734c5618bfe3973afbb2d00f75b34e0d13",
++        "54339503f0d7e5598aa3b507a7c685408bcd84d6580bde69acf19a5e60154da0",
++    ),
++    "patches/v1.98.9/synology-netfilter.patch": (
++        "b0a9474448b0f5bac5b24229ffe6827c4eebe897",
++        "ad577d4032e3c14fa37b284b7e5116c364122471b1d9fdc2c906bf8ae198920f",
++    ),
++    "patches/v1.98.9/synology-netfilter.patch.sha256": (
++        "5b88bba7a6ac4b8cea5d307bee5cdc9769e70ad4",
++        "b0a7641e8297c79ea2c40ffddc82632cfbdaf83029b4552e42572b227a2b7fe4",
++    ),
++}
++
++observed_entries = baseline["protected_blobs"]
++if len(observed_entries) != 7:
++    raise SystemExit("baseline must enumerate exactly seven protected blobs")
++observed = {}
++for entry in observed_entries:
++    if set(entry) != {"path", "git_blob", "sha256"}:
++        raise SystemExit(f"protected blob entry has unknown fields: {entry}")
++    path = entry["path"]
++    if path in observed:
++        raise SystemExit(f"duplicate protected path: {path}")
++    observed[path] = (entry["git_blob"], entry["sha256"])
++if observed != expected_blobs:
++    raise SystemExit("protected blob manifest differs from the accepted candidate")
++
++for relative, (expected_git, expected_sha) in expected_blobs.items():
++    path = root / relative
++    if not path.is_file():
++        raise SystemExit(f"protected file is missing: {relative}")
++    actual_git = subprocess.check_output(
++        ["git", "-C", str(root), "hash-object", relative], text=True
++    ).strip()
++    actual_sha = hashlib.sha256(path.read_bytes()).hexdigest()
++    if actual_git != expected_git or actual_sha != expected_sha:
++        raise SystemExit(f"protected file identity differs: {relative}")
++
++contract = baseline["synology_contract"]
++expected_contract = {
++    "dependency_section": "iptables-netfilter-extensions",
++    "dependency_minimum": "1.1.0-3",
++    "dependency_os_minimum": "7.3-86009",
++    "tailscale_os_minimum": "7.3-86009",
++    "os_max_ver_allowed": False,
++}
++if contract != expected_contract:
++    raise SystemExit("Synology product contract differs from the r2/new lineage")
++
++pkg_deps = (root / "release/dist/synology/files/PKG_DEPS").read_bytes()
++expected_pkg_deps = (
++    b"[iptables-netfilter-extensions]\n"
++    b"pkg_min_ver=1.1.0-3\n"
++    b"os_min_ver=7.3-86009\n"
++)
++if pkg_deps != expected_pkg_deps:
++    raise SystemExit("PKG_DEPS bytes differ from the r2/new-lineage contract")
++
++expected_safety = {
++    "allow_fetch": False,
++    "allow_push": False,
++    "allow_pull_request": False,
++    "allow_tag": False,
++    "allow_release": False,
++    "allow_publish": False,
++    "allow_spk_build": False,
++    "allow_dependency_spk_build": False,
++    "allow_nas_install": False,
++    "allow_root_bootstrap": False,
++    "allow_firewall_mutation": False,
++    "allow_reboot": False,
++}
++if baseline["safety"] != expected_safety:
++    raise SystemExit("baseline safety capabilities must all be present and false")
++
++if schema.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
++    raise SystemExit("version-preparation schema must use JSON Schema 2020-12")
++if schema.get("$id") != "https://a-t-eight.github.io/tailscale-synology-dsm/version-preparation.schema.json":
++    raise SystemExit("version-preparation schema ID differs")
++if schema.get("type") != "object" or schema.get("additionalProperties") is not False:
++    raise SystemExit("version-preparation schema root must reject unknown members")
++required = set(schema.get("required", []))
++expected_required = {
++    "schema_version",
++    "source",
++    "upstream",
++    "version",
++    "prepared",
++    "logical_commits",
++    "patches",
++    "synology_contract",
++    "validation",
++    "safety",
++}
++if required != expected_required:
++    raise SystemExit("version-preparation schema required fields differ")
++if not re.fullmatch(r"[0-9a-f]{40}", candidate["commit"]):
++    raise SystemExit("candidate commit is not a full lowercase SHA")
++
++print("PASS: version-preparation baseline, protected blobs, schema, and safety contract are valid.")
++PY

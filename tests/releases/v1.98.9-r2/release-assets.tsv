@@ -1,0 +1,3 @@
+role	filename	sha256	retention
+production-sideload	tailscale-x86_64-1.98.96-700098097-dsm7.spk	f947a1747521c50edf49baf597cc18b512b3bb009c3b7afe963fa326ef2d6c16	external-build-evidence
+package-center-reference	tailscale-x86_64-1.98.96-720098097-dsm7-2.spk	d51dd54def1015bee1c6011a4be7aa6d9b5c9d19b440292276347f861c7d071e	external-build-evidence

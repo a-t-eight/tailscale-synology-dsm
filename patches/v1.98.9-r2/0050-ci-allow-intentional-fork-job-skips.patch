@@ -1,0 +1,104 @@
+From 9a5f884862fe307e98a450857982170dede7fb5c Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Mon, 24 Aug 2026 18:23:16 +1000
+Subject: [PATCH 50/58] ci: allow intentional fork job skips
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ .github/workflows/test.yml                    |  2 +
+ .../github-actions-fork-portability.sh        | 45 +++++++++++++++++++
+ 2 files changed, 47 insertions(+)
+
+diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
+index e9eea1fe3..bd41c880e 100644
+--- a/.github/workflows/test.yml
++++ b/.github/workflows/test.yml
+@@ -965,6 +965,7 @@ jobs:
+       uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # v1.2.2
+       with:
+         jobs: ${{ toJSON(needs) }}
++        allowed-skips: ${{ github.repository != 'tailscale/tailscale' && 'vm, fuzz' || '' }}
+ 
+    # This waits on all the jobs which must never fail. Branch protection rules
+    # enforce these. No flaky tests are allowed in these jobs. (We don't want flaky
+@@ -1009,3 +1010,4 @@ jobs:
+       uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # v1.2.2
+       with:
+         jobs: ${{ toJSON(needs) }}
++        allowed-skips: ${{ github.repository != 'tailscale/tailscale' && 'vm, fuzz' || '' }}
+diff --git a/tests/releases/github-actions-fork-portability.sh b/tests/releases/github-actions-fork-portability.sh
+index 5e1f56501..c753502e4 100755
+--- a/tests/releases/github-actions-fork-portability.sh
++++ b/tests/releases/github-actions-fork-portability.sh
+@@ -35,12 +35,30 @@ def runs_on(job: str) -> list[str]:
+     return re.findall(r"(?m)^    runs-on:\s*(.*?)\s*$", job)
+ 
+ 
++def alls_green_allowed_skips(job: str) -> list[str]:
++    with_blocks = re.findall(
++        r"(?m)^      uses: re-actors/alls-green@[^\n]+\n"
++        r"      with:\n"
++        r"((?:        [^\n]+\n?)*)",
++        job,
++    )
++    if len(with_blocks) != 1:
++        return []
++    return re.findall(
++        r"(?m)^        allowed-skips:\s*(.*?)\s*$",
++        with_blocks[0],
++    )
++
++
+ vet_workflow = Path(sys.argv[1]).read_text(encoding="utf-8")
+ test_workflow = Path(sys.argv[2]).read_text(encoding="utf-8")
+ 
+ vet = job_block(vet_workflow, "vet")
+ windows = job_block(test_workflow, "windows")
+ fuzz = job_block(test_workflow, "fuzz")
++merge_blocker = job_block(test_workflow, "merge_blocker")
++check_mergeability_strict = job_block(test_workflow, "check_mergeability_strict")
++check_mergeability = job_block(test_workflow, "check_mergeability")
+ 
+ failures: list[str] = []
+ 
+@@ -69,6 +87,28 @@ if fuzz_conditions != [fuzz_condition]:
+         f"(observed if: {fuzz_conditions!r})"
+     )
+ 
++allowed_skips = (
++    "${{ github.repository != 'tailscale/tailscale' && "
++    "'vm, fuzz' || '' }}"
++)
++for job_name, job in (
++    ("merge_blocker", merge_blocker),
++    ("check_mergeability", check_mergeability),
++):
++    observed = alls_green_allowed_skips(job)
++    if observed != [allowed_skips]:
++        failures.append(
++            f"{job_name} must allow only skipped vm and fuzz jobs in downstream "
++            f"forks (observed allowed-skips: {observed!r})"
++        )
++
++strict_allowed_skips = alls_green_allowed_skips(check_mergeability_strict)
++if strict_allowed_skips:
++    failures.append(
++        "check_mergeability_strict must not allow skipped jobs "
++        f"(observed allowed-skips: {strict_allowed_skips!r})"
++    )
++
+ for failure in failures:
+     print(f"FAIL: {failure}", file=sys.stderr)
+ 
+@@ -78,6 +118,11 @@ if failures:
+ 
+ print("PASS: GitHub Actions jobs use fork-portable runners and fuzz ownership.")
+ PY
++PYTHON_RC=$?
++
++if [ "$PYTHON_RC" -ne 0 ]; then
++  exit "$PYTHON_RC"
++fi
+ 
+ PKG_DEPS_PATH="release/dist/synology/files/PKG_DEPS"
+ ATTRIBUTES="$(

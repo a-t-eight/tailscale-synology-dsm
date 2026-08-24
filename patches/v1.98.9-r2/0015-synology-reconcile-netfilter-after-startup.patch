@@ -1,0 +1,545 @@
+From d5df025c176d08929d35380c6d253069498ea0a0 Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Mon, 24 Aug 2026 18:23:05 +1000
+Subject: [PATCH 15/58] synology: reconcile netfilter after startup
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ .../synology/files/scripts/start-stop-status  | 368 +++++++++++++++++-
+ .../tests/start-stop-definitions-test.sh      | 108 +++++
+ tool/build-synology-root-bootstrap.sh         |   2 +-
+ 3 files changed, 476 insertions(+), 2 deletions(-)
+ create mode 100755 release/dist/synology/tests/start-stop-definitions-test.sh
+
+diff --git a/release/dist/synology/files/scripts/start-stop-status b/release/dist/synology/files/scripts/start-stop-status
+index 769a378f6..a049217f1 100755
+--- a/release/dist/synology/files/scripts/start-stop-status
++++ b/release/dist/synology/files/scripts/start-stop-status
+@@ -9,6 +9,11 @@ export PATH="${SYNOPKG_PKGDEST}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/us
+ # Route subnet traffic through the Linux kernel rather than netstack.
+ export TS_DEBUG_NETSTACK_SUBNETS=false
+ 
++# DSM 7.3 on this package is validated against the legacy iptables backend.
++# Keep backend selection deterministic so the startup reconciler and the
++# Synology-specific daemon self-healing path operate on the same firewall.
++export TS_DEBUG_FIREWALL_MODE=iptables
++
+ if [ "${SYNOPKG_DSM_VERSION_MAJOR}" -eq "6" ]; then
+     PKGVAR="/var/packages/Tailscale/etc"
+ else
+@@ -29,6 +34,18 @@ STATE_FILE="${PKGVAR}/tailscaled.state"
+ SOCKET_FILE="${PKGVAR}/tailscaled.sock"
+ PORT="41641"
+ 
++TAILSCALE_BIN="${SYNOPKG_PKGDEST}/bin/tailscale"
++
++NETFILTER_LOCALAPI_ATTEMPTS="${TAILSCALE_SYNOLOGY_LOCALAPI_ATTEMPTS:-30}"
++
++NETFILTER_BACKEND_ATTEMPTS="${TAILSCALE_SYNOLOGY_BACKEND_ATTEMPTS:-45}"
++
++NETFILTER_REPAIR_ATTEMPTS="${TAILSCALE_SYNOLOGY_NETFILTER_REPAIR_ATTEMPTS:-15}"
++
++NETFILTER_SETTLE_SECONDS="${TAILSCALE_SYNOLOGY_NETFILTER_SETTLE_SECONDS:-8}"
++
++NETFILTER_POST_REPAIR_SETTLE_SECONDS="${TAILSCALE_SYNOLOGY_NETFILTER_POST_REPAIR_SETTLE_SECONDS:-3}"
++
+ SERVICE_COMMAND="${SYNOPKG_PKGDEST}/bin/tailscaled \
+ --state=${STATE_FILE} \
+ --socket=${SOCKET_FILE} \
+@@ -638,6 +655,338 @@ ensure_tun_created() {
+     fi
+ }
+ 
++set_sysctl_value() {
++    local key="$1"
++    local value="$2"
++    local output
++    local status
++
++    output="$(
++        sysctl \
++            -w \
++            "${key}=${value}" \
++            2>&1
++    )"
++
++    status=$?
++
++    if [ "${status}" -ne 0 ]; then
++        log_message ERROR \
++            "cannot set ${key}=${value}: ${output}"
++        return 1
++    fi
++
++    log_message INFO \
++        "applied ${output}"
++
++    return 0
++}
++
++
++apply_routing_sysctls() {
++    set_sysctl_value \
++        net.ipv4.ip_forward \
++        1 ||
++        return 1
++
++    if [ -e /proc/sys/net/ipv6/conf/all/forwarding ]; then
++        set_sysctl_value \
++            net.ipv6.conf.all.forwarding \
++            1 ||
++            return 1
++    fi
++
++    if [ -e /proc/sys/net/ipv4/conf/all/src_valid_mark ]; then
++        set_sysctl_value \
++            net.ipv4.conf.all.src_valid_mark \
++            1 ||
++            return 1
++    fi
++
++    return 0
++}
++
++
++wait_for_localapi() {
++    local counter="${NETFILTER_LOCALAPI_ATTEMPTS}"
++
++    while [ "${counter}" -gt 0 ]; do
++        if "${TAILSCALE_BIN}" \
++            --socket="${SOCKET_FILE}" \
++            debug prefs \
++            >/dev/null 2>&1
++        then
++            return 0
++        fi
++
++        if ! daemon_status; then
++            log_message ERROR \
++                "tailscaled exited while waiting for LocalAPI"
++            return 1
++        fi
++
++        counter=$((counter - 1))
++        sleep 1
++    done
++
++    log_message ERROR \
++        "Tailscale LocalAPI did not become ready after ${NETFILTER_LOCALAPI_ATTEMPTS} seconds"
++
++    return 1
++}
++
++
++prefs_require_netfilter_reconciliation() {
++    local output
++
++    output="$(
++        "${TAILSCALE_BIN}" \
++            --socket="${SOCKET_FILE}" \
++            debug prefs \
++            2>/dev/null
++    )" || return 1
++
++    printf '%s\n' "${output}" |
++        grep -Eq \
++            '"WantRunning"[[:space:]]*:[[:space:]]*true' ||
++        return 1
++
++    printf '%s\n' "${output}" |
++        grep -Eq \
++            '"NetfilterMode"[[:space:]]*:[[:space:]]*2' ||
++        return 1
++
++    return 0
++}
++
++
++wait_for_backend_running() {
++    local counter="${NETFILTER_BACKEND_ATTEMPTS}"
++    local output
++    local status
++
++    while [ "${counter}" -gt 0 ]; do
++        output="$(
++            "${TAILSCALE_BIN}" \
++                --socket="${SOCKET_FILE}" \
++                status \
++                --json \
++                2>/dev/null
++        )"
++
++        status=$?
++
++        if [ "${status}" -eq 0 ]; then
++            if printf '%s\n' "${output}" |
++                grep -Eq \
++                    '"BackendState"[[:space:]]*:[[:space:]]*"Running"'
++            then
++                return 0
++            fi
++
++            if printf '%s\n' "${output}" |
++                grep -Eq \
++                    '"BackendState"[[:space:]]*:[[:space:]]*"(NeedsLogin|Stopped)"'
++            then
++                return 2
++            fi
++        fi
++
++        if ! daemon_status; then
++            log_message ERROR \
++                "tailscaled exited while waiting for the backend"
++            return 1
++        fi
++
++        counter=$((counter - 1))
++        sleep 1
++    done
++
++    return 2
++}
++
++
++netfilter_hooks_complete() {
++    local iptables_bin="${IPTABLES_BIN:-}"
++    local ip6tables_bin
++
++    if [ -z "${iptables_bin}" ]; then
++        iptables_bin="$(
++            command -v iptables 2>/dev/null
++        )" || return 1
++    fi
++
++    "${iptables_bin}" \
++        -t filter \
++        -C INPUT \
++        -j ts-input \
++        >/dev/null 2>&1 ||
++        return 1
++
++    "${iptables_bin}" \
++        -t filter \
++        -C FORWARD \
++        -j ts-forward \
++        >/dev/null 2>&1 ||
++        return 1
++
++    "${iptables_bin}" \
++        -t nat \
++        -C POSTROUTING \
++        -j ts-postrouting \
++        >/dev/null 2>&1 ||
++        return 1
++
++    ip6tables_bin="$(
++        command -v ip6tables 2>/dev/null
++    )" || ip6tables_bin=""
++
++    if [ -n "${ip6tables_bin}" ] &&
++        "${ip6tables_bin}" \
++            -t filter \
++            -S \
++            >/dev/null 2>&1
++    then
++        "${ip6tables_bin}" \
++            -t filter \
++            -C INPUT \
++            -j ts-input \
++            >/dev/null 2>&1 ||
++            return 1
++
++        "${ip6tables_bin}" \
++            -t filter \
++            -C FORWARD \
++            -j ts-forward \
++            >/dev/null 2>&1 ||
++            return 1
++    fi
++
++    return 0
++}
++
++
++reconcile_netfilter_after_start() {
++    local output
++    local status
++    local counter
++
++    if ! wait_for_localapi; then
++        return 1
++    fi
++
++    if ! prefs_require_netfilter_reconciliation; then
++        log_message INFO             "netfilter reconciliation is not required by the current Tailscale preferences"
++        return 0
++    fi
++
++    wait_for_backend_running
++    status=$?
++
++    case "${status}" in
++    0)
++        ;;
++    1)
++        return 1
++        ;;
++    2)
++        log_message NOTICE             "Tailscale backend did not reach Running state; deferring netfilter validation to daemon self-healing"
++        return 0
++        ;;
++    *)
++        log_message ERROR             "unexpected backend readiness status: ${status}"
++        return 1
++        ;;
++    esac
++
++    # DSM performs delayed firewall processing after package startup.
++    # Do not validate the transient state observed immediately after the
++    # daemon creates its chains.
++    sleep "${NETFILTER_SETTLE_SECONDS}"
++
++    if netfilter_hooks_complete; then
++        log_message INFO \
++            "Tailscale netfilter hooks are complete after startup"
++        return 0
++    fi
++
++    log_message NOTICE \
++        "Tailscale netfilter hooks are incomplete after DSM startup processing; rebuilding"
++
++    output="$(
++        "${TAILSCALE_BIN}" \
++            --socket="${SOCKET_FILE}" \
++            set \
++            --netfilter-mode=off \
++            2>&1
++    )"
++
++    status=$?
++
++    if [ "${status}" -ne 0 ]; then
++        log_message ERROR \
++            "cannot disable netfilter for reconciliation: ${output}"
++        return 1
++    fi
++
++    if [ -n "${output}" ]; then
++        log_message NOTICE \
++            "netfilter disable output: ${output}"
++    fi
++
++    sleep 1
++
++    output="$(
++        "${TAILSCALE_BIN}" \
++            --socket="${SOCKET_FILE}" \
++            set \
++            --netfilter-mode=on \
++            2>&1
++    )"
++
++    status=$?
++
++    if [ "${status}" -ne 0 ]; then
++        log_message ERROR \
++            "cannot re-enable netfilter during reconciliation: ${output}"
++        return 1
++    fi
++
++    if [ -n "${output}" ]; then
++        log_message INFO \
++            "netfilter enable output: ${output}"
++    fi
++
++    counter="${NETFILTER_REPAIR_ATTEMPTS}"
++
++    while [ "${counter}" -gt 0 ]; do
++        if netfilter_hooks_complete; then
++            # Verify that DSM does not immediately remove the reconstructed
++            # hooks again.
++            sleep "${NETFILTER_POST_REPAIR_SETTLE_SECONDS}"
++
++            if netfilter_hooks_complete; then
++                log_message INFO \
++                    "Tailscale netfilter reconciliation completed successfully"
++                return 0
++            fi
++
++            log_message ERROR \
++                "DSM removed the reconstructed Tailscale hooks during the post-repair settle period"
++            return 1
++        fi
++
++        counter=$((counter - 1))
++        sleep 1
++    done
++
++    log_message ERROR \
++        "Tailscale netfilter hooks remain incomplete after reconciliation"
++
++    return 1
++}
++
++
+ case $1 in
+ start)
+     if daemon_status; then
+@@ -658,12 +1007,29 @@ start)
+             exit 1
+         fi
+ 
++        if ! apply_routing_sysctls; then
++            exit 1
++        fi
++
+         if ! check_netfilter_prerequisites; then
+             exit 1
+         fi
+ 
+         start_daemon
+-        exit $?
++
++        if ! wait_for_status 0; then
++            log_message ERROR                 "tailscaled did not remain running after startup"
++            stop_daemon
++            exit 1
++        fi
++
++        if ! reconcile_netfilter_after_start; then
++            log_message ERROR                 "post-start netfilter reconciliation failed"
++            stop_daemon
++            exit 1
++        fi
++
++        exit 0
+     fi
+     ;;
+ stop)
+diff --git a/release/dist/synology/tests/start-stop-definitions-test.sh b/release/dist/synology/tests/start-stop-definitions-test.sh
+new file mode 100755
+index 000000000..28ed10a74
+--- /dev/null
++++ b/release/dist/synology/tests/start-stop-definitions-test.sh
+@@ -0,0 +1,108 @@
++#!/bin/bash
++
++set -euo pipefail
++
++SCRIPT_DIR="$(
++    cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &&
++        pwd
++)"
++
++REPO_ROOT="$(
++    cd -- "${SCRIPT_DIR}/../../../.." &&
++        pwd
++)"
++
++START_STOP_SOURCE="${REPO_ROOT}/release/dist/synology/files/scripts/start-stop-status"
++
++TEST_ROOT="$(
++    mktemp -d
++)"
++
++cleanup() {
++    rm -rf -- "${TEST_ROOT}"
++}
++
++trap cleanup EXIT
++
++DEFINITIONS="${TEST_ROOT}/start-stop-definitions.sh"
++STDOUT_FILE="${TEST_ROOT}/stdout"
++STDERR_FILE="${TEST_ROOT}/stderr"
++
++mkdir -p \
++    "${TEST_ROOT}/pkgvar" \
++    "${TEST_ROOT}/pkgdest/bin"
++
++awk '
++    /^case \$1 in/ {
++        exit
++    }
++
++    {
++        print
++    }
++' "${START_STOP_SOURCE}" >"${DEFINITIONS}"
++
++set +e
++
++env \
++    SYNOPKG_DSM_VERSION_MAJOR=7 \
++    SYNOPKG_PKGVAR="${TEST_ROOT}/pkgvar" \
++    SYNOPKG_PKGDEST="${TEST_ROOT}/pkgdest" \
++    SYNOPKG_PKGNAME=Tailscale \
++    bash -u -c '
++        source "$1"
++
++        printf "%s\n" \
++            "$NETFILTER_LOCALAPI_ATTEMPTS" \
++            "$NETFILTER_BACKEND_ATTEMPTS" \
++            "$NETFILTER_REPAIR_ATTEMPTS" \
++            "$NETFILTER_SETTLE_SECONDS" \
++            "$NETFILTER_POST_REPAIR_SETTLE_SECONDS"
++    ' bash "${DEFINITIONS}" \
++    >"${STDOUT_FILE}" \
++    2>"${STDERR_FILE}"
++
++STATUS=$?
++
++set -e
++
++if [ "${STATUS}" -ne 0 ]; then
++    printf 'ERROR: loading start-stop definitions failed with status %s\n' \
++        "${STATUS}" >&2
++
++    sed -n '1,200p' "${STDERR_FILE}" >&2
++    exit 1
++fi
++
++if [ -s "${STDERR_FILE}" ]; then
++    printf 'ERROR: loading start-stop definitions produced stderr:\n' >&2
++    sed -n '1,200p' "${STDERR_FILE}" >&2
++    exit 1
++fi
++
++EXPECTED="${TEST_ROOT}/expected"
++
++printf '%s\n' \
++    30 \
++    45 \
++    15 \
++    8 \
++    3 \
++    >"${EXPECTED}"
++
++if ! cmp -s \
++    "${EXPECTED}" \
++    "${STDOUT_FILE}"
++then
++    printf 'ERROR: unexpected reconciliation defaults\n' >&2
++
++    printf 'Expected:\n' >&2
++    sed -n '1,20p' "${EXPECTED}" >&2
++
++    printf 'Actual:\n' >&2
++    sed -n '1,20p' "${STDOUT_FILE}" >&2
++
++    exit 1
++fi
++
++printf 'TEST: start-stop definitions load cleanly ... PASS\n'
+diff --git a/tool/build-synology-root-bootstrap.sh b/tool/build-synology-root-bootstrap.sh
+index b9871ad78..077ebaa1b 100755
+--- a/tool/build-synology-root-bootstrap.sh
++++ b/tool/build-synology-root-bootstrap.sh
+@@ -2,7 +2,7 @@
+ set -euo pipefail
+ 
+ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+-VERSION_OVERRIDE="${TS_VERSION_OVERRIDE:-1.98.91}"
++VERSION_OVERRIDE="${TS_VERSION_OVERRIDE:-1.98.93}"
+ OUT_ROOT="${1:-${REPO_ROOT}/build/synology/v1.98.9-final}"
+ 
+ SIDELOAD_OUT="${OUT_ROOT}/sideload"

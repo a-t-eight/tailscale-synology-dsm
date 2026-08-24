@@ -1,0 +1,154 @@
+From 0e6356677bf23426d46fb0c03892b3ff74783609 Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Mon, 24 Aug 2026 18:23:17 +1000
+Subject: [PATCH 54/58] fix: correct Synology dependency minimum
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ docs/product/unjailed-synology-contract.md     | 2 +-
+ docs/templates/agent-evidence-report.md        | 2 +-
+ release/dist/synology/files/PKG_DEPS           | 2 +-
+ release/dist/synology/pkgs_test.go             | 2 +-
+ release/upgrade-baseline.json                  | 2 +-
+ release/version-preparation.schema.json        | 2 +-
+ scripts/release/prepare-worktree.sh            | 2 +-
+ tests/releases/prepare-version-workflow.sh     | 2 +-
+ tests/releases/version-preparation-contract.sh | 4 ++--
+ tool/build-synology-root-bootstrap.sh          | 2 +-
+ 10 files changed, 11 insertions(+), 11 deletions(-)
+
+diff --git a/docs/product/unjailed-synology-contract.md b/docs/product/unjailed-synology-contract.md
+index 28f7e6c29..e20b4eeb7 100644
+--- a/docs/product/unjailed-synology-contract.md
++++ b/docs/product/unjailed-synology-contract.md
+@@ -23,7 +23,7 @@ The dependency file is exactly:
+ 
+ ```text
+ [iptables-netfilter-extensions]
+-pkg_min_ver=1.1.0-3
++pkg_min_ver=1.1.0-2
+ os_min_ver=7.3-86009
+ ```
+ 
+diff --git a/docs/templates/agent-evidence-report.md b/docs/templates/agent-evidence-report.md
+index 8740dd664..7f4e1c2eb 100644
+--- a/docs/templates/agent-evidence-report.md
++++ b/docs/templates/agent-evidence-report.md
+@@ -24,7 +24,7 @@ List each source commit beside its prepared commit and subject in replay order.
+ ## Fixed product contract
+ 
+ - Dependency section: `iptables-netfilter-extensions`
+-- Dependency minimum: `1.1.0-3`
++- Dependency minimum: `1.1.0-2`
+ - Dependency DSM minimum: `7.3-86009`
+ - Tailscale DSM minimum: `7.3-86009`
+ - Production `os_max_ver`: absent
+diff --git a/release/dist/synology/files/PKG_DEPS b/release/dist/synology/files/PKG_DEPS
+index 9ac9b42db..7dea3d2ac 100644
+--- a/release/dist/synology/files/PKG_DEPS
++++ b/release/dist/synology/files/PKG_DEPS
+@@ -1,3 +1,3 @@
+ [iptables-netfilter-extensions]
+-pkg_min_ver=1.1.0-3
++pkg_min_ver=1.1.0-2
+ os_min_ver=7.3-86009
+diff --git a/release/dist/synology/pkgs_test.go b/release/dist/synology/pkgs_test.go
+index 317b6b356..888eee35e 100644
+--- a/release/dist/synology/pkgs_test.go
++++ b/release/dist/synology/pkgs_test.go
+@@ -153,7 +153,7 @@ func TestR2PKGDeps(t *testing.T) {
+ 		t.Fatal(err)
+ 	}
+ 	want := "[iptables-netfilter-extensions]\n" +
+-		"pkg_min_ver=1.1.0-3\n" +
++		"pkg_min_ver=1.1.0-2\n" +
+ 		"os_min_ver=7.3-86009\n"
+ 	if string(got) != want {
+ 		t.Fatalf("PKG_DEPS mismatch\n got: %q\nwant: %q", got, want)
+diff --git a/release/upgrade-baseline.json b/release/upgrade-baseline.json
+index 310f6fab4..aaf3c4e7b 100644
+--- a/release/upgrade-baseline.json
++++ b/release/upgrade-baseline.json
+@@ -43,7 +43,7 @@
+   ],
+   "synology_contract": {
+     "dependency_section": "iptables-netfilter-extensions",
+-    "dependency_minimum": "1.1.0-3",
++    "dependency_minimum": "1.1.0-2",
+     "dependency_os_minimum": "7.3-86009",
+     "tailscale_os_minimum": "7.3-86009",
+     "os_max_ver_allowed": false
+diff --git a/release/version-preparation.schema.json b/release/version-preparation.schema.json
+index 65106ed11..dd1125954 100644
+--- a/release/version-preparation.schema.json
++++ b/release/version-preparation.schema.json
+@@ -173,7 +173,7 @@
+           "const": "iptables-netfilter-extensions"
+         },
+         "dependency_minimum": {
+-          "const": "1.1.0-3"
++          "const": "1.1.0-2"
+         },
+         "dependency_os_minimum": {
+           "const": "7.3-86009"
+diff --git a/scripts/release/prepare-worktree.sh b/scripts/release/prepare-worktree.sh
+index e372a086c..88fc3b9c5 100755
+--- a/scripts/release/prepare-worktree.sh
++++ b/scripts/release/prepare-worktree.sh
+@@ -785,7 +785,7 @@ lines.extend(
+         "## Fixed product contract",
+         "",
+         "- Dependency: `iptables-netfilter-extensions`",
+-        "- Dependency minimum: `1.1.0-3`",
++        "- Dependency minimum: `1.1.0-2`",
+         "- Dependency and Tailscale DSM minimum: `7.3-86009`",
+         "- Production `os_max_ver`: absent",
+         "",
+diff --git a/tests/releases/prepare-version-workflow.sh b/tests/releases/prepare-version-workflow.sh
+index 4dc5a478f..8e5a5828e 100755
+--- a/tests/releases/prepare-version-workflow.sh
++++ b/tests/releases/prepare-version-workflow.sh
+@@ -332,7 +332,7 @@ if [item["order"] for item in manifest["patches"]] != [1, 2]:
+     raise SystemExit("manifest patch order differs")
+ if manifest["synology_contract"] != {
+     "dependency_section": "iptables-netfilter-extensions",
+-    "dependency_minimum": "1.1.0-3",
++    "dependency_minimum": "1.1.0-2",
+     "dependency_os_minimum": "7.3-86009",
+     "tailscale_os_minimum": "7.3-86009",
+     "os_max_ver_allowed": False,
+diff --git a/tests/releases/version-preparation-contract.sh b/tests/releases/version-preparation-contract.sh
+index 261bcfaf3..8207f6934 100755
+--- a/tests/releases/version-preparation-contract.sh
++++ b/tests/releases/version-preparation-contract.sh
+@@ -132,7 +132,7 @@ for relative, (expected_git, expected_sha) in expected_blobs.items():
+ contract = baseline["synology_contract"]
+ expected_contract = {
+     "dependency_section": "iptables-netfilter-extensions",
+-    "dependency_minimum": "1.1.0-3",
++    "dependency_minimum": "1.1.0-2",
+     "dependency_os_minimum": "7.3-86009",
+     "tailscale_os_minimum": "7.3-86009",
+     "os_max_ver_allowed": False,
+@@ -143,7 +143,7 @@ if contract != expected_contract:
+ pkg_deps = (root / "release/dist/synology/files/PKG_DEPS").read_bytes()
+ expected_pkg_deps = (
+     b"[iptables-netfilter-extensions]\n"
+-    b"pkg_min_ver=1.1.0-3\n"
++    b"pkg_min_ver=1.1.0-2\n"
+     b"os_min_ver=7.3-86009\n"
+ )
+ if pkg_deps != expected_pkg_deps:
+diff --git a/tool/build-synology-root-bootstrap.sh b/tool/build-synology-root-bootstrap.sh
+index 084b91a15..dd5f20aaa 100755
+--- a/tool/build-synology-root-bootstrap.sh
++++ b/tool/build-synology-root-bootstrap.sh
+@@ -352,7 +352,7 @@ python3 - \
+ import sys
+ from pathlib import Path
+ 
+-expected = b"[iptables-netfilter-extensions]\npkg_min_ver=1.1.0-3\nos_min_ver=7.3-86009\n"
++expected = b"[iptables-netfilter-extensions]\npkg_min_ver=1.1.0-2\nos_min_ver=7.3-86009\n"
+ 
+ for label, value in zip(
+     ("sideload", "Package Center"),

@@ -1,0 +1,139 @@
+From 4a638f8f341e2f07ded70bb3a45db66533462d9b Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Mon, 24 Aug 2026 18:23:16 +1000
+Subject: [PATCH 48/58] ci: use fork-portable GitHub Actions
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ .github/workflows/test.yml                    |  9 +--
+ .github/workflows/vet.yml                     |  2 +-
+ .../github-actions-fork-portability.sh        | 80 +++++++++++++++++++
+ 3 files changed, 85 insertions(+), 6 deletions(-)
+ create mode 100755 tests/releases/github-actions-fork-portability.sh
+
+diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
+index ded7873aa..e9eea1fe3 100644
+--- a/.github/workflows/test.yml
++++ b/.github/workflows/test.yml
+@@ -222,10 +222,8 @@ jobs:
+     permissions:
+       id-token: write # This is required for requesting the GitHub action identity JWT that can auth to cigocached
+       contents: read # This is required for actions/checkout
+-    # ci-windows-github-1 is a 2022 GitHub-managed runner in our org with 8 cores
+-    # and 32 GB of RAM. It is connected to a private Azure VNet that hosts cigocached.
+-    # https://github.com/organizations/tailscale/settings/actions/github-hosted-runners/5
+-    runs-on: ci-windows-github-1
++    # Use a standard GitHub-hosted runner; the private Go cache is optional.
++    runs-on: windows-2022
+     needs: gomod-cache
+     name: Windows (${{ matrix.name || matrix.shard}})
+     strategy:
+@@ -688,7 +686,8 @@ jobs:
+     # Practically, this means that all steps after 'build fuzzers' must have an
+     # explicit 'if' condition, because the default condition for steps is
+     # 'success()', meaning "only run this if no previous steps failed".
+-    if: github.event_name == 'pull_request'
++    # Downstream forks require their own ClusterFuzzLite or OSS-Fuzz integration.
++    if: github.event_name == 'pull_request' && github.repository == 'tailscale/tailscale'
+     runs-on: ubuntu-24.04
+     steps:
+     - name: build fuzzers
+diff --git a/.github/workflows/vet.yml b/.github/workflows/vet.yml
+index c03190e4f..a2ec5253b 100644
+--- a/.github/workflows/vet.yml
++++ b/.github/workflows/vet.yml
+@@ -21,7 +21,7 @@ on:
+ 
+ jobs:
+   vet:
+-    runs-on: [ self-hosted, linux ]
++    runs-on: ubuntu-24.04
+     timeout-minutes: 5
+ 
+     steps:
+diff --git a/tests/releases/github-actions-fork-portability.sh b/tests/releases/github-actions-fork-portability.sh
+new file mode 100755
+index 000000000..e3267d43b
+--- /dev/null
++++ b/tests/releases/github-actions-fork-portability.sh
+@@ -0,0 +1,80 @@
++#!/usr/bin/env bash
++set -u
++
++REPO_ROOT="$(
++  cd \
++    "$(dirname "${BASH_SOURCE[0]}")/../.." &&
++    pwd
++)"
++
++python3 - \
++  "${REPO_ROOT}/.github/workflows/vet.yml" \
++  "${REPO_ROOT}/.github/workflows/test.yml" << 'PY'
++import re
++import sys
++from pathlib import Path
++
++
++def job_block(workflow: str, job: str) -> str:
++    lines = workflow.splitlines()
++    marker = f"  {job}:"
++    try:
++        start = lines.index(marker)
++    except ValueError:
++        raise SystemExit(f"FAIL: workflow job is missing: {job}")
++
++    end = len(lines)
++    for index in range(start + 1, len(lines)):
++        if re.match(r"^  [A-Za-z0-9_-]+:\s*(?:#.*)?$", lines[index]):
++            end = index
++            break
++    return "\n".join(lines[start:end])
++
++
++def runs_on(job: str) -> list[str]:
++    return re.findall(r"(?m)^    runs-on:\s*(.*?)\s*$", job)
++
++
++vet_workflow = Path(sys.argv[1]).read_text(encoding="utf-8")
++test_workflow = Path(sys.argv[2]).read_text(encoding="utf-8")
++
++vet = job_block(vet_workflow, "vet")
++windows = job_block(test_workflow, "windows")
++fuzz = job_block(test_workflow, "fuzz")
++
++failures: list[str] = []
++
++vet_runners = runs_on(vet)
++if vet_runners != ["ubuntu-24.04"] or "self-hosted" in vet:
++    failures.append(
++        "vet job must use exactly ubuntu-24.04 and no self-hosted selector "
++        f"(observed runs-on: {vet_runners!r})"
++    )
++
++windows_runners = runs_on(windows)
++if windows_runners != ["windows-2022"] or "ci-windows-github-1" in windows:
++    failures.append(
++        "windows job must use exactly windows-2022 and no ci-windows-github-1 "
++        f"selector (observed runs-on: {windows_runners!r})"
++    )
++
++fuzz_condition = (
++    "github.event_name == 'pull_request' && "
++    "github.repository == 'tailscale/tailscale'"
++)
++fuzz_conditions = re.findall(r"(?m)^    if:\s*(.*?)\s*$", fuzz)
++if fuzz_conditions != [fuzz_condition]:
++    failures.append(
++        "fuzz job must run only for pull requests in tailscale/tailscale "
++        f"(observed if: {fuzz_conditions!r})"
++    )
++
++for failure in failures:
++    print(f"FAIL: {failure}", file=sys.stderr)
++
++if failures:
++    print(f"Failures: {len(failures)}", file=sys.stderr)
++    raise SystemExit(1)
++
++print("PASS: GitHub Actions jobs use fork-portable runners and fuzz ownership.")
++PY

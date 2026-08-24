@@ -1,0 +1,753 @@
+From 5696f5385b1f2d6c3004377c35b967877674365a Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Mon, 24 Aug 2026 18:23:16 +1000
+Subject: [PATCH 51/58] ci: add focused Synology product gate
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ .github/workflows/docker-file-build.yml       |   4 +-
+ .github/workflows/natlab-integrationtest.yml  |   3 +-
+ .github/workflows/synology-product.yml        |  80 ++++++
+ .github/workflows/test.yml                    |   3 +-
+ docs/product/unjailed-synology-contract.md    |  19 ++
+ docs/runbooks/agent-version-preparation.md    |   8 +
+ .../plans/2026-08-23-synology-product-ci.md   | 249 +++++++++++++++++
+ .../github-actions-fork-portability.sh        | 260 +++++++++++++++++-
+ 8 files changed, 617 insertions(+), 9 deletions(-)
+ create mode 100644 .github/workflows/synology-product.yml
+ create mode 100644 docs/superpowers/plans/2026-08-23-synology-product-ci.md
+
+diff --git a/.github/workflows/docker-file-build.yml b/.github/workflows/docker-file-build.yml
+index 7ee246868..81d2dc609 100644
+--- a/.github/workflows/docker-file-build.yml
++++ b/.github/workflows/docker-file-build.yml
+@@ -1,9 +1,9 @@
+ name: "Dockerfile build"
+-on: 
++on:
+   push:
+     branches:
+     - main
+-  pull_request:
++  workflow_dispatch:
+ jobs:
+   deploy:
+     runs-on: ubuntu-latest
+diff --git a/.github/workflows/natlab-integrationtest.yml b/.github/workflows/natlab-integrationtest.yml
+index 6c0d49575..d906dee1e 100644
+--- a/.github/workflows/natlab-integrationtest.yml
++++ b/.github/workflows/natlab-integrationtest.yml
+@@ -11,11 +11,10 @@ on:
+     branches:
+       - "main"
+       - "release-branch/*"
+-  pull_request:
+-    # all PRs on all branches
+   merge_group:
+     branches:
+       - "main"
++  workflow_dispatch:
+ jobs:
+   natlab-integrationtest:
+     runs-on: ubuntu-latest
+diff --git a/.github/workflows/synology-product.yml b/.github/workflows/synology-product.yml
+new file mode 100644
+index 000000000..b2012a5af
+--- /dev/null
++++ b/.github/workflows/synology-product.yml
+@@ -0,0 +1,80 @@
++name: Synology product
++
++on:
++  pull_request:
++    branches:
++      - "release/*-synology"
++      - "synology/main"
++  workflow_dispatch:
++
++jobs:
++  synology-product:
++    name: synology-product
++    permissions:
++      contents: read
++    runs-on: ubuntu-24.04
++    timeout-minutes: 45
++    steps:
++      - name: Check out source
++        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
++        with:
++          fetch-depth: 0
++          persist-credentials: false
++      - name: Validate Synology product
++        shell: bash
++        run: |
++          set -euo pipefail
++
++          if ! command -v shellcheck > /dev/null 2>&1; then
++            echo "FAIL: ShellCheck is required for Synology product validation." >&2
++            exit 1
++          fi
++
++          bash tests/releases/version-preparation-contract.sh
++          bash tests/releases/prepare-version-workflow.sh all
++          bash tests/releases/control-pre-commit.sh
++          bash tests/releases/promoted-patch-inventory.sh
++          bash tests/releases/github-actions-fork-portability.sh
++          bash tests/releases/shellcheck.sh
++          bash tests/releases/diff-check.sh
++
++          mapfile -t synology_tests < <(
++            find release/dist/synology/tests \
++              -maxdepth 1 \
++              -type f \
++              -name '*-test.sh' \
++              -print |
++              LC_ALL=C sort
++          )
++
++          if [ "${#synology_tests[@]}" -eq 0 ]; then
++            echo "FAIL: no Synology shell tests were found." >&2
++            exit 1
++          fi
++
++          for test_script in "${synology_tests[@]}"; do
++            bash "$test_script"
++          done
++
++          export PATH="$PWD/tool:$PATH"
++          ./tool/go test -count=1 \
++            ./release/dist/synology \
++            ./cmd/tailscale/cli \
++            ./cmd/tailscaled \
++            ./ipn/ipnlocal \
++            ./util/linuxfw \
++            ./wgengine/router
++
++          git diff --check
++
++          repository_status="$(
++            git status --porcelain=v1 --untracked-files=all
++          )"
++
++          if [ -n "$repository_status" ]; then
++            printf 'FAIL: validation changed repository state:\n%s\n' \
++              "$repository_status" >&2
++            exit 1
++          fi
++
++          echo "PASS: Synology product validation completed without repository changes."
+diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
+index bd41c880e..3edd889a7 100644
+--- a/.github/workflows/test.yml
++++ b/.github/workflows/test.yml
+@@ -26,11 +26,10 @@ on:
+     branches:
+       - "main"
+       - "release-branch/*"
+-  pull_request:
+-    # all PRs on all branches
+   merge_group:
+     branches:
+       - "main"
++  workflow_dispatch:
+ 
+ concurrency:
+   # For PRs, later CI runs preempt previous ones. e.g. a force push on a PR
+diff --git a/docs/product/unjailed-synology-contract.md b/docs/product/unjailed-synology-contract.md
+index 77d6208c7..28f7e6c29 100644
+--- a/docs/product/unjailed-synology-contract.md
++++ b/docs/product/unjailed-synology-contract.md
+@@ -41,3 +41,22 @@ Tailscale version preparation.
+ core unjailed source blobs plus the canonical patch/checksum. Version-workflow
+ changes validate those seven identities but do not recreate or modify them.
+ Any identity difference is a stop condition requiring separate product review.
++
++## CI ownership and validation boundary
++
++The `synology-product` job is the required fork-owned gate for ordinary
++downstream pull requests. It validates the version-preparation contracts and
++offline preparation fixtures, control-hook behavior, promoted patch inventory,
++changed-shell static analysis, the complete release diff policy, every
++repository-owned Synology shell test, focused Go packages that contain the
++Synology changes (`release/dist/synology`, `cmd/tailscale/cli`,
++`cmd/tailscaled`, `ipn/ipnlocal`, `util/linuxfw`, and `wgengine/router`),
++`git diff --check`, and unchanged tracked and untracked repository state. It
++does not build an SPK or exercise a DSM host.
++
++The inherited full upstream compatibility workflows are explicit/manual for
++an upstream-version upgrade rather than automatic downstream pull-request
++gates. Upstream OSS-Fuzz ownership remains with `tailscale/tailscale` and covers
++only `net/stun.FuzzStunParser`; it is not Synology fuzz coverage and does not
++exercise SPK or DSM behavior, package metadata, downstream patches, bootstrap,
++TUN, or netfilter behavior.
+diff --git a/docs/runbooks/agent-version-preparation.md b/docs/runbooks/agent-version-preparation.md
+index e2b680822..12792b880 100644
+--- a/docs/runbooks/agent-version-preparation.md
++++ b/docs/runbooks/agent-version-preparation.md
+@@ -93,6 +93,14 @@ separate authorization. Building either SPK, tagging, releasing, publishing,
+ installing on a NAS, running bootstrap, changing firewall/netfilter state and
+ rebooting are outside this workflow.
+ 
++Ordinary downstream pull requests require a green `synology-product` check.
++For an actual upstream-version upgrade, run the inherited full `CI` workflow
++manually and attend it through completion before handoff; record its exact run
++and conclusions with the review evidence. The focused product lane and the
++manual compatibility lane validate source only: neither builds, releases,
++publishes, or installs either SPK, and neither authorizes NAS or firewall
++mutation.
++
+ Accepted-source validation remains an attended control-worktree operation. At
+ handoff, invoke the retained
+ `/path/to/control-worktree/scripts/release/validate-release.sh` with explicit
+diff --git a/docs/superpowers/plans/2026-08-23-synology-product-ci.md b/docs/superpowers/plans/2026-08-23-synology-product-ci.md
+new file mode 100644
+index 000000000..b7b928b2d
+--- /dev/null
++++ b/docs/superpowers/plans/2026-08-23-synology-product-ci.md
+@@ -0,0 +1,249 @@
++# Synology Product CI Implementation Plan
++
++> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
++
++**Goal:** Make ordinary downstream pull requests run one focused, fork-owned Synology product gate while reserving the inherited full upstream compatibility matrix for explicit or manual upstream-version validation.
++
++**Architecture:** Add one read-only `synology-product` workflow whose single job runs the existing Synology source, shell, patch, package-script, and focused Go validators without caches, secrets, private runners, builds, releases, or NAS access. Remove automatic pull-request triggers only from the three inherited heavy workflows, retain their push and merge-queue behavior, and expose them through `workflow_dispatch`; keep the lightweight Go workflows automatic and preserve the inherited full-CI aggregators unchanged.
++
++**Tech Stack:** GitHub Actions YAML, Bash, Python 3 standard library contract assertions, repository-pinned Go, ShellCheck, actionlint, Git.
++
++**Spec:** `docs/product/unjailed-synology-contract.md`
++
++## Global Constraints
++
++- Work only on `codex/agent-upgrade-workflow` starting at `b938683769f6f1a2581fb4057dbbddd74b5ce9e5` with PR base `release/v1.98.9-synology` at `20c86229955a3d03de01901aee1499cab87c571d`.
++- Preserve the seven protected blob identities recorded in `release/upgrade-baseline.json`.
++- Keep `checklocks.yml`, `golangci-lint.yml`, and `vet.yml` unchanged so their existing Go path-filtered pull-request coverage remains automatic.
++- Preserve all external GitHub Actions at full 40-character commit SHAs.
++- Keep the inherited `fuzz` job restricted to pull requests in `tailscale/tailscale`; it covers only upstream `net/stun.FuzzStunParser`, not Synology, DSM, SPK, package, patch, or netfilter behavior.
++- Preserve downstream `vm,fuzz` allowed skips for `merge_blocker` and `check_mergeability`; preserve zero allowed skips for `check_mergeability_strict`.
++- Do not build either SPK, install or publish a package, modify a NAS or firewall, fetch or tag, update rulesets, merge the PR, or mutate retained evidence, worktrees, archives, or caches.
++- Create one signed commit containing exactly one `Signed-off-by` trailer and push it normally without force only after all validation passes.
++
++---
++
++### Task 1: Establish the executable CI-lane contract
++
++**Files:**
++- Modify: `tests/releases/github-actions-fork-portability.sh`
++
++**Interfaces:**
++- Consumes: raw tracked workflow text from `.github/workflows/vet.yml`, `.github/workflows/test.yml`, `.github/workflows/docker-file-build.yml`, `.github/workflows/natlab-integrationtest.yml`, and the initially absent `.github/workflows/synology-product.yml`.
++- Produces: one deterministic offline regression command that validates effective top-level trigger blocks, effective job blocks, exact runner and checkout policy, required product commands, and retained full-CI fork rules.
++
++- [ ] **Step 1: Extend the Python contract over real workflow files**
++
++Add indentation-aware helpers for top-level blocks, trigger mappings, job mappings, job blocks, and checkout-step blocks. Require exactly these properties:
++
++```text
++synology-product triggers: pull_request, workflow_dispatch
++synology-product pull_request bases: release/*-synology, synology/main
++synology-product only job id/name: synology-product
++synology-product runner: ubuntu-24.04
++synology-product timeout-minutes: 45
++synology-product permissions: contents: read
++checkout: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
++checkout fetch-depth: 0
++test triggers: push, merge_group, workflow_dispatch
++docker-file-build triggers: push, workflow_dispatch
++natlab-integrationtest triggers: push, merge_group, workflow_dispatch
++```
++
++Require the job text to invoke the seven `tests/releases` commands, a sorted non-empty `release/dist/synology/tests/*-test.sh` inventory, the six exact focused Go packages with `-count=1`, `git diff --check`, and a final porcelain status check covering tracked and untracked files. Retain the existing vet, Windows, upstream-only fuzz, downstream allowed-skips, strict aggregator, and `PKG_DEPS` LF assertions.
++
++- [ ] **Step 2: Run the contract and observe RED**
++
++Run:
++
++```bash
++bash tests/releases/github-actions-fork-portability.sh
++```
++
++Expected: exit 1 with failures for the absent `synology-product` workflow and the still-automatic `pull_request` triggers in `test.yml`, `docker-file-build.yml`, and `natlab-integrationtest.yml`; existing fork portability assertions continue to pass.
++
++### Task 2: Add the focused product lane and make inherited heavy CI explicit
++
++**Files:**
++- Create: `.github/workflows/synology-product.yml`
++- Modify: `.github/workflows/test.yml`
++- Modify: `.github/workflows/docker-file-build.yml`
++- Modify: `.github/workflows/natlab-integrationtest.yml`
++
++**Interfaces:**
++- Consumes: existing repository-owned validators and `actions/checkout` pinned at `de0fac2e4500dabe0009e67214ff5f5447ce83dd`.
++- Produces: stable job/check name `synology-product` for ordinary downstream pull requests and manual entry points for inherited heavy compatibility workflows.
++
++- [ ] **Step 1: Create the one-job product workflow**
++
++Create `.github/workflows/synology-product.yml` with only `pull_request` for bases `release/*-synology` and `synology/main`, plus `workflow_dispatch`. Define one job named and keyed `synology-product`, `permissions: contents: read`, `runs-on: ubuntu-24.04`, and `timeout-minutes: 45`. Check out full history without credentials using:
++
++```yaml
++- name: Check out source
++  uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
++  with:
++    fetch-depth: 0
++    persist-credentials: false
++```
++
++The validation step uses `shell: bash`, `set -euo pipefail`, fails clearly when `shellcheck` is unavailable, invokes in order:
++
++```bash
++bash tests/releases/version-preparation-contract.sh
++bash tests/releases/prepare-version-workflow.sh all
++bash tests/releases/control-pre-commit.sh
++bash tests/releases/promoted-patch-inventory.sh
++bash tests/releases/github-actions-fork-portability.sh
++bash tests/releases/shellcheck.sh
++bash tests/releases/diff-check.sh
++```
++
++It then finds `release/dist/synology/tests/*-test.sh`, sorts with `LC_ALL=C sort`, fails on an empty inventory, runs each with Bash, and executes:
++
++```bash
++export PATH="$PWD/tool:$PATH"
++./tool/go test -count=1 \
++  ./release/dist/synology \
++  ./cmd/tailscale/cli \
++  ./cmd/tailscaled \
++  ./ipn/ipnlocal \
++  ./util/linuxfw \
++  ./wgengine/router
++git diff --check
++git status --porcelain=v1 --untracked-files=all
++```
++
++Fail if the final status output is non-empty.
++
++- [ ] **Step 2: Make only the heavy inherited pull-request triggers explicit**
++
++Delete the `pull_request` trigger from `.github/workflows/test.yml`, `.github/workflows/docker-file-build.yml`, and `.github/workflows/natlab-integrationtest.yml`. Add an empty `workflow_dispatch:` trigger to each. Retain every existing push branch, both existing `merge_group` blocks, all jobs, action pins, runner selections, commands, and aggregator semantics byte-for-byte otherwise.
++
++- [ ] **Step 3: Run the focused contract and observe GREEN**
++
++Run:
++
++```bash
++bash tests/releases/github-actions-fork-portability.sh
++```
++
++Expected: exit 0 with the fork-portability, CI-lane ownership, and `PKG_DEPS` LF PASS messages.
++
++### Task 3: Document the validation ownership boundary
++
++**Files:**
++- Modify: `docs/product/unjailed-synology-contract.md`
++- Modify: `docs/runbooks/agent-version-preparation.md`
++
++**Interfaces:**
++- Consumes: the implemented `synology-product` command inventory and explicit inherited compatibility workflow triggers.
++- Produces: reviewer-facing ownership and handoff requirements that do not imply package build, release, installation, or Synology fuzz coverage.
++
++- [ ] **Step 1: Extend the product contract**
++
++Add a `CI ownership and validation boundary` section stating that `synology-product` is the ordinary downstream pull-request gate and enumerating its source contracts, preparation fixtures, shell/static checks, protected patch inventory, Synology shell tests, focused Go packages, diff cleanliness, and repository cleanliness. State that inherited upstream compatibility CI is explicit/manual for upstream-version upgrades and that upstream OSS-Fuzz exercises only `net/stun.FuzzStunParser`, not SPK, DSM, package metadata, patches, bootstrap, TUN, or netfilter behavior.
++
++- [ ] **Step 2: Extend the preparation handoff**
++
++Require a green `synology-product` check on ordinary downstream pull requests and an attended manual full `CI` run for a real upstream-version upgrade before handoff. State explicitly that neither lane builds, releases, publishes, or installs either SPK and neither authorizes NAS or firewall mutation.
++
++### Task 4: Validate the complete change and preserved boundaries
++
++**Files:**
++- Verify: all files changed by Tasks 1-3
++- Verify unchanged: the seven paths recorded by `release/upgrade-baseline.json`
++
++**Interfaces:**
++- Consumes: the complete proposed tree and the retained control worktree at `/home/ateight/development/tailscale-synology-unjailed/tailscale-synology-dsm-control`.
++- Produces: fresh RED/GREEN, syntax, static-analysis, source-test, protected-byte, diff, and clean-state evidence.
++
++- [ ] **Step 1: Validate changed shell and workflow syntax**
++
++Run:
++
++```bash
++bash -n tests/releases/github-actions-fork-portability.sh
++shellcheck --severity=style tests/releases/github-actions-fork-portability.sh
++actionlint .github/workflows/synology-product.yml \
++  .github/workflows/docker-file-build.yml \
++  .github/workflows/natlab-integrationtest.yml
++```
++
++Use the exact cached ShellCheck 0.11.0 and actionlint 1.7.12 binaries managed by the retained control-worktree verifier. The inherited `test.yml` has 21 existing actionlint diagnostics at the starting SHA; run actionlint against the starting blob and the trigger-only working-tree file, normalize source coordinates, and require exact diagnostic equivalence rather than changing inherited job content. Also run the control verifier's offline aggregate from the control checkout:
++
++```bash
++bash scripts/validate-repository.sh \
++  --source-environment /home/ateight/development/tailscale-synology-unjailed/tailscale-synology-dsm \
++  --fast
++```
++
++- [ ] **Step 2: Run the product workflow commands locally in order**
++
++Run from the feature worktree:
++
++```bash
++bash tests/releases/version-preparation-contract.sh
++bash tests/releases/prepare-version-workflow.sh all
++bash tests/releases/control-pre-commit.sh
++bash tests/releases/promoted-patch-inventory.sh
++bash tests/releases/github-actions-fork-portability.sh
++bash tests/releases/shellcheck.sh
++bash tests/releases/diff-check.sh
++```
++
++Run every sorted `release/dist/synology/tests/*-test.sh`, require a non-empty inventory, then run:
++
++```bash
++export PATH="$PWD/tool:$PATH"
++./tool/go test -count=1 \
++  ./release/dist/synology \
++  ./cmd/tailscale/cli \
++  ./cmd/tailscaled \
++  ./ipn/ipnlocal \
++  ./util/linuxfw \
++  ./wgengine/router
++git diff --check
++```
++
++- [ ] **Step 3: Verify protected blobs and exact scope**
++
++Parse `release/upgrade-baseline.json`, compare every protected path's current Git blob and SHA-256 to the recorded values, and require no diff for those paths from `8c9fe5239ee57a89ce687fc8c7608d3df91f6ede`. Inspect `git diff --stat`, `git diff`, and `git status --short --branch`; require only the planned workflow, contract-test, documentation, and plan files, with no product blob, package, patch, checksum, NAS, evidence, worktree, archive, or cache change.
++
++- [ ] **Step 4: Self-review plan and implementation**
++
++Compare every product-spec and owner requirement to a concrete plan task and changed line. Scan this plan for unresolved-template language or deferred implementation instructions; require no match. Re-run the focused contract after review.
++
++### Task 5: Commit, push, and verify PR replacement checks
++
++**Files:**
++- Commit only the paths listed in Tasks 1-3 and this plan.
++
++**Interfaces:**
++- Consumes: a fully validated clean intended diff and existing signing identity/style.
++- Produces: one normally pushed signed commit on `codex/agent-upgrade-workflow` and a new automatic `synology-product` PR check.
++
++- [ ] **Step 1: Recheck race guards**
++
++Require local HEAD and the remote feature ref to remain `b938683769f6f1a2581fb4057dbbddd74b5ce9e5`, PR #7 to remain open with base `release/v1.98.9-synology` at `20c86229955a3d03de01901aee1499cab87c571d`, and the worktree to contain only the intended changes.
++
++- [ ] **Step 2: Create one signed and signed-off commit**
++
++Stage only the planned files and run:
++
++```bash
++git commit -S -s -m "ci: add focused Synology product gate"
++```
++
++Verify `git verify-commit HEAD`, a good SSH signature, and exactly one `Signed-off-by` trailer.
++
++- [ ] **Step 3: Push without force and verify**
++
++Push only `refs/heads/codex/agent-upgrade-workflow` to the same origin ref. If the known system SSH configuration error occurs, use only:
++
++```bash
++git -c core.sshCommand='ssh -F /dev/null -o BatchMode=yes' push \
++  origin \
++  refs/heads/codex/agent-upgrade-workflow:refs/heads/codex/agent-upgrade-workflow
++```
++
++Verify the remote ref equals the new commit, PR #7 remains open with the expected base and new head, GitHub reports a verified signature, the registered feature worktree is clean, and an automatic `synology-product` run starts. Do not expect or manually start a replacement inherited 30-job `CI` run; do not rerun or cancel any workflow.
+diff --git a/tests/releases/github-actions-fork-portability.sh b/tests/releases/github-actions-fork-portability.sh
+index c753502e4..61d7e6e43 100755
+--- a/tests/releases/github-actions-fork-portability.sh
++++ b/tests/releases/github-actions-fork-portability.sh
+@@ -9,12 +9,72 @@ REPO_ROOT="$(
+ 
+ python3 - \
+   "${REPO_ROOT}/.github/workflows/vet.yml" \
+-  "${REPO_ROOT}/.github/workflows/test.yml" << 'PY'
++  "${REPO_ROOT}/.github/workflows/test.yml" \
++  "${REPO_ROOT}/.github/workflows/synology-product.yml" \
++  "${REPO_ROOT}/.github/workflows/docker-file-build.yml" \
++  "${REPO_ROOT}/.github/workflows/natlab-integrationtest.yml" << 'PY'
+ import re
+ import sys
+ from pathlib import Path
+ 
+ 
++def top_level_block(workflow: str, key: str) -> str:
++    lines = workflow.splitlines()
++    marker = re.compile(rf"^{re.escape(key)}:\s*(?:#.*)?$")
++    start = next(
++        (index for index, line in enumerate(lines) if marker.match(line)),
++        None,
++    )
++    if start is None:
++        return ""
++
++    end = len(lines)
++    for index in range(start + 1, len(lines)):
++        if re.match(r"^[A-Za-z0-9_-]+:\s*(?:#.*)?$", lines[index]):
++            end = index
++            break
++    return "\n".join(lines[start:end])
++
++
++def mapping_block(text: str, key: str, indent: int) -> str:
++    lines = text.splitlines()
++    marker = f"{' ' * indent}{key}:"
++    try:
++        start = lines.index(marker)
++    except ValueError:
++        return ""
++
++    end = len(lines)
++    sibling = re.compile(
++        rf"^{' ' * indent}[A-Za-z0-9_-]+:\s*(?:#.*)?$"
++    )
++    for index in range(start + 1, len(lines)):
++        if sibling.match(lines[index]):
++            end = index
++            break
++    return "\n".join(lines[start:end])
++
++
++def mapping_keys(text: str, indent: int) -> list[str]:
++    pattern = re.compile(
++        rf"^{' ' * indent}([A-Za-z0-9_-]+):\s*(?:#.*)?$"
++    )
++    return [
++        match.group(1)
++        for line in text.splitlines()
++        if (match := pattern.match(line))
++    ]
++
++
++def list_values(text: str, indent: int) -> list[str]:
++    pattern = re.compile(rf"^{' ' * indent}-\s+(.+?)\s*$")
++    return [
++        match.group(1).strip("'\"")
++        for line in text.splitlines()
++        if (match := pattern.match(line))
++    ]
++
++
+ def job_block(workflow: str, job: str) -> str:
+     lines = workflow.splitlines()
+     marker = f"  {job}:"
+@@ -50,8 +110,41 @@ def alls_green_allowed_skips(job: str) -> list[str]:
+     )
+ 
+ 
+-vet_workflow = Path(sys.argv[1]).read_text(encoding="utf-8")
+-test_workflow = Path(sys.argv[2]).read_text(encoding="utf-8")
++def read_workflow(path: Path) -> str:
++    if not path.is_file():
++        return ""
++    return path.read_text(encoding="utf-8")
++
++
++def trigger_names(workflow: str) -> list[str]:
++    return mapping_keys(top_level_block(workflow, "on"), 2)
++
++
++def assert_triggers(
++    failures: list[str],
++    workflow_name: str,
++    workflow: str,
++    expected: list[str],
++) -> None:
++    observed = trigger_names(workflow)
++    if observed != expected:
++        failures.append(
++            f"{workflow_name} triggers must be exactly {expected!r} "
++            f"(observed: {observed!r})"
++        )
++
++
++vet_path = Path(sys.argv[1])
++test_path = Path(sys.argv[2])
++synology_product_path = Path(sys.argv[3])
++docker_path = Path(sys.argv[4])
++natlab_path = Path(sys.argv[5])
++
++vet_workflow = read_workflow(vet_path)
++test_workflow = read_workflow(test_path)
++synology_product_workflow = read_workflow(synology_product_path)
++docker_workflow = read_workflow(docker_path)
++natlab_workflow = read_workflow(natlab_path)
+ 
+ vet = job_block(vet_workflow, "vet")
+ windows = job_block(test_workflow, "windows")
+@@ -62,6 +155,165 @@ check_mergeability = job_block(test_workflow, "check_mergeability")
+ 
+ failures: list[str] = []
+ 
++if not synology_product_workflow:
++    failures.append(
++        "focused Synology product workflow is missing: "
++        ".github/workflows/synology-product.yml"
++    )
++else:
++    assert_triggers(
++        failures,
++        "synology-product workflow",
++        synology_product_workflow,
++        ["pull_request", "workflow_dispatch"],
++    )
++
++    pull_request = mapping_block(
++        top_level_block(synology_product_workflow, "on"),
++        "pull_request",
++        2,
++    )
++    branches = mapping_block(pull_request, "branches", 4)
++    observed_bases = list_values(branches, 6)
++    expected_bases = ["release/*-synology", "synology/main"]
++    if observed_bases != expected_bases:
++        failures.append(
++            "synology-product pull_request bases must be exactly "
++            f"{expected_bases!r} (observed: {observed_bases!r})"
++        )
++
++    jobs = top_level_block(synology_product_workflow, "jobs")
++    observed_jobs = mapping_keys(jobs, 2)
++    if observed_jobs != ["synology-product"]:
++        failures.append(
++            "synology-product workflow must contain exactly one job named "
++            f"synology-product (observed jobs: {observed_jobs!r})"
++        )
++    else:
++        product = job_block(synology_product_workflow, "synology-product")
++
++        names = re.findall(r"(?m)^    name:\s*(.*?)\s*$", product)
++        if names != ["synology-product"]:
++            failures.append(
++                "synology-product job name must be exactly synology-product "
++                f"(observed: {names!r})"
++            )
++
++        product_runners = runs_on(product)
++        if product_runners != ["ubuntu-24.04"]:
++            failures.append(
++                "synology-product job must use exactly ubuntu-24.04 "
++                f"(observed runs-on: {product_runners!r})"
++            )
++
++        timeouts = re.findall(
++            r"(?m)^    timeout-minutes:\s*(.*?)\s*$",
++            product,
++        )
++        if timeouts != ["45"]:
++            failures.append(
++                "synology-product job must have timeout-minutes 45 "
++                f"(observed: {timeouts!r})"
++            )
++
++        permissions = mapping_block(product, "permissions", 4)
++        contents_permissions = re.findall(
++            r"(?m)^      contents:\s*(.*?)\s*$",
++            permissions,
++        )
++        if contents_permissions != ["read"]:
++            failures.append(
++                "synology-product job permissions must set contents to read "
++                f"(observed: {contents_permissions!r})"
++            )
++
++        checkout_uses = re.findall(
++            r"(?m)^        uses:\s*actions/checkout@([^\s#]+)",
++            product,
++        )
++        expected_checkout = "de0fac2e4500dabe0009e67214ff5f5447ce83dd"
++        if checkout_uses != [expected_checkout]:
++            failures.append(
++                "synology-product must use exactly one checkout pinned to "
++                f"{expected_checkout} (observed: {checkout_uses!r})"
++            )
++
++        fetch_depths = re.findall(
++            r"(?m)^          fetch-depth:\s*(.*?)\s*$",
++            product,
++        )
++        if fetch_depths != ["0"]:
++            failures.append(
++                "synology-product checkout must set fetch-depth to 0 "
++                f"(observed: {fetch_depths!r})"
++            )
++
++        required_commands = [
++            "bash tests/releases/version-preparation-contract.sh",
++            "bash tests/releases/prepare-version-workflow.sh all",
++            "bash tests/releases/control-pre-commit.sh",
++            "bash tests/releases/promoted-patch-inventory.sh",
++            "bash tests/releases/github-actions-fork-portability.sh",
++            "bash tests/releases/shellcheck.sh",
++            "bash tests/releases/diff-check.sh",
++            'export PATH="$PWD/tool:$PATH"',
++            "./tool/go test -count=1",
++            "./release/dist/synology",
++            "./cmd/tailscale/cli",
++            "./cmd/tailscaled",
++            "./ipn/ipnlocal",
++            "./util/linuxfw",
++            "./wgengine/router",
++            "git diff --check",
++            "git status --porcelain=v1 --untracked-files=all",
++        ]
++        for command in required_commands:
++            if command not in product:
++                failures.append(
++                    "synology-product job must invoke required gate: "
++                    f"{command}"
++                )
++
++        required_inventory_contract = [
++            "find release/dist/synology/tests",
++            "-name '*-test.sh'",
++            "LC_ALL=C sort",
++            "${#synology_tests[@]}",
++            "for test_script in \"${synology_tests[@]}\"",
++            "bash \"$test_script\"",
++        ]
++        for snippet in required_inventory_contract:
++            if snippet not in product:
++                failures.append(
++                    "synology-product shell-test inventory must contain: "
++                    f"{snippet}"
++                )
++
++        if "command -v shellcheck" not in product or \
++                "ShellCheck is required" not in product:
++            failures.append(
++                "synology-product must fail clearly when ShellCheck is unavailable"
++            )
++
++assert_triggers(
++    failures,
++    "full CI workflow",
++    test_workflow,
++    ["push", "merge_group", "workflow_dispatch"],
++)
++assert_triggers(
++    failures,
++    "Dockerfile build workflow",
++    docker_workflow,
++    ["push", "workflow_dispatch"],
++)
++assert_triggers(
++    failures,
++    "natlab integration workflow",
++    natlab_workflow,
++    ["push", "merge_group", "workflow_dispatch"],
++)
++
+ vet_runners = runs_on(vet)
+ if vet_runners != ["ubuntu-24.04"] or "self-hosted" in vet:
+     failures.append(
+@@ -117,6 +369,8 @@ if failures:
+     raise SystemExit(1)
+ 
+ print("PASS: GitHub Actions jobs use fork-portable runners and fuzz ownership.")
++print("PASS: downstream PRs use one focused Synology product gate.")
++print("PASS: inherited heavy compatibility workflows use explicit triggers.")
+ PY
+ PYTHON_RC=$?
+ 

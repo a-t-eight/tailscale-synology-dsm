@@ -1,0 +1,31 @@
+From ccc003ae51bbe3c02b0a846fd27229afa03c4f77 Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Mon, 24 Aug 2026 18:23:13 +1000
+Subject: [PATCH 38/58] docs: require complete preparation handoff
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ docs/runbooks/agent-version-preparation.md | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/docs/runbooks/agent-version-preparation.md b/docs/runbooks/agent-version-preparation.md
+index 8b88f0f3e..1ef7eb4f2 100644
+--- a/docs/runbooks/agent-version-preparation.md
++++ b/docs/runbooks/agent-version-preparation.md
+@@ -78,6 +78,16 @@ review logical equivalence to the previous stack.
+ 
+ ## Handoff boundary
+ 
++The handoff must attach all of the following review evidence:
++
++- `manifest.json`;
++- `SHA256SUMS`;
++- `preparation-report.md`;
++- `git range-diff` review notes;
++- signature and single-signoff verification results for every prepared commit;
++- complete output from the relevant source, patch round-trip, shell, and package
++  tests.
++
+ The agent may draft review notes. Creating or updating a pull request requires
+ separate authorization. Building either SPK, tagging, releasing, publishing,
+ installing on a NAS, running bootstrap, changing firewall/netfilter state and

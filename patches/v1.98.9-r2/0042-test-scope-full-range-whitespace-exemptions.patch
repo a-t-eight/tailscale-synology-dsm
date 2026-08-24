@@ -1,0 +1,116 @@
+From 629887f1db9e3147936cbab1bc0a230b86e55624 Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Mon, 24 Aug 2026 18:23:14 +1000
+Subject: [PATCH 42/58] test: scope full-range whitespace exemptions
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ .gitattributes               |  4 +++
+ tests/README.md              |  8 +++++
+ tests/releases/diff-check.sh | 62 ++++++++++++++++++++++++++++++++++++
+ 3 files changed, 74 insertions(+)
+ create mode 100755 tests/releases/diff-check.sh
+
+diff --git a/.gitattributes b/.gitattributes
+index 3eb528782..4559ef5b3 100644
+--- a/.gitattributes
++++ b/.gitattributes
+@@ -1,2 +1,6 @@
+ go.mod filter=go-mod
+ *.go  diff=golang
++
++# Immutable historical patch payloads preserve their checksum-locked bytes.
++patches/v1.98.9/*.patch whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
++patches/v1.98.9/**/*.patch whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
+diff --git a/tests/README.md b/tests/README.md
+index ed68c51b9..f1e4dad90 100644
+--- a/tests/README.md
++++ b/tests/README.md
+@@ -24,11 +24,19 @@ Source-worktree workflow checks are:
+ - `releases/shellcheck.sh` — is the canonical changed-shell static-analysis
+   command. It runs ShellCheck with `--severity=style`, so error, warning,
+   information, and style diagnostics are all visible and enforced.
++- `releases/diff-check.sh` — runs the complete
++  `git diff --check 8c9fe5239ee57a89ce687fc8c7608d3df91f6ede..HEAD`
++  gate. Git attributes suppress only `blank-at-eol`, `blank-at-eof`, and
++  `space-before-tab` diagnostics inside checksum-locked historical `.patch`
++  payloads under `patches/v1.98.9/`; all Markdown, scripts, source, and other
++  paths remain strict. Its disposable negative fixture proves a real Markdown
++  defect fails.
+ 
+ Run the canonical command from the repository root:
+ 
+ ```text
+ bash tests/releases/shellcheck.sh
++bash tests/releases/diff-check.sh
+ ```
+ 
+ `releases/validate-production-contract.sh` builds disposable local fixtures for
+diff --git a/tests/releases/diff-check.sh b/tests/releases/diff-check.sh
+new file mode 100755
+index 000000000..49250fe81
+--- /dev/null
++++ b/tests/releases/diff-check.sh
+@@ -0,0 +1,62 @@
++#!/usr/bin/env bash
++set -u
++
++REPO_ROOT="$(
++  cd \
++    "$(dirname "${BASH_SOURCE[0]}")/../.." &&
++    pwd
++)"
++BASE="8c9fe5239ee57a89ce687fc8c7608d3df91f6ede"
++TEMP_ROOT=""
++
++fail() {
++  printf 'FAIL: %s\n' "$1" >&2
++  exit 1
++}
++
++cleanup() {
++  if [ -n "$TEMP_ROOT" ] &&
++    [[ "$TEMP_ROOT" == /tmp/tailscale-diff-check-test.* ]]; then
++    rm -rf -- "$TEMP_ROOT"
++  fi
++}
++
++trap cleanup EXIT
++
++git -C "$REPO_ROOT" diff --check "${BASE}..HEAD" ||
++  fail "full feature range contains a non-exempt whitespace error"
++
++TEMP_ROOT="$(mktemp -d /tmp/tailscale-diff-check-test.XXXXXX)"
++FIXTURE_ROOT="${TEMP_ROOT}/repo"
++CHECK_LOG="${TEMP_ROOT}/diff-check.log"
++
++git init -b main "$FIXTURE_ROOT" > /dev/null 2>&1 ||
++  fail "could not create whitespace-policy fixture"
++git -C "$FIXTURE_ROOT" config user.name "Whitespace Fixture"
++git -C "$FIXTURE_ROOT" config user.email "whitespace@example.invalid"
++mkdir -p "$FIXTURE_ROOT/docs" "$FIXTURE_ROOT/patches/v1.98.9/history"
++cp "$REPO_ROOT/.gitattributes" "$FIXTURE_ROOT/.gitattributes"
++printf 'clean\n' > "$FIXTURE_ROOT/docs/defect.md"
++printf 'clean\n' > \
++  "$FIXTURE_ROOT/patches/v1.98.9/history/0001-immutable.patch"
++git -C "$FIXTURE_ROOT" add .
++git -C "$FIXTURE_ROOT" commit -m "fixture: baseline" > /dev/null ||
++  fail "could not commit whitespace-policy baseline"
++
++printf 'defect \n' > "$FIXTURE_ROOT/docs/defect.md"
++printf 'payload \n \timmutable\n' > \
++  "$FIXTURE_ROOT/patches/v1.98.9/history/0001-immutable.patch"
++if git -C "$FIXTURE_ROOT" diff --check > "$CHECK_LOG" 2>&1; then
++  fail "Git accepted a whitespace defect outside immutable payload paths"
++fi
++grep -Fq 'docs/defect.md:1: trailing whitespace.' "$CHECK_LOG" ||
++  fail "Git did not report the non-payload Markdown whitespace defect"
++if grep -Fq 'patches/v1.98.9/history/0001-immutable.patch' "$CHECK_LOG"; then
++  fail "Git reported an exempt immutable patch payload"
++fi
++
++git -C "$FIXTURE_ROOT" restore docs/defect.md
++git -C "$FIXTURE_ROOT" diff --check ||
++  fail "immutable patch payload paths were not narrowly exempted"
++
++echo "PASS: full-range and non-payload whitespace policy checks passed."

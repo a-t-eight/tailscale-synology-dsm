@@ -1,0 +1,113 @@
+From 3ae0f4040e1dc2c82eb3a42b5ea86d0068e66b92 Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Mon, 24 Aug 2026 18:23:11 +1000
+Subject: [PATCH 28/58] fix: classify protected patch adjunct
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ release/manifest.yaml                      |  3 ++
+ scripts/release/common.sh                  | 12 ++++++--
+ tests/releases/promoted-patch-inventory.sh | 36 ++++++++++++++++++++++
+ 3 files changed, 49 insertions(+), 2 deletions(-)
+ create mode 100755 tests/releases/promoted-patch-inventory.sh
+
+diff --git a/release/manifest.yaml b/release/manifest.yaml
+index 5043f7228..1bfd936c0 100644
+--- a/release/manifest.yaml
++++ b/release/manifest.yaml
+@@ -78,6 +78,9 @@
+     "patch_reference_files": [
+       "maintenance.patch"
+     ],
++    "patch_adjunct_files": [
++      "synology-netfilter.patch"
++    ],
+     "ssh_allowed_signers_path": ".github/allowed_signers",
+     "ssh_allowed_signers_sha256": "7f6e0b0e70dd002171512380426103ca322c28a30ed2bde5815395f3c7e329c8",
+     "ssh_signer_fingerprints": [
+diff --git a/scripts/release/common.sh b/scripts/release/common.sh
+index 12b64acc7..7a62b27ee 100644
+--- a/scripts/release/common.sh
++++ b/scripts/release/common.sh
+@@ -371,6 +371,7 @@ if patch_format not in ("mail", "raw-diff"):
+ 
+ apply_files = get("validation.patch_apply_files")
+ reference_files = get("validation.patch_reference_files")
++adjunct_files = data.get("validation", {}).get("patch_adjunct_files", [])
+ 
+ if not isinstance(apply_files, list) or not apply_files:
+     raise SystemExit(
+@@ -382,7 +383,12 @@ if not isinstance(reference_files, list):
+         "validation.patch_reference_files must be an array"
+     )
+ 
+-all_patch_files = apply_files + reference_files
++if not isinstance(adjunct_files, list):
++    raise SystemExit(
++        "validation.patch_adjunct_files must be an array when present"
++    )
++
++all_patch_files = apply_files + reference_files + adjunct_files
+ 
+ if len(all_patch_files) != len(set(all_patch_files)):
+     raise SystemExit("declared patch filenames contain duplicates")
+@@ -1670,7 +1676,8 @@ validation = manifest["validation"]
+ 
+ apply_files = validation["patch_apply_files"]
+ reference_files = validation["patch_reference_files"]
+-expected = sorted(apply_files + reference_files)
++adjunct_files = validation.get("patch_adjunct_files", [])
++expected = sorted(apply_files + reference_files + adjunct_files)
+ observed = sorted(path.name for path in root.glob("*.patch") if path.is_file())
+ 
+ if observed != expected:
+@@ -1685,6 +1692,7 @@ for patch_name in expected:
+ 
+ print(f"Patch apply files:     {len(apply_files)}")
+ print(f"Patch reference files: {len(reference_files)}")
++print(f"Patch adjunct files:   {len(adjunct_files)}")
+ print("PASS: direct patch inventory matches the manifest roles.")
+ PY
+ }
+diff --git a/tests/releases/promoted-patch-inventory.sh b/tests/releases/promoted-patch-inventory.sh
+new file mode 100755
+index 000000000..4a0d23f4c
+--- /dev/null
++++ b/tests/releases/promoted-patch-inventory.sh
+@@ -0,0 +1,36 @@
++#!/usr/bin/env bash
++set -u
++
++REPO_ROOT="$(
++  cd \
++    "$(dirname "${BASH_SOURCE[0]}")/../.." &&
++    pwd
++)"
++MANIFEST="${REPO_ROOT}/release/manifest.yaml"
++PATCH_ROOT="${REPO_ROOT}/patches/v1.98.9"
++
++# shellcheck source=scripts/release/common.sh
++. "${REPO_ROOT}/scripts/release/common.sh"
++
++release_validate_manifest "$MANIFEST" || exit 1
++release_validate_patch_inventory "$MANIFEST" "$PATCH_ROOT" || exit 1
++
++mapfile -t APPLIED_PATCHES < <(
++  release_patch_paths "$MANIFEST" "$PATCH_ROOT" validation.patch_apply_files
++)
++
++if [ "${#APPLIED_PATCHES[@]}" -ne 1 ] ||
++  [ "$(basename "${APPLIED_PATCHES[0]}")" != "release-tree.patch" ]; then
++  release_fail "accepted applied patch sequence changed while classifying the adjunct"
++  exit 1
++fi
++
++(
++  cd "$PATCH_ROOT" || exit 1
++  sha256sum -c synology-netfilter.patch.sha256
++) > /dev/null || {
++  release_fail "protected canonical patch checksum failed"
++  exit 1
++}
++
++release_pass "applied, reference and protected adjunct patch roles are coherent"

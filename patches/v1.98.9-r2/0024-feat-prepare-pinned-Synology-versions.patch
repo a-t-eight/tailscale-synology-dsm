@@ -1,0 +1,1308 @@
+From ed51ca28982c1ae1dc9356f360dc3868cbf62171 Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Mon, 24 Aug 2026 18:23:09 +1000
+Subject: [PATCH 24/58] feat: prepare pinned Synology versions
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ scripts/release/common.sh                  | 160 +++++
+ scripts/release/prepare-worktree.sh        | 787 ++++++++++++++++++++-
+ tests/releases/prepare-version-workflow.sh | 316 +++++++++
+ 3 files changed, 1262 insertions(+), 1 deletion(-)
+ create mode 100755 tests/releases/prepare-version-workflow.sh
+
+diff --git a/scripts/release/common.sh b/scripts/release/common.sh
+index 4ae2fb18f..12b64acc7 100644
+--- a/scripts/release/common.sh
++++ b/scripts/release/common.sh
+@@ -1804,3 +1804,163 @@ release_apply_patch_series() (
+       ;;
+   esac
+ )
++
++release_absolute_path() {
++  python3 - "$1" << 'PY'
++import sys
++from pathlib import Path
++
++print(Path(sys.argv[1]).expanduser().resolve(strict=False))
++PY
++}
++
++release_validate_version_preparation_manifest() {
++  manifest="$1"
++  schema="$2"
++  baseline="$3"
++
++  python3 - "$manifest" "$schema" "$baseline" << 'PY'
++import json
++import re
++import sys
++from pathlib import Path, PurePosixPath
++
++
++def reject_duplicate_members(pairs):
++    result = {}
++    for key, value in pairs:
++        if key in result:
++            raise ValueError(f"duplicate JSON member: {key}")
++        result[key] = value
++    return result
++
++
++def reject_constant(value):
++    raise ValueError(f"non-standard JSON constant: {value}")
++
++
++def load(path):
++    return json.loads(
++        Path(path).read_text(encoding="utf-8"),
++        object_pairs_hook=reject_duplicate_members,
++        parse_constant=reject_constant,
++    )
++
++
++manifest = load(sys.argv[1])
++schema = load(sys.argv[2])
++baseline = load(sys.argv[3])
++
++required = set(schema["required"])
++if set(manifest) != required:
++    raise SystemExit("version-preparation manifest fields differ from the schema")
++if manifest["schema_version"] != 1:
++    raise SystemExit("unsupported version-preparation manifest schema")
++
++sha = re.compile(r"^[0-9a-f]{40}$")
++digest = re.compile(r"^[0-9a-f]{64}$")
++tag = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$")
++version = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$")
++revision = re.compile(r"^r[1-9][0-9]*$")
++
++source = manifest["source"]
++if set(source) != {
++    "repository",
++    "previous_upstream_commit",
++    "previous_release_commit",
++}:
++    raise SystemExit("manifest source fields differ")
++if not source["repository"]:
++    raise SystemExit("manifest source repository is empty")
++for field in ("previous_upstream_commit", "previous_release_commit"):
++    if not sha.fullmatch(source[field]):
++        raise SystemExit(f"manifest source {field} is not a full Git SHA")
++
++upstream = manifest["upstream"]
++if set(upstream) != {"tag", "commit"}:
++    raise SystemExit("manifest upstream fields differ")
++if not tag.fullmatch(upstream["tag"]) or not sha.fullmatch(upstream["commit"]):
++    raise SystemExit("manifest upstream identity is invalid")
++
++identity = manifest["version"]
++if set(identity) != {"upstream", "downstream_revision"}:
++    raise SystemExit("manifest version fields differ")
++if not version.fullmatch(identity["upstream"]):
++    raise SystemExit("manifest upstream version is invalid")
++if not revision.fullmatch(identity["downstream_revision"]):
++    raise SystemExit("manifest downstream revision is invalid")
++if upstream["tag"] != f"v{identity['upstream']}":
++    raise SystemExit("manifest tag and version differ")
++
++prepared = manifest["prepared"]
++if set(prepared) != {"branch", "commit", "tree", "worktree"}:
++    raise SystemExit("manifest prepared fields differ")
++expected_branch = (
++    f"work/v{identity['upstream']}-synology-"
++    f"{identity['downstream_revision']}"
++)
++if prepared["branch"] != expected_branch:
++    raise SystemExit("manifest prepared branch differs from version identity")
++if not sha.fullmatch(prepared["commit"]) or not sha.fullmatch(prepared["tree"]):
++    raise SystemExit("manifest prepared Git identity is invalid")
++if not prepared["worktree"]:
++    raise SystemExit("manifest prepared worktree is empty")
++
++logical = manifest["logical_commits"]
++patches = manifest["patches"]
++if not logical or len(logical) != len(patches):
++    raise SystemExit("logical commit and patch counts must be equal and non-zero")
++for index, item in enumerate(logical, start=1):
++    if set(item) != {"order", "source_commit", "prepared_commit", "subject"}:
++        raise SystemExit("logical commit fields differ")
++    if item["order"] != index:
++        raise SystemExit("logical commits are not consecutively ordered")
++    if not sha.fullmatch(item["source_commit"]) or not sha.fullmatch(item["prepared_commit"]):
++        raise SystemExit("logical commit identity is invalid")
++    if not item["subject"]:
++        raise SystemExit("logical commit subject is empty")
++
++for index, item in enumerate(patches, start=1):
++    if set(item) != {"order", "filename", "sha256"}:
++        raise SystemExit("patch fields differ")
++    if item["order"] != index:
++        raise SystemExit("patches are not consecutively ordered")
++    filename = item["filename"]
++    pure = PurePosixPath(filename)
++    if (
++        pure.name != filename
++        or not re.fullmatch(r"[0-9]{4}-.+\.patch", filename)
++        or not digest.fullmatch(item["sha256"])
++    ):
++        raise SystemExit("patch artifact identity is invalid")
++
++if manifest["synology_contract"] != baseline["synology_contract"]:
++    raise SystemExit("manifest Synology contract differs from the baseline")
++if manifest["safety"] != baseline["safety"]:
++    raise SystemExit("manifest safety contract differs from the baseline")
++if set(manifest["safety"].values()) != {False}:
++    raise SystemExit("manifest safety capabilities must all be false")
++
++validation = manifest["validation"]
++if set(validation) != {
++    "source_range_linear",
++    "signed_commits",
++    "single_signoff_commits",
++    "patch_round_trip",
++    "round_trip_tree",
++}:
++    raise SystemExit("manifest validation fields differ")
++if validation["round_trip_tree"] != prepared["tree"]:
++    raise SystemExit("manifest round-trip tree differs from prepared tree")
++for field in (
++    "source_range_linear",
++    "signed_commits",
++    "single_signoff_commits",
++    "patch_round_trip",
++):
++    if validation[field] is not True:
++        raise SystemExit(f"manifest validation is not true: {field}")
++
++print("PASS: version-preparation manifest satisfies the strict schema contract.")
++PY
++}
+diff --git a/scripts/release/prepare-worktree.sh b/scripts/release/prepare-worktree.sh
+index dea16a7f2..820e252dd 100755
+--- a/scripts/release/prepare-worktree.sh
++++ b/scripts/release/prepare-worktree.sh
+@@ -7,7 +7,7 @@ SCRIPT_DIR="$(
+     pwd
+ )"
+ 
+-# shellcheck source=common.sh
++# shellcheck source=scripts/release/common.sh
+ . "${SCRIPT_DIR}/common.sh"
+ 
+ CONTROL_WORKTREE="$(
+@@ -15,6 +15,791 @@ CONTROL_WORKTREE="$(
+     "${SCRIPT_DIR}/../.." &&
+     pwd
+ )"
++
++prepare_version_usage() {
++  cat << 'USAGE'
++Usage:
++  bash scripts/release/prepare-worktree.sh prepare-version \
++    --source-repo PATH \
++    --upstream-tag vN.N.N \
++    --upstream-commit FULL_SHA \
++    --previous-upstream-commit FULL_SHA \
++    --previous-release-commit FULL_SHA \
++    --new-version N.N.N \
++    --downstream-revision rN \
++    --target-branch work/vN.N.N-synology-rN \
++    --target-worktree PATH \
++    --output-root PATH \
++    (--plan-only | --confirm-create)
++
++All Git objects and the explicit tag must already exist locally. This command
++does not fetch, push, tag, build, publish, install or operate a NAS.
++USAGE
++}
++
++prepare_version() (
++  SOURCE_REPO=""
++  UPSTREAM_TAG=""
++  UPSTREAM_COMMIT=""
++  PREVIOUS_UPSTREAM_COMMIT=""
++  PREVIOUS_RELEASE_COMMIT=""
++  NEW_VERSION=""
++  DOWNSTREAM_REVISION=""
++  TARGET_BRANCH=""
++  TARGET_WORKTREE=""
++  OUTPUT_ROOT=""
++  PLAN_ONLY=0
++  CONFIRM_CREATE=0
++  STAGING_DIR=""
++  ROUND_TRIP_PARENT=""
++  ROUND_TRIP_WORKTREE=""
++  MESSAGE_FILE=""
++
++  # shellcheck disable=SC2329 # Invoked by the EXIT trap below.
++  cleanup_prepare_version() {
++    if [ -n "$MESSAGE_FILE" ] &&
++      [ -f "$MESSAGE_FILE" ]; then
++      rm -f -- "$MESSAGE_FILE"
++    fi
++
++    if [ -n "$ROUND_TRIP_WORKTREE" ] &&
++      [ -n "$SOURCE_REPO" ]; then
++      release_clean_git \
++        -C "$SOURCE_REPO" \
++        worktree \
++        remove \
++        "$ROUND_TRIP_WORKTREE" \
++        > /dev/null 2>&1 || true
++    fi
++
++    if [ -n "$ROUND_TRIP_PARENT" ] &&
++      [[ "$ROUND_TRIP_PARENT" == /tmp/tailscale-version-round-trip.* ]]; then
++      rmdir -- "$ROUND_TRIP_PARENT" > /dev/null 2>&1 || true
++    fi
++
++    if [ -n "$STAGING_DIR" ] &&
++      [ -d "$STAGING_DIR" ] &&
++      [[ "$(basename "$STAGING_DIR")" == .*\.staging.* ]]; then
++      rm -rf -- "$STAGING_DIR"
++    fi
++  }
++
++  trap cleanup_prepare_version EXIT
++
++  require_option_value() {
++    if [ "$#" -lt 2 ] ||
++      [ -z "$2" ]; then
++      release_fail "$1 requires a value"
++      exit 2
++    fi
++  }
++
++  while [ "$#" -gt 0 ]; do
++    case "$1" in
++      --source-repo)
++        require_option_value "$@"
++        SOURCE_REPO="$2"
++        shift
++        ;;
++      --upstream-tag)
++        require_option_value "$@"
++        UPSTREAM_TAG="$2"
++        shift
++        ;;
++      --upstream-commit)
++        require_option_value "$@"
++        UPSTREAM_COMMIT="$2"
++        shift
++        ;;
++      --previous-upstream-commit)
++        require_option_value "$@"
++        PREVIOUS_UPSTREAM_COMMIT="$2"
++        shift
++        ;;
++      --previous-release-commit)
++        require_option_value "$@"
++        PREVIOUS_RELEASE_COMMIT="$2"
++        shift
++        ;;
++      --new-version)
++        require_option_value "$@"
++        NEW_VERSION="$2"
++        shift
++        ;;
++      --downstream-revision)
++        require_option_value "$@"
++        DOWNSTREAM_REVISION="$2"
++        shift
++        ;;
++      --target-branch)
++        require_option_value "$@"
++        TARGET_BRANCH="$2"
++        shift
++        ;;
++      --target-worktree)
++        require_option_value "$@"
++        TARGET_WORKTREE="$2"
++        shift
++        ;;
++      --output-root)
++        require_option_value "$@"
++        OUTPUT_ROOT="$2"
++        shift
++        ;;
++      --plan-only)
++        PLAN_ONLY=1
++        ;;
++      --confirm-create)
++        CONFIRM_CREATE=1
++        ;;
++      --help | -h)
++        prepare_version_usage
++        exit 0
++        ;;
++      *)
++        release_fail "unsupported prepare-version option: $1"
++        prepare_version_usage >&2
++        exit 2
++        ;;
++    esac
++    shift
++  done
++
++  for command_name in git python3 sha256sum mktemp; do
++    release_require_command "$command_name" || exit 1
++  done
++
++  for required_value in \
++    SOURCE_REPO \
++    UPSTREAM_TAG \
++    UPSTREAM_COMMIT \
++    PREVIOUS_UPSTREAM_COMMIT \
++    PREVIOUS_RELEASE_COMMIT \
++    NEW_VERSION \
++    DOWNSTREAM_REVISION \
++    TARGET_BRANCH \
++    TARGET_WORKTREE \
++    OUTPUT_ROOT; do
++    if [ -z "${!required_value}" ]; then
++      release_fail "required prepare-version input is absent: ${required_value}"
++      exit 2
++    fi
++  done
++
++  if [ "$PLAN_ONLY" -eq "$CONFIRM_CREATE" ]; then
++    release_fail "select exactly one of --plan-only or --confirm-create"
++    exit 2
++  fi
++
++  if [[ ! "$UPSTREAM_COMMIT" =~ ^[0-9a-f]{40}$ ]] ||
++    [[ ! "$PREVIOUS_UPSTREAM_COMMIT" =~ ^[0-9a-f]{40}$ ]] ||
++    [[ ! "$PREVIOUS_RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
++    release_fail "all commit identities must be full lowercase 40-character SHAs"
++    exit 2
++  fi
++
++  if [[ ! "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] ||
++    [ "$UPSTREAM_TAG" != "v${NEW_VERSION}" ]; then
++    release_fail "upstream tag and new version identity differ or are invalid"
++    exit 2
++  fi
++
++  if [[ ! "$DOWNSTREAM_REVISION" =~ ^r[1-9][0-9]*$ ]]; then
++    release_fail "downstream revision must use rN form"
++    exit 2
++  fi
++
++  EXPECTED_BRANCH="work/v${NEW_VERSION}-synology-${DOWNSTREAM_REVISION}"
++  if [ "$TARGET_BRANCH" != "$EXPECTED_BRANCH" ]; then
++    release_fail "target branch must equal ${EXPECTED_BRANCH}"
++    exit 2
++  fi
++
++  release_require_worktree "$CONTROL_WORKTREE" || exit 1
++  release_require_worktree "$SOURCE_REPO" || exit 1
++  release_require_clean_worktree "$SOURCE_REPO" || exit 1
++
++  SOURCE_REPO="$(
++    release_clean_git \
++      -C "$SOURCE_REPO" \
++      rev-parse \
++      --show-toplevel \
++      2> /dev/null ||
++      true
++  )"
++  if [ -z "$SOURCE_REPO" ]; then
++    release_fail "could not resolve source repository root"
++    exit 1
++  fi
++  TARGET_WORKTREE="$(release_absolute_path "$TARGET_WORKTREE")"
++  OUTPUT_ROOT="$(release_absolute_path "$OUTPUT_ROOT")"
++
++  if [ -e "$TARGET_WORKTREE" ] ||
++    [ -e "$OUTPUT_ROOT" ]; then
++    release_fail "target worktree and output root must not already exist"
++    exit 1
++  fi
++
++  if [ ! -d "$(dirname "$TARGET_WORKTREE")" ] ||
++    [ ! -d "$(dirname "$OUTPUT_ROOT")" ]; then
++    release_fail "target worktree and output parent directories must already exist"
++    exit 1
++  fi
++
++  bash "${CONTROL_WORKTREE}/tests/releases/version-preparation-contract.sh" ||
++    {
++      release_fail "version-preparation baseline validation failed"
++      exit 1
++    }
++
++  for commit_id in \
++    "$UPSTREAM_COMMIT" \
++    "$PREVIOUS_UPSTREAM_COMMIT" \
++    "$PREVIOUS_RELEASE_COMMIT"; do
++    release_clean_git \
++      -C "$SOURCE_REPO" \
++      cat-file \
++      -e \
++      "${commit_id}^{commit}" 2> /dev/null ||
++      {
++        release_fail "required commit is unavailable locally: ${commit_id}"
++        exit 1
++      }
++  done
++
++  PEELED_TAG="$(
++    release_clean_git \
++      -C "$SOURCE_REPO" \
++      rev-parse \
++      --verify \
++      "refs/tags/${UPSTREAM_TAG}^{commit}" \
++      2> /dev/null ||
++      true
++  )"
++  if [ "$PEELED_TAG" != "$UPSTREAM_COMMIT" ]; then
++    release_fail "explicit upstream tag does not peel to the explicit commit"
++    exit 1
++  fi
++
++  if ! release_clean_git \
++    -C "$SOURCE_REPO" \
++    merge-base \
++    --is-ancestor \
++    "$PREVIOUS_UPSTREAM_COMMIT" \
++    "$PREVIOUS_RELEASE_COMMIT"; then
++    release_fail "previous upstream commit is not an ancestor of the previous release"
++    exit 1
++  fi
++
++  mapfile -t SOURCE_COMMITS < <(
++    release_clean_git \
++      -C "$SOURCE_REPO" \
++      rev-list \
++      --reverse \
++      --topo-order \
++      "${PREVIOUS_UPSTREAM_COMMIT}..${PREVIOUS_RELEASE_COMMIT}"
++  )
++  if [ "${#SOURCE_COMMITS[@]}" -eq 0 ]; then
++    release_fail "previous downstream logical range is empty"
++    exit 1
++  fi
++
++  EXPECTED_PARENT="$PREVIOUS_UPSTREAM_COMMIT"
++  for source_commit in "${SOURCE_COMMITS[@]}"; do
++    read -r -a COMMIT_WITH_PARENTS <<< "$(
++      release_clean_git \
++        -C "$SOURCE_REPO" \
++        rev-list \
++        --parents \
++        -n \
++        1 \
++        "$source_commit"
++    )"
++    if [ "${#COMMIT_WITH_PARENTS[@]}" -ne 2 ] ||
++      [ "${COMMIT_WITH_PARENTS[1]}" != "$EXPECTED_PARENT" ]; then
++      release_fail "previous downstream range is not one linear ordered stack"
++      exit 1
++    fi
++    EXPECTED_PARENT="$source_commit"
++  done
++  if [ "$EXPECTED_PARENT" != "$PREVIOUS_RELEASE_COMMIT" ]; then
++    release_fail "previous release tip differs from the ordered logical stack"
++    exit 1
++  fi
++
++  if release_clean_git \
++    -C "$SOURCE_REPO" \
++    show-ref \
++    --verify \
++    --quiet \
++    "refs/heads/${TARGET_BRANCH}"; then
++    release_fail "target local branch already exists"
++    exit 1
++  fi
++
++  SIGNING_KEY="$(
++    release_clean_git \
++      -C "$SOURCE_REPO" \
++      config \
++      --get \
++      user.signingkey \
++      2> /dev/null ||
++      true
++  )"
++  COMMIT_SIGNING="$(
++    release_clean_git \
++      -C "$SOURCE_REPO" \
++      config \
++      --bool \
++      --get \
++      commit.gpgsign \
++      2> /dev/null ||
++      true
++  )"
++  AUTHOR_NAME="$(release_clean_git -C "$SOURCE_REPO" config --get user.name || true)"
++  AUTHOR_EMAIL="$(release_clean_git -C "$SOURCE_REPO" config --get user.email || true)"
++  if [ -z "$SIGNING_KEY" ] ||
++    [ "$COMMIT_SIGNING" != "true" ] ||
++    [ -z "$AUTHOR_NAME" ] ||
++    [ -z "$AUTHOR_EMAIL" ]; then
++    release_fail "source repository lacks complete author and commit-signing configuration"
++    exit 1
++  fi
++
++  printf '=== Pinned Synology version preparation plan ===\n'
++  printf 'Source repository:          %s\n' "$SOURCE_REPO"
++  printf 'Upstream tag:               %s\n' "$UPSTREAM_TAG"
++  printf 'Upstream commit:            %s\n' "$UPSTREAM_COMMIT"
++  printf 'Previous upstream commit:   %s\n' "$PREVIOUS_UPSTREAM_COMMIT"
++  printf 'Previous release commit:    %s\n' "$PREVIOUS_RELEASE_COMMIT"
++  printf 'Logical commit count:       %s\n' "${#SOURCE_COMMITS[@]}"
++  printf 'New version:                %s\n' "$NEW_VERSION"
++  printf 'Downstream revision:        %s\n' "$DOWNSTREAM_REVISION"
++  printf 'Target branch:              %s\n' "$TARGET_BRANCH"
++  printf 'Target worktree:            %s\n' "$TARGET_WORKTREE"
++  printf 'Review artifact root:       %s\n' "$OUTPUT_ROOT"
++  printf 'Commit signer configuration:%s\n' " present"
++  printf 'Publication capabilities:   disabled\n'
++
++  for source_commit in "${SOURCE_COMMITS[@]}"; do
++    printf '  %s %s\n' \
++      "$source_commit" \
++      "$(release_clean_git -C "$SOURCE_REPO" show -s --format=%s "$source_commit")"
++  done
++
++  if [ "$PLAN_ONLY" -eq 1 ]; then
++    release_pass "pinned version preparation plan is valid"
++    release_notice "no branch, worktree, commit, artifact or remote ref was changed"
++    exit 0
++  fi
++
++  release_clean_git \
++    -C "$SOURCE_REPO" \
++    worktree \
++    add \
++    -b "$TARGET_BRANCH" \
++    "$TARGET_WORKTREE" \
++    "$UPSTREAM_COMMIT"
++  WORKTREE_RC=$?
++  if [ "$WORKTREE_RC" -ne 0 ]; then
++    release_fail "isolated preparation worktree creation failed"
++    exit "$WORKTREE_RC"
++  fi
++
++  release_clean_git \
++    -C "$TARGET_WORKTREE" \
++    config \
++    extensions.worktreeConfig \
++    true
++  release_clean_git \
++    -C "$TARGET_WORKTREE" \
++    config \
++    --worktree \
++    commit.gpgsign \
++    true
++
++  MESSAGE_FILE="$(mktemp /tmp/tailscale-version-message.XXXXXX)"
++  PREPARED_COMMITS=()
++
++  for source_commit in "${SOURCE_COMMITS[@]}"; do
++    printf 'Replaying logical commit: %s\n' "$source_commit"
++    release_clean_git \
++      -C "$TARGET_WORKTREE" \
++      cherry-pick \
++      --no-commit \
++      "$source_commit"
++    CHERRY_PICK_RC=$?
++    if [ "$CHERRY_PICK_RC" -ne 0 ]; then
++      release_clean_git \
++        -C "$TARGET_WORKTREE" \
++        cherry-pick \
++        --abort \
++        > /dev/null 2>&1 || true
++      release_clean_git \
++        -C "$TARGET_WORKTREE" \
++        reset \
++        --hard \
++        HEAD \
++        > /dev/null 2>&1 || true
++      release_fail "logical commit replay conflicted: ${source_commit}"
++      exit "$CHERRY_PICK_RC"
++    fi
++
++    release_clean_git \
++      -C "$SOURCE_REPO" \
++      show \
++      -s \
++      --format=%B \
++      "$source_commit" \
++      > "$MESSAGE_FILE"
++    python3 - "$MESSAGE_FILE" << 'PY'
++import re
++import sys
++from pathlib import Path
++
++path = Path(sys.argv[1])
++lines = path.read_text(encoding="utf-8").splitlines()
++lines = [line for line in lines if not re.match(r"^Signed-off-by:\s", line, re.I)]
++while lines and not lines[-1]:
++    lines.pop()
++path.write_text("\n".join(lines) + "\n", encoding="utf-8")
++PY
++
++    release_clean_git \
++      -C "$TARGET_WORKTREE" \
++      commit \
++      -S \
++      -s \
++      -F "$MESSAGE_FILE"
++    COMMIT_RC=$?
++    if [ "$COMMIT_RC" -ne 0 ]; then
++      release_clean_git \
++        -C "$TARGET_WORKTREE" \
++        reset \
++        --hard \
++        HEAD \
++        > /dev/null 2>&1 || true
++      release_fail "signed logical commit creation failed: ${source_commit}"
++      exit "$COMMIT_RC"
++    fi
++
++    prepared_commit="$(release_clean_git -C "$TARGET_WORKTREE" rev-parse HEAD)"
++    if ! release_clean_git \
++      -C "$TARGET_WORKTREE" \
++      verify-commit \
++      "$prepared_commit" \
++      > /dev/null; then
++      release_fail "prepared commit signature verification failed: ${prepared_commit}"
++      exit 1
++    fi
++    if [ "$(release_count_signoffs "$TARGET_WORKTREE" "$prepared_commit")" -ne 1 ] ||
++      [ "$(release_count_matching_signoff "$TARGET_WORKTREE" "$prepared_commit")" -ne 1 ]; then
++      release_fail "prepared commit must contain exactly one matching sign-off"
++      exit 1
++    fi
++    PREPARED_COMMITS+=("$prepared_commit")
++  done
++
++  rm -f -- "$MESSAGE_FILE"
++  MESSAGE_FILE=""
++
++  OUTPUT_PARENT="$(dirname "$OUTPUT_ROOT")"
++  OUTPUT_BASENAME="$(basename "$OUTPUT_ROOT")"
++  STAGING_DIR="$(
++    mktemp \
++      -d \
++      "${OUTPUT_PARENT}/.${OUTPUT_BASENAME}.staging.XXXXXX"
++  )"
++  mkdir -p "$STAGING_DIR/patches"
++
++  release_clean_git \
++    -C "$TARGET_WORKTREE" \
++    format-patch \
++    --no-signature \
++    --output-directory "$STAGING_DIR/patches" \
++    "${UPSTREAM_COMMIT}..HEAD" \
++    > /dev/null
++  FORMAT_RC=$?
++  if [ "$FORMAT_RC" -ne 0 ]; then
++    release_fail "mail patch export failed"
++    exit "$FORMAT_RC"
++  fi
++
++  mapfile -t PATCH_PATHS < <(
++    find "$STAGING_DIR/patches" \
++      -maxdepth 1 \
++      -type f \
++      -name '*.patch' \
++      -print |
++      sort
++  )
++  if [ "${#PATCH_PATHS[@]}" -ne "${#SOURCE_COMMITS[@]}" ]; then
++    release_fail "mail patch count differs from logical commit count"
++    exit 1
++  fi
++
++  : > "$STAGING_DIR/patches/series"
++  for patch_path in "${PATCH_PATHS[@]}"; do
++    basename "$patch_path" >> "$STAGING_DIR/patches/series"
++  done
++
++  ROUND_TRIP_PARENT="$(mktemp -d /tmp/tailscale-version-round-trip.XXXXXX)"
++  ROUND_TRIP_WORKTREE="${ROUND_TRIP_PARENT}/worktree"
++  release_clean_git \
++    -C "$SOURCE_REPO" \
++    worktree \
++    add \
++    --detach \
++    "$ROUND_TRIP_WORKTREE" \
++    "$UPSTREAM_COMMIT" \
++    > /dev/null
++  ROUND_WORKTREE_RC=$?
++  if [ "$ROUND_WORKTREE_RC" -ne 0 ]; then
++    release_fail "round-trip worktree creation failed"
++    exit "$ROUND_WORKTREE_RC"
++  fi
++
++  release_clean_git \
++    -C "$ROUND_TRIP_WORKTREE" \
++    am \
++    --3way \
++    "${PATCH_PATHS[@]}" \
++    > /dev/null
++  ROUND_APPLY_RC=$?
++  if [ "$ROUND_APPLY_RC" -ne 0 ]; then
++    release_clean_git \
++      -C "$ROUND_TRIP_WORKTREE" \
++      am \
++      --abort \
++      > /dev/null 2>&1 || true
++    release_fail "mail patch round-trip application failed"
++    exit "$ROUND_APPLY_RC"
++  fi
++
++  PREPARED_HEAD="$(release_clean_git -C "$TARGET_WORKTREE" rev-parse HEAD)"
++  PREPARED_TREE="$(release_clean_git -C "$TARGET_WORKTREE" rev-parse 'HEAD^{tree}')"
++  ROUND_TRIP_TREE="$(release_clean_git -C "$ROUND_TRIP_WORKTREE" rev-parse 'HEAD^{tree}')"
++  if [ "$ROUND_TRIP_TREE" != "$PREPARED_TREE" ]; then
++    release_fail "mail patch round-trip tree differs from the prepared tree"
++    exit 1
++  fi
++
++  release_clean_git \
++    -C "$SOURCE_REPO" \
++    worktree \
++    remove \
++    "$ROUND_TRIP_WORKTREE" \
++    > /dev/null
++  ROUND_TRIP_WORKTREE=""
++  rmdir -- "$ROUND_TRIP_PARENT"
++  ROUND_TRIP_PARENT=""
++
++  printf '%s\n' "${SOURCE_COMMITS[@]}" > "$STAGING_DIR/.source-commits"
++  printf '%s\n' "${PREPARED_COMMITS[@]}" > "$STAGING_DIR/.prepared-commits"
++
++  python3 - \
++    "$STAGING_DIR/manifest.json" \
++    "$STAGING_DIR/.source-commits" \
++    "$STAGING_DIR/.prepared-commits" \
++    "$STAGING_DIR/patches/series" \
++    "$STAGING_DIR/patches" \
++    "$SOURCE_REPO" \
++    "$PREVIOUS_UPSTREAM_COMMIT" \
++    "$PREVIOUS_RELEASE_COMMIT" \
++    "$UPSTREAM_TAG" \
++    "$UPSTREAM_COMMIT" \
++    "$NEW_VERSION" \
++    "$DOWNSTREAM_REVISION" \
++    "$TARGET_BRANCH" \
++    "$TARGET_WORKTREE" \
++    "$PREPARED_HEAD" \
++    "$PREPARED_TREE" \
++    "$CONTROL_WORKTREE/release/upgrade-baseline.json" << 'PY'
++import hashlib
++import json
++import subprocess
++import sys
++from pathlib import Path
++
++(
++    manifest_path,
++    source_commits_path,
++    prepared_commits_path,
++    series_path,
++    patches_path,
++    source_repo,
++    previous_upstream,
++    previous_release,
++    upstream_tag,
++    upstream_commit,
++    new_version,
++    revision,
++    branch,
++    worktree,
++    prepared_head,
++    prepared_tree,
++    baseline_path,
++) = sys.argv[1:]
++
++source_commits = Path(source_commits_path).read_text(encoding="utf-8").splitlines()
++prepared_commits = Path(prepared_commits_path).read_text(encoding="utf-8").splitlines()
++patch_names = Path(series_path).read_text(encoding="utf-8").splitlines()
++baseline = json.loads(Path(baseline_path).read_text(encoding="utf-8"))
++
++logical = []
++for order, (source_commit, prepared_commit) in enumerate(
++    zip(source_commits, prepared_commits, strict=True), start=1
++):
++    subject = subprocess.check_output(
++        ["git", "-C", source_repo, "show", "-s", "--format=%s", source_commit],
++        text=True,
++    ).rstrip("\n")
++    logical.append(
++        {
++            "order": order,
++            "source_commit": source_commit,
++            "prepared_commit": prepared_commit,
++            "subject": subject,
++        }
++    )
++
++patches = []
++for order, name in enumerate(patch_names, start=1):
++    digest = hashlib.sha256((Path(patches_path) / name).read_bytes()).hexdigest()
++    patches.append({"order": order, "filename": name, "sha256": digest})
++
++manifest = {
++    "schema_version": 1,
++    "source": {
++        "repository": source_repo,
++        "previous_upstream_commit": previous_upstream,
++        "previous_release_commit": previous_release,
++    },
++    "upstream": {"tag": upstream_tag, "commit": upstream_commit},
++    "version": {"upstream": new_version, "downstream_revision": revision},
++    "prepared": {
++        "branch": branch,
++        "commit": prepared_head,
++        "tree": prepared_tree,
++        "worktree": worktree,
++    },
++    "logical_commits": logical,
++    "patches": patches,
++    "synology_contract": baseline["synology_contract"],
++    "validation": {
++        "source_range_linear": True,
++        "signed_commits": True,
++        "single_signoff_commits": True,
++        "patch_round_trip": True,
++        "round_trip_tree": prepared_tree,
++    },
++    "safety": baseline["safety"],
++}
++Path(manifest_path).write_text(
++    json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
++)
++PY
++
++  release_validate_version_preparation_manifest \
++    "$STAGING_DIR/manifest.json" \
++    "$CONTROL_WORKTREE/release/version-preparation.schema.json" \
++    "$CONTROL_WORKTREE/release/upgrade-baseline.json" || exit 1
++
++  python3 - \
++    "$STAGING_DIR/preparation-report.md" \
++    "$STAGING_DIR/manifest.json" << 'PY'
++import json
++import sys
++from pathlib import Path
++
++report_path = Path(sys.argv[1])
++manifest = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
++lines = [
++    "# Synology version preparation evidence",
++    "",
++    "## Change summary",
++    "",
++    f"- Upstream: `{manifest['upstream']['tag']}` at `{manifest['upstream']['commit']}`",
++    f"- Previous upstream: `{manifest['source']['previous_upstream_commit']}`",
++    f"- Previous release: `{manifest['source']['previous_release_commit']}`",
++    f"- Prepared branch: `{manifest['prepared']['branch']}`",
++    f"- Prepared commit: `{manifest['prepared']['commit']}`",
++    f"- Prepared tree: `{manifest['prepared']['tree']}`",
++    "",
++    "## Ordered logical history",
++    "",
++]
++for item in manifest["logical_commits"]:
++    lines.append(
++        f"{item['order']}. `{item['source_commit']}` -> "
++        f"`{item['prepared_commit']}` — {item['subject']}"
++    )
++lines.extend(
++    [
++        "",
++        "## Validation evidence",
++        "",
++        "- Source range: linear and ordered",
++        "- Prepared commits: signed with one matching sign-off each",
++        "- Patch series: mail format with verified SHA-256 digests",
++        f"- Round-trip tree: `{manifest['validation']['round_trip_tree']}`",
++        "",
++        "## Fixed product contract",
++        "",
++        "- Dependency: `iptables-netfilter-extensions`",
++        "- Dependency minimum: `1.1.0-3`",
++        "- Dependency and Tailscale DSM minimum: `7.3-86009`",
++        "- Production `os_max_ver`: absent",
++        "",
++        "## Risks and reviewer attention",
++        "",
++        "Review the range-diff and run source/package/hardware validation separately.",
++        "",
++        "## Prohibited side effects",
++        "",
++        "No fetch, push, pull request, tag, SPK build, release, publication, NAS",
++        "installation, root bootstrap, firewall mutation or reboot was performed.",
++        "",
++        "## Verdict",
++        "",
++        "`PASS — ready for independent source review`",
++        "",
++    ]
++)
++report_path.write_text("\n".join(lines), encoding="utf-8")
++PY
++
++  rm -f -- "$STAGING_DIR/.source-commits" "$STAGING_DIR/.prepared-commits"
++  CHECKSUM_PATHS=(
++    manifest.json
++    preparation-report.md
++    patches/series
++  )
++  for patch_path in "${PATCH_PATHS[@]}"; do
++    CHECKSUM_PATHS+=("patches/$(basename "$patch_path")")
++  done
++  (
++    cd "$STAGING_DIR" || exit 1
++    sha256sum "${CHECKSUM_PATHS[@]}" > SHA256SUMS
++  ) || {
++    release_fail "review artifact checksum generation failed"
++    exit 1
++  }
++
++  mv -- "$STAGING_DIR" "$OUTPUT_ROOT"
++  STAGING_DIR=""
++
++  release_pass "pinned Synology version was prepared in an isolated worktree"
++  release_pass "signed logical history and mail patches passed round-trip validation"
++  release_notice "no fetch, push, tag, PR, build, publication or NAS action was performed"
++)
++
++if [ "${1:-}" = "prepare-version" ]; then
++  shift
++  prepare_version "$@"
++  exit $?
++fi
++
+ SOURCE_REPO=""
+ MANIFEST=""
+ ROLE="work"
+diff --git a/tests/releases/prepare-version-workflow.sh b/tests/releases/prepare-version-workflow.sh
+new file mode 100755
+index 000000000..c741d0cf0
+--- /dev/null
++++ b/tests/releases/prepare-version-workflow.sh
+@@ -0,0 +1,316 @@
++#!/usr/bin/env bash
++set -u
++
++REPO_ROOT="$(
++  cd \
++    "$(dirname "${BASH_SOURCE[0]}")/../.." &&
++    pwd
++)"
++PREPARE_SCRIPT="${REPO_ROOT}/scripts/release/prepare-worktree.sh"
++CASE="${1:-success}"
++TEMP_ROOT=""
++SOURCE_REPO=""
++
++fail() {
++  printf 'FAIL: %s\n' "$1" >&2
++  exit 1
++}
++
++cleanup() {
++  if [ -n "$SOURCE_REPO" ] &&
++    [ -d "$SOURCE_REPO/.git" ]; then
++    while IFS= read -r registered_worktree; do
++      if [ "$registered_worktree" != "$SOURCE_REPO" ] &&
++        [ -n "$TEMP_ROOT" ] &&
++        [[ "$registered_worktree" == "$TEMP_ROOT"/* ]]; then
++        git -C "$SOURCE_REPO" worktree remove "$registered_worktree" \
++          > /dev/null 2>&1 || true
++      fi
++    done < <(
++      git -C "$SOURCE_REPO" worktree list --porcelain |
++        sed -n 's/^worktree //p'
++    )
++  fi
++
++  if [ -n "$TEMP_ROOT" ] &&
++    [[ "$TEMP_ROOT" == /tmp/tailscale-prepare-version-test.* ]]; then
++    rm -rf -- "$TEMP_ROOT"
++  fi
++}
++
++trap cleanup EXIT
++
++require_command() {
++  command -v "$1" > /dev/null 2>&1 || fail "required command unavailable: $1"
++}
++
++git_fixture() {
++  git -C "$SOURCE_REPO" "$@"
++}
++
++write_product() {
++  upstream_value="$1"
++  network_value="$2"
++  printf 'upstream=%s\nnetwork=%s\n' "$upstream_value" "$network_value" \
++    > "$SOURCE_REPO/product.conf"
++}
++
++snapshot_refs() {
++  refs_repo="$1"
++  git -C "$refs_repo" show-ref 2> /dev/null | sort || true
++}
++
++assert_equal() {
++  expected="$1"
++  actual="$2"
++  message="$3"
++
++  if [ "$actual" != "$expected" ]; then
++    printf 'Expected: %s\nObserved: %s\n' "$expected" "$actual" >&2
++    fail "$message"
++  fi
++}
++
++assert_file() {
++  [ -s "$1" ] || fail "required artifact is missing or empty: $1"
++}
++
++create_success_fixture() {
++  TEMP_ROOT="$(mktemp -d /tmp/tailscale-prepare-version-test.XXXXXX)"
++  SOURCE_REPO="${TEMP_ROOT}/source"
++  BARE_ORIGIN="${TEMP_ROOT}/origin.git"
++  SIGNING_KEY="${TEMP_ROOT}/signing-key"
++  ALLOWED_SIGNERS="${TEMP_ROOT}/allowed_signers"
++  PREPARED_WORKTREE="${TEMP_ROOT}/prepared"
++  ARTIFACTS="${TEMP_ROOT}/artifacts"
++  LOG="${TEMP_ROOT}/prepare.log"
++
++  git init --bare --initial-branch=main "$BARE_ORIGIN" > /dev/null 2>&1 ||
++    fail "could not create bare origin"
++  git init -b main "$SOURCE_REPO" > /dev/null 2>&1 ||
++    fail "could not create source repository"
++  git_fixture config user.name "Fixture Agent"
++  git_fixture config user.email "fixture@example.invalid"
++  git_fixture config commit.gpgsign false
++
++  write_product old userspace
++  git_fixture add product.conf
++  git_fixture commit -m "upstream: old base" > /dev/null || fail "could not commit old base"
++  OLD_UPSTREAM="$(git_fixture rev-parse HEAD)"
++  git_fixture tag v1.0.0 "$OLD_UPSTREAM"
++
++  git_fixture switch -c previous-release > /dev/null 2>&1
++  write_product old kernel
++  git_fixture add product.conf
++  git_fixture commit -s -m "synology: enable kernel tun" > /dev/null ||
++    fail "could not commit first logical change"
++  FIRST_SOURCE_COMMIT="$(git_fixture rev-parse HEAD)"
++
++  printf 'backend=linux-netfilter\n' > "$SOURCE_REPO/netfilter.conf"
++  git_fixture add netfilter.conf
++  git_fixture commit -s -m "synology: enable linux netfilter" > /dev/null ||
++    fail "could not commit second logical change"
++  PREVIOUS_RELEASE="$(git_fixture rev-parse HEAD)"
++
++  git_fixture switch main > /dev/null 2>&1
++  printf 'release=2.0.0\n' > "$SOURCE_REPO/upstream-release.conf"
++  git_fixture add upstream-release.conf
++  git_fixture commit -m "upstream: new release" > /dev/null ||
++    fail "could not commit new upstream"
++  NEW_UPSTREAM="$(git_fixture rev-parse HEAD)"
++  git_fixture tag v2.0.0 "$NEW_UPSTREAM"
++
++  ssh-keygen -q -t ed25519 -N '' -f "$SIGNING_KEY" ||
++    fail "could not generate fixture signing key"
++  printf 'fixture@example.invalid %s\n' "$(<"${SIGNING_KEY}.pub")" \
++    > "$ALLOWED_SIGNERS"
++  git_fixture config gpg.format ssh
++  git_fixture config user.signingkey "$SIGNING_KEY"
++  git_fixture config gpg.ssh.allowedSignersFile "$ALLOWED_SIGNERS"
++  git_fixture config commit.gpgsign true
++  git_fixture remote add origin "$BARE_ORIGIN"
++  git_fixture push origin main previous-release --tags > /dev/null 2>&1 ||
++    fail "could not seed fixture origin"
++
++  REMOTE_REFS_BEFORE="$(snapshot_refs "$BARE_ORIGIN")"
++  TAG_REFS_BEFORE="$(git_fixture show-ref --tags | sort)"
++
++  if ! bash "$PREPARE_SCRIPT" prepare-version \
++    --source-repo "$SOURCE_REPO" \
++    --upstream-tag v2.0.0 \
++    --upstream-commit "$NEW_UPSTREAM" \
++    --previous-upstream-commit "$OLD_UPSTREAM" \
++    --previous-release-commit "$PREVIOUS_RELEASE" \
++    --new-version 2.0.0 \
++    --downstream-revision r1 \
++    --target-branch work/v2.0.0-synology-r1 \
++    --target-worktree "$PREPARED_WORKTREE" \
++    --output-root "$ARTIFACTS" \
++    --confirm-create \
++    > "$LOG" 2>&1; then
++    sed -n '1,240p' "$LOG" >&2
++    fail "prepare-version success fixture did not complete"
++  fi
++
++  assert_file "$ARTIFACTS/manifest.json"
++  assert_file "$ARTIFACTS/SHA256SUMS"
++  assert_file "$ARTIFACTS/patches/series"
++  assert_file "$ARTIFACTS/preparation-report.md"
++
++  PREPARED_HEAD="$(git -C "$PREPARED_WORKTREE" rev-parse HEAD)"
++  PREPARED_TREE="$(git -C "$PREPARED_WORKTREE" rev-parse 'HEAD^{tree}')"
++  PREPARED_BASE="$(git -C "$PREPARED_WORKTREE" rev-parse 'HEAD~2')"
++  assert_equal "$NEW_UPSTREAM" "$PREPARED_BASE" \
++    "prepared stack does not start at the exact new upstream commit"
++
++  mapfile -t PREPARED_COMMITS < <(
++    git -C "$PREPARED_WORKTREE" rev-list --reverse "${NEW_UPSTREAM}..HEAD"
++  )
++  assert_equal "2" "${#PREPARED_COMMITS[@]}" \
++    "prepared stack does not preserve the logical commit count"
++
++  EXPECTED_SUBJECTS=$'synology: enable kernel tun\nsynology: enable linux netfilter'
++  ACTUAL_SUBJECTS="$(
++    git -C "$PREPARED_WORKTREE" log --reverse --format=%s "${NEW_UPSTREAM}..HEAD"
++  )"
++  assert_equal "$EXPECTED_SUBJECTS" "$ACTUAL_SUBJECTS" \
++    "prepared stack does not preserve logical order"
++
++  for prepared_commit in "${PREPARED_COMMITS[@]}"; do
++    git -C "$PREPARED_WORKTREE" verify-commit "$prepared_commit" \
++      > /dev/null 2>&1 ||
++      fail "prepared commit signature is invalid: ${prepared_commit}"
++    signoff_count="$(
++      git -C "$PREPARED_WORKTREE" show -s --format=%B "$prepared_commit" |
++        git interpret-trailers --parse |
++        grep -Eic '^Signed-off-by:[[:space:]]' || true
++    )"
++    assert_equal "1" "$signoff_count" \
++      "prepared commit does not contain exactly one sign-off"
++  done
++
++  mapfile -t PATCH_FILES < "$ARTIFACTS/patches/series"
++  assert_equal "2" "${#PATCH_FILES[@]}" \
++    "mail patch series does not contain two ordered entries"
++  for patch_name in "${PATCH_FILES[@]}"; do
++    case "$patch_name" in
++      [0-9][0-9][0-9][0-9]-*.patch) ;;
++      *) fail "mail patch has an unsafe name: ${patch_name}" ;;
++    esac
++    assert_file "$ARTIFACTS/patches/$patch_name"
++  done
++
++  (
++    cd "$ARTIFACTS" || exit 1
++    sha256sum -c SHA256SUMS
++  ) > /dev/null || fail "review artifact checksums do not verify"
++
++  python3 - \
++    "$ARTIFACTS/manifest.json" \
++    "$SOURCE_REPO" \
++    "$OLD_UPSTREAM" \
++    "$PREVIOUS_RELEASE" \
++    "$NEW_UPSTREAM" \
++    "$PREPARED_HEAD" \
++    "$PREPARED_TREE" \
++    "$FIRST_SOURCE_COMMIT" << 'PY'
++import json
++import sys
++from pathlib import Path
++
++(
++    manifest_path,
++    source_repo,
++    old_upstream,
++    old_release,
++    new_upstream,
++    prepared_head,
++    prepared_tree,
++    first_source_commit,
++) = sys.argv[1:]
++manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
++required = {
++    "schema_version",
++    "source",
++    "upstream",
++    "version",
++    "prepared",
++    "logical_commits",
++    "patches",
++    "synology_contract",
++    "validation",
++    "safety",
++}
++if set(manifest) != required:
++    raise SystemExit("manifest top-level fields differ from schema contract")
++if manifest["schema_version"] != 1:
++    raise SystemExit("manifest schema version differs")
++if manifest["source"] != {
++    "repository": source_repo,
++    "previous_upstream_commit": old_upstream,
++    "previous_release_commit": old_release,
++}:
++    raise SystemExit("manifest source identities differ")
++if manifest["upstream"] != {"tag": "v2.0.0", "commit": new_upstream}:
++    raise SystemExit("manifest upstream identity differs")
++if manifest["version"] != {"upstream": "2.0.0", "downstream_revision": "r1"}:
++    raise SystemExit("manifest version identity differs")
++prepared = manifest["prepared"]
++if prepared["branch"] != "work/v2.0.0-synology-r1":
++    raise SystemExit("manifest prepared branch differs")
++if prepared["commit"] != prepared_head or prepared["tree"] != prepared_tree:
++    raise SystemExit("manifest prepared commit/tree differs")
++logical = manifest["logical_commits"]
++if len(logical) != 2 or logical[0]["source_commit"] != first_source_commit:
++    raise SystemExit("manifest logical history differs")
++if [item["order"] for item in logical] != [1, 2]:
++    raise SystemExit("manifest logical history order differs")
++if [item["order"] for item in manifest["patches"]] != [1, 2]:
++    raise SystemExit("manifest patch order differs")
++if manifest["synology_contract"] != {
++    "dependency_section": "iptables-netfilter-extensions",
++    "dependency_minimum": "1.1.0-3",
++    "dependency_os_minimum": "7.3-86009",
++    "tailscale_os_minimum": "7.3-86009",
++    "os_max_ver_allowed": False,
++}:
++    raise SystemExit("manifest Synology contract differs")
++if set(manifest["safety"].values()) != {False}:
++    raise SystemExit("manifest safety capabilities are not all false")
++validation = manifest["validation"]
++if validation != {
++    "source_range_linear": True,
++    "signed_commits": True,
++    "single_signoff_commits": True,
++    "patch_round_trip": True,
++    "round_trip_tree": prepared_tree,
++}:
++    raise SystemExit("manifest validation evidence differs")
++PY
++
++  REMOTE_REFS_AFTER="$(snapshot_refs "$BARE_ORIGIN")"
++  TAG_REFS_AFTER="$(git_fixture show-ref --tags | sort)"
++  assert_equal "$REMOTE_REFS_BEFORE" "$REMOTE_REFS_AFTER" \
++    "prepare-version changed remote refs"
++  assert_equal "$TAG_REFS_BEFORE" "$TAG_REFS_AFTER" \
++    "prepare-version changed local tags"
++
++  if find "$TEMP_ROOT" -type f -name '*.spk' -print -quit | grep -q .; then
++    fail "prepare-version created an SPK side effect"
++  fi
++
++  printf 'PASS: offline success fixture prepared signed ordered patches without publication side effects.\n'
++}
++
++for command_name in git python3 sha256sum ssh-keygen sed sort; do
++  require_command "$command_name"
++done
++
++case "$CASE" in
++  success)
++    create_success_fixture
++    ;;
++  *)
++    fail "unsupported fixture case: ${CASE}"
++    ;;
++esac

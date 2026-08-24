@@ -1,0 +1,23 @@
+From 9c649700d3a4c8ee7338fb2f19a3c948320bd710 Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Mon, 24 Aug 2026 18:23:15 +1000
+Subject: [PATCH 46/58] fix: suppress legacy worktree hooks
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ scripts/release/prepare-worktree.sh | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/scripts/release/prepare-worktree.sh b/scripts/release/prepare-worktree.sh
+index d3fa906b8..153fec5e8 100755
+--- a/scripts/release/prepare-worktree.sh
++++ b/scripts/release/prepare-worktree.sh
+@@ -1040,7 +1040,7 @@ if [ -n "$REMOTE_MATCH" ]; then
+   exit 1
+ fi
+ 
+-release_clean_git \
++release_hookless_git \
+   -C "$SOURCE_REPO" \
+   worktree \
+   add \
