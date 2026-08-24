@@ -80,7 +80,6 @@ import (
 	"tailscale.com/types/netmap"
 	"tailscale.com/types/opt"
 	"tailscale.com/types/persist"
-	"tailscale.com/types/preftype"
 	"tailscale.com/types/views"
 	"tailscale.com/util/checkchange"
 	"tailscale.com/util/clientmetric"
@@ -5832,11 +5831,6 @@ func (b *LocalBackend) routerConfigLocked(cfg *wgcfg.Config, prefs ipn.PrefsView
 		Routes:              peerRoutes(b.logf, cfg.Peers, singleRouteThreshold, prefs.RouteAll()),
 		NetfilterKind:       netfilterKind,
 		RemoveCGNATDropRule: nm.HasCap(tailcfg.NodeAttrDisableLinuxCGNATDropRule),
-	}
-
-	if buildfeatures.HasSynology && distro.Get() == distro.Synology {
-		// Issue 1995: we don't use iptables on Synology.
-		rs.NetfilterMode = preftype.NetfilterOff
 	}
 
 	// Sanity check: we expect the control server to program both a v4

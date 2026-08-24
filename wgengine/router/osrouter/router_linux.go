@@ -1674,15 +1674,6 @@ func normalizeCIDR(cidr netip.Prefix) string {
 // platformCanNetfilter reports whether the current distro/environment supports
 // running iptables/nftables commands.
 func platformCanNetfilter() bool {
-	switch getDistroFunc() {
-	case distro.Synology:
-		// Synology doesn't support iptables or nftables. Attempting to run it
-		// just blocks for a long time while it logs about failures.
-		//
-		// See https://github.com/tailscale/tailscale/issues/11737 for one such
-		// prior regression where we tried to run iptables on Synology.
-		return false
-	}
 	return true
 }
 
