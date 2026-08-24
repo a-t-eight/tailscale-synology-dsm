@@ -96,7 +96,7 @@ func (t *target) buildSPK(b *dist.Build, inner *innerPkg) ([]string, error) {
 	tw := tar.NewWriter(f)
 	defer tw.Close()
 
-	err = writeTar(tw, b.Time,
+	entries := []tarEntry{
 		memFile("INFO", t.mkInfo(b, inner.uncompressedSz), 0644),
 		static("PACKAGE_ICON.PNG", "PACKAGE_ICON.PNG", 0644),
 		static("PACKAGE_ICON_256.PNG", "PACKAGE_ICON_256.PNG", 0644),
@@ -104,12 +104,24 @@ func (t *target) buildSPK(b *dist.Build, inner *innerPkg) ([]string, error) {
 		dir("conf"),
 		static("resource", "conf/resource", 0644),
 		static(privFile, "conf/privilege", 0644),
+	}
+
+	if t.dsmMajorVersion == 7 {
+		entries = append(entries,
+			static("privilege-dsm7", "conf/privilege.bootstrap-package", 0644),
+			static("privilege-dsm7.root", "conf/privilege.bootstrap-root", 0644),
+		)
+	}
+
+	entries = append(entries,
 		file(inner.path, "package.tgz", 0644),
 		dir("scripts"),
 		static("scripts/start-stop-status", "scripts/start-stop-status", 0644),
 		static("scripts/postupgrade", "scripts/postupgrade", 0644),
 		static("scripts/preupgrade", "scripts/preupgrade", 0644),
 	)
+
+	err = writeTar(tw, b.Time, entries...)
 	if err != nil {
 		return nil, err
 	}
