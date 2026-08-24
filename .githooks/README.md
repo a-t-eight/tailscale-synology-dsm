@@ -6,7 +6,9 @@ remains authoritative because Git permits local hooks to be bypassed.
 These hooks are selected directly only for a complete control-only worktree
 that contains `scripts/validate-repository.sh`. Source, accepted, work, and
 release worktrees use the role-specific wrappers created by
-`scripts/setup-worktree.sh`.
+`scripts/setup-worktree.sh`. The wrappers invoke the retained release validator
+from the selected external control worktree; source branches do not carry that
+validator.
 
 Implemented hooks:
 
