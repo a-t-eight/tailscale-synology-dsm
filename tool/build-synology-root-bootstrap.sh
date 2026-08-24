@@ -314,9 +314,13 @@ python3 - \
     "${SIDE}/conf/privilege" \
     "${SIDE}/conf/privilege.bootstrap-package" \
     "${SIDE}/conf/privilege.bootstrap-root" \
-    "${CENTER}/conf/privilege" <<'PYJSON'
+    "${CENTER}/conf/privilege" \
+    "${SIDE}/conf/resource" \
+    "${SIDE}/package.tgz" \
+    "${SIDE}/scripts/tailscale-synology-bootstrap" <<'PYJSON'
 import json
 import sys
+import tarfile
 from pathlib import Path
 
 (
@@ -324,15 +328,20 @@ from pathlib import Path
     safe_template_path,
     root_template_path,
     package_center_path,
+    resource_path,
+    inner_package_path,
+    outer_bootstrap_path,
 ) = map(Path, sys.argv[1:])
 
 active_sideload = json.loads(active_sideload_path.read_text())
 safe_template = json.loads(safe_template_path.read_text())
 root_template = json.loads(root_template_path.read_text())
 package_center = json.loads(package_center_path.read_text())
+resource = json.loads(resource_path.read_text())
 
 assert active_sideload == safe_template
 assert active_sideload["defaults"]["run-as"] == "package"
+assert "tool" not in active_sideload
 assert root_template["defaults"]["run-as"] == "root"
 
 assert package_center["defaults"]["run-as"] == "package"
@@ -343,7 +352,23 @@ assert package_center["tool"] == [{
     "capabilities": "cap_net_admin,cap_chown,cap_net_raw",
 }]
 
-print("Privilege manifest validation passed.")
+assert resource["usr-local-linker"]["bin"] == [
+    "bin/tailscale",
+    "bin/tailscale-synology-bootstrap",
+]
+
+with tarfile.open(inner_package_path, mode="r:gz") as archive:
+    bootstrap_member = archive.getmember(
+        "bin/tailscale-synology-bootstrap"
+    )
+    assert bootstrap_member.isfile()
+    assert bootstrap_member.mode == 0o755
+
+    stream = archive.extractfile(bootstrap_member)
+    assert stream is not None
+    assert stream.read() == outer_bootstrap_path.read_bytes()
+
+print("Bootstrap packaging and privilege validation passed.")
 PYJSON
 
 python3 - \

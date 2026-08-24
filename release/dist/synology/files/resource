@@ -3,7 +3,10 @@
 		"protocol-file": "conf/Tailscale.sc"
 	},
 	"usr-local-linker": {
-		"bin": ["bin/tailscale"]
+		"bin": [
+			"bin/tailscale",
+			"bin/tailscale-synology-bootstrap"
+		]
 	},
 	"syslog-config": {
 		"logrotate-relpath": "conf/logrotate.conf"

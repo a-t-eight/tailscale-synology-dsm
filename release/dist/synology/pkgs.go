@@ -261,17 +261,14 @@ func (m *synologyBuilds) buildInnerPackage(b *dist.Build, dsmVersion int, goenv 
 		tw := tar.NewWriter(cw)
 		defer tw.Close()
 
-		err = writeTar(tw, b.Time,
+		entries := []tarEntry{
 			dir("bin"),
 			file(tsd, "bin/tailscaled", 0755),
 			file(ts, "bin/tailscale", 0755),
-			dir("conf"),
-			static("Tailscale.sc", "conf/Tailscale.sc", 0644),
-			static(fmt.Sprintf("logrotate-dsm%d", dsmVersion), "conf/logrotate.conf", 0644),
-			dir("ui"),
-			static("PACKAGE_ICON_256.PNG", "ui/PACKAGE_ICON_256.PNG", 0644),
-			static("config", "ui/config", 0644),
-			static("index.cgi", "ui/index.cgi", 0755))
+		}
+		entries = append(entries, innerPackageStaticEntries(dsmVersion)...)
+
+		err = writeTar(tw, b.Time, entries...)
 		if err != nil {
 			return nil, err
 		}
@@ -288,6 +285,26 @@ func (m *synologyBuilds) buildInnerPackage(b *dist.Build, dsmVersion int, goenv 
 
 		return &innerPkg{out, cw.n}, nil
 	})
+}
+
+func innerPackageStaticEntries(dsmVersion int) []tarEntry {
+	entries := []tarEntry{}
+	if dsmVersion == 7 {
+		entries = append(entries, static(
+			"scripts/tailscale-synology-bootstrap",
+			"bin/tailscale-synology-bootstrap",
+			0755,
+		))
+	}
+	return append(entries,
+		dir("conf"),
+		static("Tailscale.sc", "conf/Tailscale.sc", 0644),
+		static(fmt.Sprintf("logrotate-dsm%d", dsmVersion), "conf/logrotate.conf", 0644),
+		dir("ui"),
+		static("PACKAGE_ICON_256.PNG", "ui/PACKAGE_ICON_256.PNG", 0644),
+		static("config", "ui/config", 0644),
+		static("index.cgi", "ui/index.cgi", 0755),
+	)
 }
 
 // writeTar writes ents to tw.
