@@ -1,0 +1,65 @@
+From 456f90c5bf5c383f37ab2f0ca6b7f0531730a140 Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Thu, 23 Jul 2026 14:35:01 +1000
+Subject: [PATCH 07/19] synology: package safe and root privilege manifests
+
+---
+ release/dist/synology/files/privilege-dsm7.root |  7 +++++++
+ release/dist/synology/pkgs.go                   | 14 +++++++++++++-
+ 2 files changed, 20 insertions(+), 1 deletion(-)
+ create mode 100644 release/dist/synology/files/privilege-dsm7.root
+
+diff --git a/release/dist/synology/files/privilege-dsm7.root b/release/dist/synology/files/privilege-dsm7.root
+new file mode 100644
+index 000000000..e533b25d0
+--- /dev/null
++++ b/release/dist/synology/files/privilege-dsm7.root
+@@ -0,0 +1,7 @@
++{
++  "defaults": {
++    "run-as": "root"
++  },
++  "username": "tailscale",
++  "groupname": "tailscale"
++}
+diff --git a/release/dist/synology/pkgs.go b/release/dist/synology/pkgs.go
+index c2fe6528e..c501c12e1 100644
+--- a/release/dist/synology/pkgs.go
++++ b/release/dist/synology/pkgs.go
+@@ -96,7 +96,7 @@ func (t *target) buildSPK(b *dist.Build, inner *innerPkg) ([]string, error) {
+ 	tw := tar.NewWriter(f)
+ 	defer tw.Close()
+ 
+-	err = writeTar(tw, b.Time,
++	entries := []tarEntry{
+ 		memFile("INFO", t.mkInfo(b, inner.uncompressedSz), 0644),
+ 		static("PACKAGE_ICON.PNG", "PACKAGE_ICON.PNG", 0644),
+ 		static("PACKAGE_ICON_256.PNG", "PACKAGE_ICON_256.PNG", 0644),
+@@ -104,12 +104,24 @@ func (t *target) buildSPK(b *dist.Build, inner *innerPkg) ([]string, error) {
+ 		dir("conf"),
+ 		static("resource", "conf/resource", 0644),
+ 		static(privFile, "conf/privilege", 0644),
++	}
++
++	if t.dsmMajorVersion == 7 {
++		entries = append(entries,
++			static("privilege-dsm7", "conf/privilege.bootstrap-package", 0644),
++			static("privilege-dsm7.root", "conf/privilege.bootstrap-root", 0644),
++		)
++	}
++
++	entries = append(entries,
+ 		file(inner.path, "package.tgz", 0644),
+ 		dir("scripts"),
+ 		static("scripts/start-stop-status", "scripts/start-stop-status", 0644),
+ 		static("scripts/postupgrade", "scripts/postupgrade", 0644),
+ 		static("scripts/preupgrade", "scripts/preupgrade", 0644),
+ 	)
++
++	err = writeTar(tw, b.Time, entries...)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-- 
+2.55.0
+

@@ -1,0 +1,190 @@
+From a2ac2a275f4b2f0d7f786ca670d8040c83a6ae73 Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Thu, 23 Jul 2026 03:39:32 +1000
+Subject: [PATCH 04/19] build: add v1.98.9 Synology netfilter patch
+
+---
+ patches/v1.98.9/synology-netfilter.patch      | 162 ++++++++++++++++++
+ .../v1.98.9/synology-netfilter.patch.sha256   |   1 +
+ 2 files changed, 163 insertions(+)
+ create mode 100644 patches/v1.98.9/synology-netfilter.patch
+ create mode 100644 patches/v1.98.9/synology-netfilter.patch.sha256
+
+diff --git a/patches/v1.98.9/synology-netfilter.patch b/patches/v1.98.9/synology-netfilter.patch
+new file mode 100644
+index 000000000..b0a947444
+--- /dev/null
++++ b/patches/v1.98.9/synology-netfilter.patch
+@@ -0,0 +1,162 @@
++diff --git a/cmd/tailscale/cli/cli_test.go b/cmd/tailscale/cli/cli_test.go
++index d2df825d3..5122dd39d 100644
++--- a/cmd/tailscale/cli/cli_test.go
+++++ b/cmd/tailscale/cli/cli_test.go
++@@ -587,9 +587,9 @@ func TestCheckForAccidentalSettingReverts(t *testing.T) {
++ 			want: accidentalUpPrefix + " --netfilter-mode=off --accept-dns=false",
++ 		},
++ 		{
++-			// Issue 3176: on Synology, don't require --accept-routes=false because user
++-			// might've had an old install, and we don't support --accept-routes anyway.
++-			name:  "synology_permit_omit_accept_routes",
+++			// This fork supports --accept-routes on Synology, so apply the same
+++			// accidental-setting-revert protection used by other Linux systems.
+++			name:  "synology_dont_permit_omit_accept_routes",
++ 			flags: []string{"--hostname=foo"},
++ 			curPrefs: &ipn.Prefs{
++ 				ControlURL:          "https://login.tailscale.com",
++@@ -600,10 +600,10 @@ func TestCheckForAccidentalSettingReverts(t *testing.T) {
++ 			},
++ 			goos:   "linux",
++ 			distro: distro.Synology,
++-			want:   "",
+++			want:   accidentalUpPrefix + " --hostname=foo --accept-routes",
++ 		},
++ 		{
++-			// Same test case as "synology_permit_omit_accept_routes" above, but
+++			// Same test case as "synology_dont_permit_omit_accept_routes" above, but
++ 			// on non-Synology distro.
++ 			name:  "not_synology_dont_permit_omit_accept_routes",
++ 			flags: []string{"--hostname=foo"},
++diff --git a/cmd/tailscale/cli/up.go b/cmd/tailscale/cli/up.go
++index fed7de9ae..ace6ac3db 100644
++--- a/cmd/tailscale/cli/up.go
+++++ b/cmd/tailscale/cli/up.go
++@@ -164,9 +164,6 @@ func (notFalseVar) Set(v string) error {
++ func (notFalseVar) String() string { return "true" }
++ 
++ func defaultNetfilterMode() string {
++-	if distro.Get() == distro.Synology {
++-		return "off"
++-	}
++ 	return "on"
++ }
++ 
++@@ -331,11 +328,6 @@ func prefsFromUpArgs(upArgs upArgsT, warnf logger.Logf, st *ipnstate.Status, goo
++ 	prefs.ControlURL = upArgs.server
++ 	prefs.WantRunning = true
++ 	prefs.RouteAll = upArgs.acceptRoutes
++-	if distro.Get() == distro.Synology {
++-		// ipn.NewPrefs returns a non-zero Netfilter default. But Synology only
++-		// supports "off" mode.
++-		prefs.NetfilterMode = preftype.NetfilterOff
++-	}
++ 	if upArgs.exitNodeIP != "" {
++ 		if expr, useAutoExitNode := ipn.ParseAutoExitNodeString(upArgs.exitNodeIP); useAutoExitNode {
++ 			prefs.AutoExitNode = expr
++@@ -534,19 +526,6 @@ func runUp(ctx context.Context, cmd string, args []string, upArgs upArgsT) (retE
++ 		return true
++ 	}
++ 
++-	if distro.Get() == distro.Synology {
++-		notSupported := "not supported on Synology; see https://github.com/tailscale/tailscale/issues/1995"
++-		if upArgs.acceptRoutes {
++-			return errors.New("--accept-routes is " + notSupported)
++-		}
++-		if upArgs.exitNodeIP != "" {
++-			return errors.New("--exit-node is " + notSupported)
++-		}
++-		if upArgs.netfilterMode != "off" {
++-			return errors.New("--netfilter-mode values besides \"off\" " + notSupported)
++-		}
++-	}
++-
++ 	prefs, err := prefsFromUpArgs(upArgs, warnf, st, effectiveGOOS())
++ 	if err != nil {
++ 		fatalf("%s", err)
++@@ -1034,14 +1013,6 @@ func checkForAccidentalSettingReverts(newPrefs, curPrefs *ipn.Prefs, env upCheck
++ 		if flagName == "login-server" && ipn.IsLoginServerSynonym(valCur) && ipn.IsLoginServerSynonym(valNew) {
++ 			continue
++ 		}
++-		if flagName == "accept-routes" && valNew == false && env.goos == "linux" && env.distro == distro.Synology {
++-			// Issue 3176. Old prefs had 'RouteAll: true' on disk, so ignore that.
++-			continue
++-		}
++-		if flagName == "netfilter-mode" && valNew == preftype.NetfilterOn && env.goos == "linux" && env.distro == distro.Synology {
++-			// Issue 6811. Ignore on Synology.
++-			continue
++-		}
++ 		if flagName == "stateful-filtering" && valCur == true && valNew == false && env.goos == "linux" {
++ 			// See https://github.com/tailscale/tailscale/issues/12307
++ 			// Stateful filtering was on by default in tailscale 1.66.0-1.66.3, then off in 1.66.4.
++diff --git a/cmd/tailscaled/tailscaled.go b/cmd/tailscaled/tailscaled.go
++index fe18731ae..6f0dcede8 100644
++--- a/cmd/tailscaled/tailscaled.go
+++++ b/cmd/tailscaled/tailscaled.go
++@@ -83,9 +83,9 @@ func defaultTunName() string {
++ 		return "userspace-networking"
++ 	case "linux":
++ 		if buildfeatures.HasSynology && buildfeatures.HasNetstack && distro.Get() == distro.Synology {
++-			// Try TUN, but fall back to userspace networking if needed.
++-			// See https://github.com/tailscale/tailscale-synology/issues/35
++-			return "tailscale0,userspace-networking"
+++			// This fork targets Synology systems with a working TUN device and
+++			// the required kernel networking modules. Never silently fall back.
+++			return "tailscale0"
++ 		}
++ 	}
++ 	return "tailscale0"
++@@ -725,9 +725,6 @@ func handleSubnetsInNetstack() bool {
++ 	if v, ok := envknob.LookupBool("TS_DEBUG_NETSTACK_SUBNETS"); ok {
++ 		return v
++ 	}
++-	if distro.Get() == distro.Synology {
++-		return true
++-	}
++ 	switch runtime.GOOS {
++ 	case "windows", "darwin", "freebsd", "openbsd", "solaris", "illumos":
++ 		// Enable on Windows and tailscaled-on-macOS (this doesn't
++diff --git a/ipn/ipnlocal/local.go b/ipn/ipnlocal/local.go
++index b5a0a353c..b84205d91 100644
++--- a/ipn/ipnlocal/local.go
+++++ b/ipn/ipnlocal/local.go
++@@ -80,7 +80,6 @@
++ 	"tailscale.com/types/netmap"
++ 	"tailscale.com/types/opt"
++ 	"tailscale.com/types/persist"
++-	"tailscale.com/types/preftype"
++ 	"tailscale.com/types/views"
++ 	"tailscale.com/util/checkchange"
++ 	"tailscale.com/util/clientmetric"
++@@ -5834,11 +5833,6 @@ func (b *LocalBackend) routerConfigLocked(cfg *wgcfg.Config, prefs ipn.PrefsView
++ 		RemoveCGNATDropRule: nm.HasCap(tailcfg.NodeAttrDisableLinuxCGNATDropRule),
++ 	}
++ 
++-	if buildfeatures.HasSynology && distro.Get() == distro.Synology {
++-		// Issue 1995: we don't use iptables on Synology.
++-		rs.NetfilterMode = preftype.NetfilterOff
++-	}
++-
++ 	// Sanity check: we expect the control server to program both a v4
++ 	// and a v6 default route, if default routing is on. Fill in
++ 	// blackhole routes appropriately if we're missing some. This is
++diff --git a/wgengine/router/osrouter/router_linux.go b/wgengine/router/osrouter/router_linux.go
++index 73f65cdf1..cdd99d62a 100644
++--- a/wgengine/router/osrouter/router_linux.go
+++++ b/wgengine/router/osrouter/router_linux.go
++@@ -1674,15 +1674,6 @@ func normalizeCIDR(cidr netip.Prefix) string {
++ // platformCanNetfilter reports whether the current distro/environment supports
++ // running iptables/nftables commands.
++ func platformCanNetfilter() bool {
++-	switch getDistroFunc() {
++-	case distro.Synology:
++-		// Synology doesn't support iptables or nftables. Attempting to run it
++-		// just blocks for a long time while it logs about failures.
++-		//
++-		// See https://github.com/tailscale/tailscale/issues/11737 for one such
++-		// prior regression where we tried to run iptables on Synology.
++-		return false
++-	}
++ 	return true
++ }
++ 
+diff --git a/patches/v1.98.9/synology-netfilter.patch.sha256 b/patches/v1.98.9/synology-netfilter.patch.sha256
+new file mode 100644
+index 000000000..5b88bba7a
+--- /dev/null
++++ b/patches/v1.98.9/synology-netfilter.patch.sha256
+@@ -0,0 +1 @@
++ad577d4032e3c14fa37b284b7e5116c364122471b1d9fdc2c906bf8ae198920f  synology-netfilter.patch
+-- 
+2.55.0
+
