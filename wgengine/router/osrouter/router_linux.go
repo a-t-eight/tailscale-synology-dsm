@@ -678,6 +678,50 @@ func (r *linuxRouter) updateMagicsockPort(port uint16, network string) error {
 	return nil
 }
 
+type tailscaleHooksChecker interface {
+	HasTailscaleHooks() (bool, error)
+}
+
+// synologyNetfilterNeedsRebuildLocked checks whether an external DSM firewall
+// update removed the iptables hooks while the router still records netfilter as
+// enabled.
+//
+// linuxRouter.mu must be held.
+func (r *linuxRouter) synologyNetfilterNeedsRebuildLocked(
+	mode preftype.NetfilterMode,
+) bool {
+	if getDistroFunc() != distro.Synology ||
+		mode != netfilterOn {
+		return false
+	}
+
+	checker, ok := r.nfr.(tailscaleHooksChecker)
+	if !ok {
+		// The Synology package explicitly selects the iptables backend.
+		// Other runners do not participate in this recovery path.
+		return false
+	}
+
+	complete, err := checker.HasTailscaleHooks()
+	if err != nil {
+		r.logf(
+			"Synology netfilter hook check failed: %v; rebuilding Tailscale firewall state",
+			err,
+		)
+		return true
+	}
+
+	if complete {
+		return false
+	}
+
+	r.logf(
+		"Synology firewall removed Tailscale netfilter hooks; rebuilding firewall state",
+	)
+
+	return true
+}
+
 // setNetfilterModeLocked switches the router to the given netfilter
 // mode. Netfilter state is created or deleted appropriately to
 // reflect the new mode, and r.snatSubnetRoutes is updated to reflect
@@ -694,7 +738,17 @@ func (r *linuxRouter) setNetfilterModeLocked(mode preftype.NetfilterMode) error 
 	}
 
 	if r.netfilterMode == mode {
-		return nil
+		if !r.synologyNetfilterNeedsRebuildLocked(mode) {
+			return nil
+		}
+
+		// Re-enter the existing off-to-on reconstruction path. Reset the
+		// cached optional-rule state so the remainder of Set re-adds SNAT,
+		// stateful-filtering, and connmark state as required by cfg.
+		r.netfilterMode = netfilterOff
+		r.snatSubnetRoutes = false
+		r.statefulFiltering = false
+		r.connmarkEnabled = false
 	}
 
 	// Depending on the netfilter mode we switch from and to, we may

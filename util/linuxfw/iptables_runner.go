@@ -122,6 +122,74 @@ func (i *iptablesRunner) getNATTables() []iptablesInterface {
 	return []iptablesInterface{i.ipt4}
 }
 
+// HasTailscaleHooks reports whether all parent-chain jumps managed by the
+// iptables runner currently exist.
+//
+// This intentionally checks the parent hooks rather than trusting router
+// in-memory state. External firewall managers can remove the hooks while
+// tailscaled remains running.
+func (i *iptablesRunner) HasTailscaleHooks() (bool, error) {
+	check := func(
+		ipt iptablesInterface,
+		table string,
+		chain string,
+	) (bool, error) {
+		args := []string{"-j", tsChain(chain)}
+
+		exists, err := ipt.Exists(
+			table,
+			chain,
+			args...,
+		)
+		if err != nil {
+			return false, fmt.Errorf(
+				"checking for %v in %s/%s: %w",
+				args,
+				table,
+				chain,
+				err,
+			)
+		}
+
+		return exists, nil
+	}
+
+	for _, ipt := range i.getTables() {
+		for _, chain := range []string{
+			"INPUT",
+			"FORWARD",
+		} {
+			exists, err := check(
+				ipt,
+				"filter",
+				chain,
+			)
+			if err != nil {
+				return false, err
+			}
+			if !exists {
+				return false, nil
+			}
+		}
+	}
+
+	for _, ipt := range i.getNATTables() {
+		exists, err := check(
+			ipt,
+			"nat",
+			"POSTROUTING",
+		)
+		if err != nil {
+			return false, err
+		}
+		if !exists {
+			return false, nil
+		}
+	}
+
+	return true, nil
+}
+
 // AddHooks inserts calls to tailscale's netfilter chains in
 // the relevant main netfilter chains. The tailscale chains must
 // already exist. If they do not, an error is returned.
