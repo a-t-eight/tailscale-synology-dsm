@@ -31,6 +31,7 @@ TEST_MAX_ITERATIONS="${TAILSCALE_SYNOLOGY_RECONCILER_TEST_MAX_ITERATIONS:-0}"
 TEST_NO_SLEEP="${TAILSCALE_SYNOLOGY_RECONCILER_TEST_NO_SLEEP:-0}"
 
 STOP_REQUESTED=0
+SLEEP_PID=""
 LAST_STATE=""
 LAST_PHASE=""
 LAST_REPAIR_EPOCH=0
@@ -124,7 +125,16 @@ validate_configuration() {
 
 
 handle_stop() {
+    local sleep_pid="${SLEEP_PID}"
+
     STOP_REQUESTED=1
+
+    if [ -n "${sleep_pid}" ]; then
+        kill -TERM \
+            "${sleep_pid}" \
+            >/dev/null 2>&1 ||
+            true
+    fi
 }
 
 
@@ -144,6 +154,8 @@ cleanup_pid_file() {
 
 sleep_for() {
     local duration="$1"
+    local sleep_pid
+    local wait_status=0
 
     if [ "${TEST_MODE}" = "1" ] &&
         [ "${TEST_NO_SLEEP}" = "1" ]
@@ -151,7 +163,32 @@ sleep_for() {
         return 0
     fi
 
-    sleep "${duration}"
+    if [ "${STOP_REQUESTED}" -ne 0 ]; then
+        return 0
+    fi
+
+    sleep "${duration}" &
+
+    sleep_pid=$!
+    SLEEP_PID="${sleep_pid}"
+
+    if [ "${STOP_REQUESTED}" -ne 0 ]; then
+        kill -TERM \
+            "${sleep_pid}" \
+            >/dev/null 2>&1 ||
+            true
+    fi
+
+    wait "${sleep_pid}" ||
+        wait_status=$?
+
+    SLEEP_PID=""
+
+    if [ "${STOP_REQUESTED}" -ne 0 ]; then
+        return 0
+    fi
+
+    return "${wait_status}"
 }
 
 
@@ -411,25 +448,12 @@ reconcile_once() {
         else
             LAST_STATE="repair-pending"
         fi
+
         return
     fi
 
-    if ! prefs_require_netfilter; then
-        set_state \
-            inactive \
-            INFO \
-            "current Tailscale preferences do not require netfilter reconciliation"
-        return
-    fi
-
-    if ! backend_running; then
-        set_state \
-            waiting \
-            INFO \
-            "waiting for the Tailscale backend to reach Running state"
-        return
-    fi
-
+    # Keep healthy operation cheap. Only consult LocalAPI when one or
+    # more required firewall hooks are actually missing.
     if netfilter_hooks_complete; then
         if [ "${LAST_STATE}" = "missing" ] ||
             [ "${LAST_STATE}" = "repair-failed" ]
@@ -439,6 +463,25 @@ reconcile_once() {
         fi
 
         LAST_STATE="healthy"
+
+        return
+    fi
+
+    if ! backend_running; then
+        set_state \
+            waiting \
+            INFO \
+            "waiting for the Tailscale backend to reach Running state"
+
+        return
+    fi
+
+    if ! prefs_require_netfilter; then
+        set_state \
+            inactive \
+            INFO \
+            "current Tailscale preferences do not require netfilter reconciliation"
+
         return
     fi
 

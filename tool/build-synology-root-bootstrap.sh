@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION_OVERRIDE="${TS_VERSION_OVERRIDE:-1.98.95}"
+VERSION_OVERRIDE="${TS_VERSION_OVERRIDE:-1.98.96}"
 OUT_ROOT="${1:-${REPO_ROOT}/build/synology/v1.98.9-final}"
 
 SIDELOAD_OUT="${OUT_ROOT}/sideload"
@@ -197,9 +197,47 @@ then
 fi
 
 if cmp -s "${SIDE}/INFO" "${CENTER}/INFO"; then
-    printf 'ERROR: INFO files should have different DSM bounds\n' >&2
+    printf 'ERROR: INFO files should have different package metadata\n' >&2
     exit 1
 fi
+
+python3 - \
+    "${SIDE}/INFO" \
+    "${CENTER}/INFO" <<'PYINFO'
+import sys
+from pathlib import Path
+
+expected = 'os_min_ver="7.3-81180"'
+
+for label, value in zip(
+    ("sideload", "Package Center"),
+    sys.argv[1:],
+):
+    path = Path(value)
+
+    if not path.is_file():
+        raise RuntimeError(
+            f"{label} package is missing outer INFO metadata"
+        )
+
+    matches = [
+        line
+        for line in path.read_text(
+            encoding="utf-8",
+        ).splitlines()
+        if line.startswith("os_min_ver=")
+    ]
+
+    if matches != [expected]:
+        raise RuntimeError(
+            "{} INFO has unexpected os_min_ver entries: {!r}".format(
+                label,
+                matches,
+            )
+        )
+
+print("Outer package metadata validation passed.")
+PYINFO
 
 bash -n "${SIDE}/scripts/start-stop-status"
 bash -n "${SIDE}/scripts/tailscale-netfilter-reconciler"

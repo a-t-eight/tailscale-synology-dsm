@@ -209,6 +209,14 @@ run_reconciler
 
 assert_not_contains \
     "${STATE}/commands.log" \
+    'debug prefs'
+
+assert_not_contains \
+    "${STATE}/commands.log" \
+    'status --json'
+
+assert_not_contains \
+    "${STATE}/commands.log" \
     'set --netfilter-mode='
 
 printf 'PASS\n'

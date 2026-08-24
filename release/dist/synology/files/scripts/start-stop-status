@@ -38,6 +38,11 @@ TAILSCALE_BIN="${SYNOPKG_PKGDEST}/bin/tailscale"
 
 NETFILTER_LOCALAPI_ATTEMPTS="${TAILSCALE_SYNOLOGY_LOCALAPI_ATTEMPTS:-30}"
 
+TUN_DEVICE="${TAILSCALE_SYNOLOGY_TUN_DEVICE:-/dev/net/tun}"
+TUN_PROC_MISC="${TAILSCALE_SYNOLOGY_TUN_PROC_MISC:-/proc/misc}"
+TUN_WAIT_ATTEMPTS="${TAILSCALE_SYNOLOGY_TUN_WAIT_ATTEMPTS:-10}"
+TUN_WAIT_SECONDS="${TAILSCALE_SYNOLOGY_TUN_WAIT_SECONDS:-1}"
+
 RECONCILER_SCRIPT="${PKG_ROOT}/scripts/tailscale-netfilter-reconciler"
 RECONCILER_PID_FILE="${PKGVAR}/tailscale-netfilter-reconciler.pid"
 RECONCILER_LOG_FILE="${PKGVAR}/tailscale-netfilter-reconciler.log"
@@ -630,28 +635,137 @@ check_netfilter_prerequisites() {
     return 0
 }
 
+tun_device_is_ready() {
+    [ -c "${TUN_DEVICE}" ]
+}
+
+
+tun_driver_available() {
+    [ -r "${TUN_PROC_MISC}" ] ||
+        return 1
+
+    awk '
+        $1 == "200" && $2 == "tun" {
+            found = 1
+        }
+
+        END {
+            exit found ? 0 : 1
+        }
+    ' "${TUN_PROC_MISC}"
+}
+
+
+try_load_tun_driver() {
+    local modprobe_bin
+
+    modprobe_bin="$(
+        command -v modprobe 2>/dev/null
+    )" || return 1
+
+    "${modprobe_bin}" \
+        tun \
+        >/dev/null 2>&1
+}
+
+
 ensure_tun_created() {
-    if [ "${SYNOPKG_DSM_VERSION_MAJOR}" -eq "7" ]; then
-        if [ ! -c /dev/net/tun ]; then
-            log_message ERROR \
-                "/dev/net/tun is unavailable; install and load the TUN kernel module before starting Tailscale."
-            return 1
+    local attempt=1
+    local tun_directory="${TUN_DEVICE%/*}"
+
+    case "${TUN_WAIT_ATTEMPTS}" in
+    ''|*[!0-9]*|0)
+        log_message ERROR \
+            "TAILSCALE_SYNOLOGY_TUN_WAIT_ATTEMPTS must be a positive integer"
+        return 1
+        ;;
+    esac
+
+    case "${TUN_WAIT_SECONDS}" in
+    ''|*[!0-9]*)
+        log_message ERROR \
+            "TAILSCALE_SYNOLOGY_TUN_WAIT_SECONDS must be a non-negative integer"
+        return 1
+        ;;
+    esac
+
+    while [ "${attempt}" -le "${TUN_WAIT_ATTEMPTS}" ]; do
+        if tun_device_is_ready; then
+            if ! chmod 0666 "${TUN_DEVICE}"; then
+                log_message ERROR \
+                    "cannot set permissions on ${TUN_DEVICE}"
+                return 1
+            fi
+
+            return 0
         fi
-        return 0
-    fi
-    # Create the necessary file structure for /dev/net/tun
-    if ([ ! -c /dev/net/tun ]); then
-        if ([ ! -d /dev/net ]); then
-            mkdir -m 755 /dev/net
+
+        if ! tun_driver_available; then
+            try_load_tun_driver ||
+                true
         fi
-        mknod /dev/net/tun c 10 200
-        chmod 0755 /dev/net/tun
+
+        if tun_driver_available; then
+            if ! mkdir -p -- "${tun_directory}"; then
+                log_message ERROR \
+                    "cannot create TUN device directory ${tun_directory}"
+                return 1
+            fi
+
+            if ! chmod 0755 "${tun_directory}"; then
+                log_message ERROR \
+                    "cannot set permissions on ${tun_directory}"
+                return 1
+            fi
+
+            if [ -e "${TUN_DEVICE}" ] ||
+                [ -L "${TUN_DEVICE}" ]
+            then
+                if ! rm -f -- "${TUN_DEVICE}"; then
+                    log_message ERROR \
+                        "cannot replace invalid TUN device path ${TUN_DEVICE}"
+                    return 1
+                fi
+            fi
+
+            mknod \
+                "${TUN_DEVICE}" \
+                c \
+                10 \
+                200 \
+                >/dev/null 2>&1 ||
+                true
+
+            if tun_device_is_ready; then
+                if ! chmod 0666 "${TUN_DEVICE}"; then
+                    log_message ERROR \
+                        "cannot set permissions on ${TUN_DEVICE}"
+                    return 1
+                fi
+
+                log_message INFO \
+                    "created kernel TUN device ${TUN_DEVICE}"
+
+                return 0
+            fi
+        fi
+
+        if [ "${attempt}" -lt "${TUN_WAIT_ATTEMPTS}" ]; then
+            sleep "${TUN_WAIT_SECONDS}"
+        fi
+
+        attempt=$((attempt + 1))
+    done
+
+    if tun_driver_available; then
+        log_message ERROR \
+            "kernel TUN driver is registered, but ${TUN_DEVICE} could not be created"
+    else
+        log_message ERROR \
+            "kernel TUN driver is unavailable after ${TUN_WAIT_ATTEMPTS} attempts"
     fi
 
-    # Load the tun module if not already loaded
-    if (!(lsmod | grep -q "^tun\s")); then
-        insmod /lib/modules/tun.ko
-    fi
+    return 1
 }
 
 set_sysctl_value() {
