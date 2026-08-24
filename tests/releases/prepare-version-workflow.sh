@@ -84,6 +84,8 @@ create_success_fixture() {
   PREPARED_WORKTREE="${TEMP_ROOT}/prepared"
   ARTIFACTS="${TEMP_ROOT}/artifacts"
   LOG="${TEMP_ROOT}/prepare.log"
+  HOOKS_DIR="${TEMP_ROOT}/inherited-hooks"
+  HOOK_EVIDENCE="${TEMP_ROOT}/inherited-hooks.log"
 
   git init --bare --initial-branch=main "$BARE_ORIGIN" > /dev/null 2>&1 ||
     fail "could not create bare origin"
@@ -132,6 +134,17 @@ create_success_fixture() {
   git_fixture push origin main previous-release --tags > /dev/null 2>&1 ||
     fail "could not seed fixture origin"
 
+  mkdir -p "$HOOKS_DIR"
+  for hook_name in post-commit post-applypatch; do
+    cat > "$HOOKS_DIR/$hook_name" << 'HOOK'
+#!/bin/sh
+printf '%s\n' "$(basename "$0")" >> "${HOOK_EVIDENCE:?}"
+HOOK
+    chmod 0755 "$HOOKS_DIR/$hook_name"
+  done
+  export HOOK_EVIDENCE
+  git_fixture config core.hooksPath "$HOOKS_DIR"
+
   REMOTE_REFS_BEFORE="$(snapshot_refs "$BARE_ORIGIN")"
   TAG_REFS_BEFORE="$(git_fixture show-ref --tags | sort)"
 
@@ -156,6 +169,16 @@ create_success_fixture() {
   assert_file "$ARTIFACTS/SHA256SUMS"
   assert_file "$ARTIFACTS/patches/series"
   assert_file "$ARTIFACTS/preparation-report.md"
+
+  if [ -e "$HOOK_EVIDENCE" ]; then
+    sed -n '1,80p' "$HOOK_EVIDENCE" >&2
+    fail "prepare-version executed inherited Git hooks"
+  fi
+  if ! grep -Fxq \
+    -- '- Internal commit/apply hooks: disabled' \
+    "$ARTIFACTS/preparation-report.md"; then
+    fail "preparation report does not record internal hook isolation"
+  fi
 
   PREPARED_HEAD="$(git -C "$PREPARED_WORKTREE" rev-parse HEAD)"
   PREPARED_TREE="$(git -C "$PREPARED_WORKTREE" rev-parse 'HEAD^{tree}')"

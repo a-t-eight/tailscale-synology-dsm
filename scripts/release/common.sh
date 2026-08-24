@@ -30,6 +30,13 @@ release_clean_git() {
   )
 }
 
+release_hookless_git() {
+  release_clean_git \
+    -c \
+    core.hooksPath=/dev/null \
+    "$@"
+}
+
 release_require_command() {
   command_name="$1"
 
