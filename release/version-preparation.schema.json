@@ -1,0 +1,287 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://a-t-eight.github.io/tailscale-synology-dsm/version-preparation.schema.json",
+  "title": "Tailscale Synology version preparation evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source",
+    "upstream",
+    "version",
+    "prepared",
+    "logical_commits",
+    "patches",
+    "synology_contract",
+    "validation",
+    "safety"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "previous_upstream_commit",
+        "previous_release_commit"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "previous_upstream_commit": {
+          "$ref": "#/$defs/gitSha"
+        },
+        "previous_release_commit": {
+          "$ref": "#/$defs/gitSha"
+        }
+      }
+    },
+    "upstream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tag",
+        "commit"
+      ],
+      "properties": {
+        "tag": {
+          "type": "string",
+          "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"
+        },
+        "commit": {
+          "$ref": "#/$defs/gitSha"
+        }
+      }
+    },
+    "version": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "upstream",
+        "downstream_revision"
+      ],
+      "properties": {
+        "upstream": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"
+        },
+        "downstream_revision": {
+          "type": "string",
+          "pattern": "^r[1-9][0-9]*$"
+        }
+      }
+    },
+    "prepared": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "branch",
+        "commit",
+        "tree",
+        "worktree"
+      ],
+      "properties": {
+        "branch": {
+          "type": "string",
+          "pattern": "^work/v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?-synology-r[1-9][0-9]*$"
+        },
+        "commit": {
+          "$ref": "#/$defs/gitSha"
+        },
+        "tree": {
+          "$ref": "#/$defs/gitSha"
+        },
+        "worktree": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "logical_commits": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "order",
+          "source_commit",
+          "prepared_commit",
+          "subject"
+        ],
+        "properties": {
+          "order": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "source_commit": {
+            "$ref": "#/$defs/gitSha"
+          },
+          "prepared_commit": {
+            "$ref": "#/$defs/gitSha"
+          },
+          "subject": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "patches": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "order",
+          "filename",
+          "sha256"
+        ],
+        "properties": {
+          "order": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "filename": {
+            "type": "string",
+            "pattern": "^[0-9]{4}-.+\\.patch$"
+          },
+          "sha256": {
+            "$ref": "#/$defs/sha256"
+          }
+        }
+      }
+    },
+    "synology_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dependency_section",
+        "dependency_minimum",
+        "dependency_os_minimum",
+        "tailscale_os_minimum",
+        "os_max_ver_allowed"
+      ],
+      "properties": {
+        "dependency_section": {
+          "const": "iptables-netfilter-extensions"
+        },
+        "dependency_minimum": {
+          "const": "1.1.0-3"
+        },
+        "dependency_os_minimum": {
+          "const": "7.3-86009"
+        },
+        "tailscale_os_minimum": {
+          "const": "7.3-86009"
+        },
+        "os_max_ver_allowed": {
+          "const": false
+        }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_range_linear",
+        "signed_commits",
+        "single_signoff_commits",
+        "patch_round_trip",
+        "round_trip_tree"
+      ],
+      "properties": {
+        "source_range_linear": {
+          "const": true
+        },
+        "signed_commits": {
+          "const": true
+        },
+        "single_signoff_commits": {
+          "const": true
+        },
+        "patch_round_trip": {
+          "const": true
+        },
+        "round_trip_tree": {
+          "$ref": "#/$defs/gitSha"
+        }
+      }
+    },
+    "safety": {
+      "$ref": "#/$defs/safety"
+    }
+  },
+  "$defs": {
+    "gitSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allow_fetch",
+        "allow_push",
+        "allow_pull_request",
+        "allow_tag",
+        "allow_release",
+        "allow_publish",
+        "allow_spk_build",
+        "allow_dependency_spk_build",
+        "allow_nas_install",
+        "allow_root_bootstrap",
+        "allow_firewall_mutation",
+        "allow_reboot"
+      ],
+      "properties": {
+        "allow_fetch": {
+          "const": false
+        },
+        "allow_push": {
+          "const": false
+        },
+        "allow_pull_request": {
+          "const": false
+        },
+        "allow_tag": {
+          "const": false
+        },
+        "allow_release": {
+          "const": false
+        },
+        "allow_publish": {
+          "const": false
+        },
+        "allow_spk_build": {
+          "const": false
+        },
+        "allow_dependency_spk_build": {
+          "const": false
+        },
+        "allow_nas_install": {
+          "const": false
+        },
+        "allow_root_bootstrap": {
+          "const": false
+        },
+        "allow_firewall_mutation": {
+          "const": false
+        },
+        "allow_reboot": {
+          "const": false
+        }
+      }
+    }
+  }
+}

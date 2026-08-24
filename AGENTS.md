@@ -98,3 +98,17 @@ Agents and automation must not:
 - publish a stable production release;
 - approve their own changes;
 - bypass a failed required validation.
+
+## Agent version preparation
+
+- Start from `release/upgrade-baseline.json` and stop if any protected blob or
+  Synology product-contract value differs.
+- Use the single deep interface documented in
+  `docs/runbooks/agent-version-preparation.md`; require an explicit local
+  upstream tag and full commit SHA.
+- Keep preparation in an isolated worktree and keep each logical downstream
+  change in its original order.
+- Treat `manifest.json`, `SHA256SUMS`, the ordered mail patches and
+  `preparation-report.md` as review inputs, not release approval.
+- Never fetch, push, create a pull request or tag, build either SPK, publish,
+  install on a NAS or mutate NAS networking as part of preparation.
