@@ -1804,3 +1804,163 @@ release_apply_patch_series() (
       ;;
   esac
 )
+
+release_absolute_path() {
+  python3 - "$1" << 'PY'
+import sys
+from pathlib import Path
+
+print(Path(sys.argv[1]).expanduser().resolve(strict=False))
+PY
+}
+
+release_validate_version_preparation_manifest() {
+  manifest="$1"
+  schema="$2"
+  baseline="$3"
+
+  python3 - "$manifest" "$schema" "$baseline" << 'PY'
+import json
+import re
+import sys
+from pathlib import Path, PurePosixPath
+
+
+def reject_duplicate_members(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON member: {key}")
+        result[key] = value
+    return result
+
+
+def reject_constant(value):
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
+def load(path):
+    return json.loads(
+        Path(path).read_text(encoding="utf-8"),
+        object_pairs_hook=reject_duplicate_members,
+        parse_constant=reject_constant,
+    )
+
+
+manifest = load(sys.argv[1])
+schema = load(sys.argv[2])
+baseline = load(sys.argv[3])
+
+required = set(schema["required"])
+if set(manifest) != required:
+    raise SystemExit("version-preparation manifest fields differ from the schema")
+if manifest["schema_version"] != 1:
+    raise SystemExit("unsupported version-preparation manifest schema")
+
+sha = re.compile(r"^[0-9a-f]{40}$")
+digest = re.compile(r"^[0-9a-f]{64}$")
+tag = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$")
+version = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$")
+revision = re.compile(r"^r[1-9][0-9]*$")
+
+source = manifest["source"]
+if set(source) != {
+    "repository",
+    "previous_upstream_commit",
+    "previous_release_commit",
+}:
+    raise SystemExit("manifest source fields differ")
+if not source["repository"]:
+    raise SystemExit("manifest source repository is empty")
+for field in ("previous_upstream_commit", "previous_release_commit"):
+    if not sha.fullmatch(source[field]):
+        raise SystemExit(f"manifest source {field} is not a full Git SHA")
+
+upstream = manifest["upstream"]
+if set(upstream) != {"tag", "commit"}:
+    raise SystemExit("manifest upstream fields differ")
+if not tag.fullmatch(upstream["tag"]) or not sha.fullmatch(upstream["commit"]):
+    raise SystemExit("manifest upstream identity is invalid")
+
+identity = manifest["version"]
+if set(identity) != {"upstream", "downstream_revision"}:
+    raise SystemExit("manifest version fields differ")
+if not version.fullmatch(identity["upstream"]):
+    raise SystemExit("manifest upstream version is invalid")
+if not revision.fullmatch(identity["downstream_revision"]):
+    raise SystemExit("manifest downstream revision is invalid")
+if upstream["tag"] != f"v{identity['upstream']}":
+    raise SystemExit("manifest tag and version differ")
+
+prepared = manifest["prepared"]
+if set(prepared) != {"branch", "commit", "tree", "worktree"}:
+    raise SystemExit("manifest prepared fields differ")
+expected_branch = (
+    f"work/v{identity['upstream']}-synology-"
+    f"{identity['downstream_revision']}"
+)
+if prepared["branch"] != expected_branch:
+    raise SystemExit("manifest prepared branch differs from version identity")
+if not sha.fullmatch(prepared["commit"]) or not sha.fullmatch(prepared["tree"]):
+    raise SystemExit("manifest prepared Git identity is invalid")
+if not prepared["worktree"]:
+    raise SystemExit("manifest prepared worktree is empty")
+
+logical = manifest["logical_commits"]
+patches = manifest["patches"]
+if not logical or len(logical) != len(patches):
+    raise SystemExit("logical commit and patch counts must be equal and non-zero")
+for index, item in enumerate(logical, start=1):
+    if set(item) != {"order", "source_commit", "prepared_commit", "subject"}:
+        raise SystemExit("logical commit fields differ")
+    if item["order"] != index:
+        raise SystemExit("logical commits are not consecutively ordered")
+    if not sha.fullmatch(item["source_commit"]) or not sha.fullmatch(item["prepared_commit"]):
+        raise SystemExit("logical commit identity is invalid")
+    if not item["subject"]:
+        raise SystemExit("logical commit subject is empty")
+
+for index, item in enumerate(patches, start=1):
+    if set(item) != {"order", "filename", "sha256"}:
+        raise SystemExit("patch fields differ")
+    if item["order"] != index:
+        raise SystemExit("patches are not consecutively ordered")
+    filename = item["filename"]
+    pure = PurePosixPath(filename)
+    if (
+        pure.name != filename
+        or not re.fullmatch(r"[0-9]{4}-.+\.patch", filename)
+        or not digest.fullmatch(item["sha256"])
+    ):
+        raise SystemExit("patch artifact identity is invalid")
+
+if manifest["synology_contract"] != baseline["synology_contract"]:
+    raise SystemExit("manifest Synology contract differs from the baseline")
+if manifest["safety"] != baseline["safety"]:
+    raise SystemExit("manifest safety contract differs from the baseline")
+if set(manifest["safety"].values()) != {False}:
+    raise SystemExit("manifest safety capabilities must all be false")
+
+validation = manifest["validation"]
+if set(validation) != {
+    "source_range_linear",
+    "signed_commits",
+    "single_signoff_commits",
+    "patch_round_trip",
+    "round_trip_tree",
+}:
+    raise SystemExit("manifest validation fields differ")
+if validation["round_trip_tree"] != prepared["tree"]:
+    raise SystemExit("manifest round-trip tree differs from prepared tree")
+for field in (
+    "source_range_linear",
+    "signed_commits",
+    "single_signoff_commits",
+    "patch_round_trip",
+):
+    if validation[field] is not True:
+        raise SystemExit(f"manifest validation is not true: {field}")
+
+print("PASS: version-preparation manifest satisfies the strict schema contract.")
+PY
+}
