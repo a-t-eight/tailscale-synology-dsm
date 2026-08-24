@@ -8,17 +8,41 @@ REPO_ROOT="$(
 )"
 BASELINE="${REPO_ROOT}/release/upgrade-baseline.json"
 SCHEMA="${REPO_ROOT}/release/version-preparation.schema.json"
+ALLOWED_SIGNERS="${REPO_ROOT}/.github/allowed_signers"
+RELEASE_VALIDATOR="${REPO_ROOT}/scripts/release/validate-release.sh"
 
 fail() {
   printf 'FAIL: %s\n' "$1" >&2
   exit 1
 }
 
-for required_path in "$BASELINE" "$SCHEMA"; do
+for required_path in \
+  "$BASELINE" \
+  "$SCHEMA" \
+  "$ALLOWED_SIGNERS" \
+  "$RELEASE_VALIDATOR"; do
   if [ ! -s "$required_path" ]; then
     fail "required version-preparation contract is unavailable: ${required_path}"
   fi
 done
+
+EXPECTED_ALLOWED_SIGNERS_SHA256="$(
+  python3 - "$REPO_ROOT/release/manifest.yaml" << 'PY'
+import json
+import sys
+from pathlib import Path
+
+manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+print(manifest["validation"]["ssh_allowed_signers_sha256"])
+PY
+)"
+ACTUAL_ALLOWED_SIGNERS_SHA256="$(sha256sum "$ALLOWED_SIGNERS" | awk '{print $1}')"
+if [ "$ACTUAL_ALLOWED_SIGNERS_SHA256" != "$EXPECTED_ALLOWED_SIGNERS_SHA256" ]; then
+  fail "allowed_signers differs from the accepted manifest trust identity"
+fi
+
+bash -n "$RELEASE_VALIDATOR" ||
+  fail "promoted release validator does not pass Bash syntax validation"
 
 python3 - "$REPO_ROOT" "$BASELINE" "$SCHEMA" << 'PY'
 import hashlib
