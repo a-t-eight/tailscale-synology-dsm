@@ -2,11 +2,17 @@
 
 ## Purpose
 
-This runbook adapts the downstream Synology patch stack to one explicitly
-selected Tailscale release. It starts from `release/manifest.yaml` and finishes
-at the existing release-closeout process.
+This runbook adapts the downstream Synology logical commit stack to one
+explicitly selected Tailscale release. In a source worktree, use the deep
+`prepare-version` interface through the review-artifact gate, then hand the
+result to the attended control-worktree release process.
 
 It does not select the latest release automatically.
+
+The promoted `release/manifest.yaml` remains the immutable accepted r1
+operational record. Do not rewrite it merely to plan a new version. Update the
+living control-branch manifest only after the prepared source and artifacts are
+independently reviewed.
 
 ## Safety boundary
 
@@ -19,90 +25,96 @@ Automation may inspect, adapt, test and build candidate artefacts. It must not:
 - publish a stable release;
 - approve its own pull request.
 
-## Phase 1 — select and pin
+## Phase 1 — select and pin local identities
 
 1. Create a release tracking record. Use the repository issue template when
    Issues are enabled; otherwise use the pull request or release record.
 2. Select an explicit upstream tag.
 3. Resolve and verify its full commit SHA.
-4. Update `release/manifest.yaml`.
-5. Assign a new downstream revision.
-6. Set `validation.patch_series_format` to `mail` for the new generated
-   `git format-patch` series.
-7. List the ordered mail patches in `validation.patch_apply_files`.
-8. Empty `validation.patch_reference_files` unless a separately reviewed
-   non-applied reference artefact is intentionally retained.
-9. Empty `validation.accepted_legacy_no_signoff_commits`; historical exceptions
-   do not transfer to a new release.
-10. Choose new work and release branches.
-11. Choose new patch, build-output, evidence and release-record paths.
-12. Review every manifest change before creating a worktree.
+4. Make the tag and commit available locally through a separately authorized
+   fetch process; the preparation interface does not fetch.
+5. Record the exact previous upstream commit and previous downstream tip.
+6. Assign a new downstream revision.
+7. Choose an absent `work/vN.N.N-synology-rN` branch, worktree path and artifact
+   path.
+8. Run the read-only plan and review every printed identity before mutation.
 
 Do not use a floating `latest` reference in committed release metadata.
 
-## Phase 2 — audit inputs
+## Phase 2 — validate the preserved baseline
 
 Run:
 
 ```text
-bash scripts/release/audit-inputs.sh \
-  --source-repo /path/to/persistent-source-worktree
+bash tests/releases/version-preparation-contract.sh
 ```
 
-The audit must pass before a branch or worktree is created.
-
-For accepted-release metadata changes, also run:
-
-```text
-bash tests/releases/validate-production-contract.sh \
-  --source-repo /path/to/persistent-source-worktree
-```
-
-The accepted production contract is
-`docs/governance/production-contract.md`.
+The check verifies the accepted candidate, all seven protected blobs, exact r2
+dependency bytes, DSM floor, absence of a production maximum and disabled
+publication capabilities. It must pass before a branch or worktree is created.
 
 ## Phase 3 — prepare the adaptation worktree
 
 Review the plan:
 
 ```text
-bash scripts/release/prepare-worktree.sh \
-  --source-repo /path/to/persistent-source-worktree \
-  --role work \
+bash scripts/release/prepare-worktree.sh prepare-version \
+  --source-repo /path/to/tailscale-source \
+  --upstream-tag v2.0.0 \
+  --upstream-commit 1111111111111111111111111111111111111111 \
+  --previous-upstream-commit 2222222222222222222222222222222222222222 \
+  --previous-release-commit 3333333333333333333333333333333333333333 \
+  --new-version 2.0.0 \
+  --downstream-revision r1 \
+  --target-branch work/v2.0.0-synology-r1 \
+  --target-worktree /path/to/work-v2.0.0-synology-r1 \
+  --output-root /path/to/review/v2.0.0-r1 \
   --plan-only
 ```
 
 Create the worktree only after verifying every printed value:
 
 ```text
-bash scripts/release/prepare-worktree.sh \
-  --source-repo /path/to/persistent-source-worktree \
-  --role work \
-  --target-worktree /path/to/worktree \
-  --apply-patches \
+bash scripts/release/prepare-worktree.sh prepare-version \
+  --source-repo /path/to/tailscale-source \
+  --upstream-tag v2.0.0 \
+  --upstream-commit 1111111111111111111111111111111111111111 \
+  --previous-upstream-commit 2222222222222222222222222222222222222222 \
+  --previous-release-commit 3333333333333333333333333333333333333333 \
+  --new-version 2.0.0 \
+  --downstream-revision r1 \
+  --target-branch work/v2.0.0-synology-r1 \
+  --target-worktree /path/to/work-v2.0.0-synology-r1 \
+  --output-root /path/to/review/v2.0.0-r1 \
   --confirm-create
 ```
 
-A failed patch application is not a reason to edit generated patches manually.
+All identities above are examples. A failed replay is not a reason to edit a
+generated patch manually. The command aborts conflict state, emits no final
+artifact directory and leaves the isolated worktree for review.
 
-## Phase 4 — adapt the signed commit stack
+## Phase 4 — review the signed commit stack and artifacts
 
-1. Resolve conflicts in the source commits.
-2. Keep each logical downstream change in a separate commit.
-3. Sign and sign off every downstream commit.
+1. Verify `manifest.json` against `release/version-preparation.schema.json`.
+2. Verify `SHA256SUMS` and the ordered `patches/series` inventory.
+3. Verify every prepared commit signature and its single sign-off.
 4. Use `git range-diff` against the previous downstream stack.
-5. Run targeted tests after each logical adaptation.
-6. Regenerate the complete patch series with `git format-patch`.
-7. Replace the canonical patch export only after the source stack is final.
+5. Run targeted source tests for each adapted logical change.
+6. Review `preparation-report.md` using
+   `docs/templates/agent-evidence-report.md`.
+7. If an upstream conflict needs adaptation, keep the original logical commit
+   boundary and regenerate the complete patch export.
 
 The signed commit stack remains authoritative.
 
 ## Phase 5 — validate source and patches
 
-Run the full validator:
+From the attended control worktree, update the living manifest to the reviewed
+source/artifact identities and run its full validator:
 
 ```text
-bash scripts/release/validate-release.sh \
+bash /path/to/control-worktree/scripts/release/validate-release.sh \
+  --control-worktree /path/to/control-worktree \
   --source-worktree /path/to/release-worktree \
   --role release \
   --round-trip
@@ -118,6 +130,9 @@ Require:
 - a patch round-trip tree identical to the release source tree.
 
 ## Phase 6 — build candidates
+
+This and later phases run from the attended control worktree; they are not
+capabilities of `prepare-version`.
 
 Review the build plan:
 
