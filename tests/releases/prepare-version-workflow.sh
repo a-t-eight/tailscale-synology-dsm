@@ -391,10 +391,12 @@ create_failure_fixture() {
   REMOTE_REFS_BEFORE="$(snapshot_refs "$BARE_ORIGIN")"
   TAG_REFS_BEFORE="$(git_fixture show-ref --tags | sort)"
   SELECTED_UPSTREAM="$NEW_UPSTREAM"
-  EXPECTED_FAILURE="logical commit replay conflicted"
+  PREPARE_MODE="--confirm-create"
+  EXPECTED_FAILURE="FAIL: logical commit replay conflicted: ${PREVIOUS_RELEASE}"
   if [ "$failure_case" = "mismatch" ]; then
     SELECTED_UPSTREAM="$OLD_UPSTREAM"
-    EXPECTED_FAILURE="explicit upstream tag does not peel to the explicit commit"
+    PREPARE_MODE="--plan-only"
+    EXPECTED_FAILURE="STOP: explicit upstream tag does not peel to the explicit commit"
   fi
 
   if bash "$PREPARE_SCRIPT" prepare-version \
@@ -408,12 +410,12 @@ create_failure_fixture() {
     --target-branch work/v2.0.0-synology-r1 \
     --target-worktree "$PREPARED_WORKTREE" \
     --output-root "$ARTIFACTS" \
-    --confirm-create \
+    "$PREPARE_MODE" \
     > "$LOG" 2>&1; then
     fail "${failure_case} fixture unexpectedly succeeded"
   fi
 
-  if ! grep -Fq "$EXPECTED_FAILURE" "$LOG"; then
+  if ! grep -Fxq "$EXPECTED_FAILURE" "$LOG"; then
     sed -n '1,240p' "$LOG" >&2
     fail "${failure_case} fixture did not report the expected stop condition"
   fi
