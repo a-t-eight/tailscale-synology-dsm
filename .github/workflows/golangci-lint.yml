@@ -28,6 +28,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve lint baseline
+        id: lint-base
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            lint_base="$(git merge-base HEAD "$PR_BASE_SHA")"
+          else
+            lint_base="$(git rev-parse HEAD^)"
+          fi
+          git cat-file -e "${lint_base}^{commit}"
+          printf 'sha=%s\n' "$lint_base" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
@@ -39,9 +59,6 @@ jobs:
         with:
           version: v2.10.1
 
-          # Show only new issues if it's a pull request.
-          only-new-issues: true
-
           # Loading packages with a cold cache takes a while:
-          args: --timeout=10m
+          args: --timeout=10m --new-from-rev=${{ steps.lint-base.outputs.sha }}
           

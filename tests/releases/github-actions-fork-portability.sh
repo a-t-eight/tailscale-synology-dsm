@@ -12,7 +12,8 @@ python3 - \
   "${REPO_ROOT}/.github/workflows/test.yml" \
   "${REPO_ROOT}/.github/workflows/synology-product.yml" \
   "${REPO_ROOT}/.github/workflows/docker-file-build.yml" \
-  "${REPO_ROOT}/.github/workflows/natlab-integrationtest.yml" << 'PY'
+  "${REPO_ROOT}/.github/workflows/natlab-integrationtest.yml" \
+  "${REPO_ROOT}/.github/workflows/golangci-lint.yml" << 'PY'
 import re
 import sys
 from pathlib import Path
@@ -139,12 +140,14 @@ test_path = Path(sys.argv[2])
 synology_product_path = Path(sys.argv[3])
 docker_path = Path(sys.argv[4])
 natlab_path = Path(sys.argv[5])
+golangci_lint_path = Path(sys.argv[6])
 
 vet_workflow = read_workflow(vet_path)
 test_workflow = read_workflow(test_path)
 synology_product_workflow = read_workflow(synology_product_path)
 docker_workflow = read_workflow(docker_path)
 natlab_workflow = read_workflow(natlab_path)
+golangci_lint_workflow = read_workflow(golangci_lint_path)
 
 vet = job_block(vet_workflow, "vet")
 windows = job_block(test_workflow, "windows")
@@ -152,6 +155,7 @@ fuzz = job_block(test_workflow, "fuzz")
 merge_blocker = job_block(test_workflow, "merge_blocker")
 check_mergeability_strict = job_block(test_workflow, "check_mergeability_strict")
 check_mergeability = job_block(test_workflow, "check_mergeability")
+golangci_lint = job_block(golangci_lint_workflow, "golangci")
 
 failures: list[str] = []
 
@@ -295,12 +299,69 @@ else:
                 "synology-product must fail clearly when ShellCheck is unavailable"
             )
 
+        shellcheck_contract = [
+            "SHELLCHECK_VERSION: v0.11.0",
+            (
+                "SHELLCHECK_SHA256: "
+                "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"
+            ),
+            (
+                "https://github.com/koalaman/shellcheck/releases/download/"
+                "${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+            ),
+            "sha256sum --check -",
+            'echo "$shellcheck_dir" >> "$GITHUB_PATH"',
+            '"$shellcheck_dir/shellcheck" --version',
+        ]
+        for snippet in shellcheck_contract:
+            if snippet not in product:
+                failures.append(
+                    "synology-product must install checksum-pinned "
+                    f"ShellCheck 0.11.0: {snippet}"
+                )
+
 assert_triggers(
     failures,
     "full CI workflow",
     test_workflow,
     ["push", "merge_group", "workflow_dispatch"],
 )
+assert_triggers(
+    failures,
+    "golangci-lint workflow",
+    golangci_lint_workflow,
+    ["pull_request", "workflow_dispatch"],
+)
+
+lint_checkout_uses = re.findall(
+    r"(?m)^      - uses:\s*actions/checkout@([^\s#]+)",
+    golangci_lint,
+)
+if lint_checkout_uses != ["de0fac2e4500dabe0009e67214ff5f5447ce83dd"]:
+    failures.append(
+        "golangci-lint must use exactly one checksum-pinned checkout "
+        f"(observed: {lint_checkout_uses!r})"
+    )
+
+lint_contract = [
+    "fetch-depth: 0",
+    "id: lint-base",
+    'git merge-base HEAD "$PR_BASE_SHA"',
+    'git rev-parse HEAD^',
+    'git cat-file -e "${lint_base}^{commit}"',
+    "--new-from-rev=${{ steps.lint-base.outputs.sha }}",
+]
+for snippet in lint_contract:
+    if snippet not in golangci_lint:
+        failures.append(
+            "golangci-lint must derive its baseline locally for oversized "
+            f"pull requests: {snippet}"
+        )
+
+if "only-new-issues: true" in golangci_lint:
+    failures.append(
+        "golangci-lint must not request GitHub's size-limited PR diff"
+    )
 assert_triggers(
     failures,
     "Dockerfile build workflow",
