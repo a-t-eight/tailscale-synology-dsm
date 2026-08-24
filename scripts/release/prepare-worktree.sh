@@ -400,7 +400,7 @@ prepare_version() (
     exit 0
   fi
 
-  release_clean_git \
+  release_hookless_git \
     -C "$SOURCE_REPO" \
     worktree \
     add \
@@ -552,7 +552,7 @@ PY
 
   ROUND_TRIP_PARENT="$(mktemp -d /tmp/tailscale-version-round-trip.XXXXXX)"
   ROUND_TRIP_WORKTREE="${ROUND_TRIP_PARENT}/worktree"
-  release_clean_git \
+  release_hookless_git \
     -C "$SOURCE_REPO" \
     worktree \
     add \
