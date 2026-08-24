@@ -108,6 +108,7 @@ func (t *target) buildSPK(b *dist.Build, inner *innerPkg) ([]string, error) {
 
 	if t.dsmMajorVersion == 7 {
 		entries = append(entries,
+			static("PKG_DEPS", "conf/PKG_DEPS", 0644),
 			static("privilege-dsm7", "conf/privilege.bootstrap-package", 0644),
 			static("privilege-dsm7.root", "conf/privilege.bootstrap-root", 0644),
 		)
