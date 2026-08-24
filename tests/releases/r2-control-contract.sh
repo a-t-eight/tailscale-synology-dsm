@@ -91,8 +91,14 @@ PY
 
 PATCH_ROOT="${REPO_ROOT}/$(release_manifest_get "$MANIFEST" paths.patch_series)"
 EVIDENCE_ROOT="${REPO_ROOT}/$(release_manifest_get "$MANIFEST" paths.evidence)"
+RELEASE_RECORD="${REPO_ROOT}/$(release_manifest_get "$MANIFEST" paths.release_record)"
 
 release_validate_patch_inventory "$MANIFEST" "$PATCH_ROOT" || exit 1
+
+if [ ! -s "$RELEASE_RECORD" ]; then
+  echo "FAIL: permanent r2 release record is absent: ${RELEASE_RECORD}" >&2
+  exit 1
+fi
 
 (
   cd "$PATCH_ROOT" || exit 1
