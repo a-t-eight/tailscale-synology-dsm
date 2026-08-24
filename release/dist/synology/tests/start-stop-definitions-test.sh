@@ -14,9 +14,7 @@ REPO_ROOT="$(
 
 START_STOP_SOURCE="${REPO_ROOT}/release/dist/synology/files/scripts/start-stop-status"
 
-TEST_ROOT="$(
-    mktemp -d
-)"
+TEST_ROOT="$(mktemp -d)"
 
 cleanup() {
     rm -rf -- "${TEST_ROOT}"
@@ -54,10 +52,7 @@ env \
 
         printf "%s\n" \
             "$NETFILTER_LOCALAPI_ATTEMPTS" \
-            "$NETFILTER_BACKEND_ATTEMPTS" \
-            "$NETFILTER_REPAIR_ATTEMPTS" \
-            "$NETFILTER_SETTLE_SECONDS" \
-            "$NETFILTER_POST_REPAIR_SETTLE_SECONDS"
+            "$RECONCILER_START_ATTEMPTS"
     ' bash "${DEFINITIONS}" \
     >"${STDOUT_FILE}" \
     2>"${STDERR_FILE}"
@@ -84,17 +79,14 @@ EXPECTED="${TEST_ROOT}/expected"
 
 printf '%s\n' \
     30 \
-    45 \
-    15 \
-    8 \
-    3 \
+    10 \
     >"${EXPECTED}"
 
 if ! cmp -s \
     "${EXPECTED}" \
     "${STDOUT_FILE}"
 then
-    printf 'ERROR: unexpected reconciliation defaults\n' >&2
+    printf 'ERROR: unexpected package startup defaults\n' >&2
 
     printf 'Expected:\n' >&2
     sed -n '1,20p' "${EXPECTED}" >&2

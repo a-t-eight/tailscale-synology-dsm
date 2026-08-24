@@ -38,13 +38,12 @@ TAILSCALE_BIN="${SYNOPKG_PKGDEST}/bin/tailscale"
 
 NETFILTER_LOCALAPI_ATTEMPTS="${TAILSCALE_SYNOLOGY_LOCALAPI_ATTEMPTS:-30}"
 
-NETFILTER_BACKEND_ATTEMPTS="${TAILSCALE_SYNOLOGY_BACKEND_ATTEMPTS:-45}"
+RECONCILER_SCRIPT="${PKG_ROOT}/scripts/tailscale-netfilter-reconciler"
+RECONCILER_PID_FILE="${PKGVAR}/tailscale-netfilter-reconciler.pid"
+RECONCILER_LOG_FILE="${PKGVAR}/tailscale-netfilter-reconciler.log"
+RECONCILER_PENDING_FILE="${PKGVAR}/tailscale-netfilter-repair.pending"
 
-NETFILTER_REPAIR_ATTEMPTS="${TAILSCALE_SYNOLOGY_NETFILTER_REPAIR_ATTEMPTS:-15}"
-
-NETFILTER_SETTLE_SECONDS="${TAILSCALE_SYNOLOGY_NETFILTER_SETTLE_SECONDS:-8}"
-
-NETFILTER_POST_REPAIR_SETTLE_SECONDS="${TAILSCALE_SYNOLOGY_NETFILTER_POST_REPAIR_SETTLE_SECONDS:-3}"
+RECONCILER_START_ATTEMPTS="${TAILSCALE_SYNOLOGY_RECONCILER_START_ATTEMPTS:-10}"
 
 SERVICE_COMMAND="${SYNOPKG_PKGDEST}/bin/tailscaled \
 --state=${STATE_FILE} \
@@ -736,244 +735,85 @@ wait_for_localapi() {
 }
 
 
-prefs_require_netfilter_reconciliation() {
-    local output
+reconciler_status() {
+    local pid=""
 
-    output="$(
-        "${TAILSCALE_BIN}" \
-            --socket="${SOCKET_FILE}" \
-            debug prefs \
-            2>/dev/null
-    )" || return 1
-
-    printf '%s\n' "${output}" |
-        grep -Eq \
-            '"WantRunning"[[:space:]]*:[[:space:]]*true' ||
-        return 1
-
-    printf '%s\n' "${output}" |
-        grep -Eq \
-            '"NetfilterMode"[[:space:]]*:[[:space:]]*2' ||
-        return 1
-
-    return 0
-}
-
-
-wait_for_backend_running() {
-    local counter="${NETFILTER_BACKEND_ATTEMPTS}"
-    local output
-    local status
-
-    while [ "${counter}" -gt 0 ]; do
-        output="$(
-            "${TAILSCALE_BIN}" \
-                --socket="${SOCKET_FILE}" \
-                status \
-                --json \
-                2>/dev/null
-        )"
-
-        status=$?
-
-        if [ "${status}" -eq 0 ]; then
-            if printf '%s\n' "${output}" |
-                grep -Eq \
-                    '"BackendState"[[:space:]]*:[[:space:]]*"Running"'
-            then
-                return 0
-            fi
-
-            if printf '%s\n' "${output}" |
-                grep -Eq \
-                    '"BackendState"[[:space:]]*:[[:space:]]*"(NeedsLogin|Stopped)"'
-            then
-                return 2
-            fi
-        fi
-
-        if ! daemon_status; then
-            log_message ERROR \
-                "tailscaled exited while waiting for the backend"
-            return 1
-        fi
-
-        counter=$((counter - 1))
-        sleep 1
-    done
-
-    return 2
-}
-
-
-netfilter_hooks_complete() {
-    local iptables_bin="${IPTABLES_BIN:-}"
-    local ip6tables_bin
-
-    if [ -z "${iptables_bin}" ]; then
-        iptables_bin="$(
-            command -v iptables 2>/dev/null
-        )" || return 1
-    fi
-
-    "${iptables_bin}" \
-        -t filter \
-        -C INPUT \
-        -j ts-input \
-        >/dev/null 2>&1 ||
-        return 1
-
-    "${iptables_bin}" \
-        -t filter \
-        -C FORWARD \
-        -j ts-forward \
-        >/dev/null 2>&1 ||
-        return 1
-
-    "${iptables_bin}" \
-        -t nat \
-        -C POSTROUTING \
-        -j ts-postrouting \
-        >/dev/null 2>&1 ||
-        return 1
-
-    ip6tables_bin="$(
-        command -v ip6tables 2>/dev/null
-    )" || ip6tables_bin=""
-
-    if [ -n "${ip6tables_bin}" ] &&
-        "${ip6tables_bin}" \
-            -t filter \
-            -S \
-            >/dev/null 2>&1
-    then
-        "${ip6tables_bin}" \
-            -t filter \
-            -C INPUT \
-            -j ts-input \
-            >/dev/null 2>&1 ||
-            return 1
-
-        "${ip6tables_bin}" \
-            -t filter \
-            -C FORWARD \
-            -j ts-forward \
-            >/dev/null 2>&1 ||
-            return 1
-    fi
-
-    return 0
-}
-
-
-reconcile_netfilter_after_start() {
-    local output
-    local status
-    local counter
-
-    if ! wait_for_localapi; then
+    if [ ! -r "${RECONCILER_PID_FILE}" ]; then
         return 1
     fi
 
-    if ! prefs_require_netfilter_reconciliation; then
-        log_message INFO             "netfilter reconciliation is not required by the current Tailscale preferences"
-        return 0
-    fi
+    IFS= read -r pid <"${RECONCILER_PID_FILE}" ||
+        pid=""
 
-    wait_for_backend_running
-    status=$?
-
-    case "${status}" in
-    0)
-        ;;
-    1)
-        return 1
-        ;;
-    2)
-        log_message NOTICE             "Tailscale backend did not reach Running state; deferring netfilter validation to daemon self-healing"
-        return 0
-        ;;
-    *)
-        log_message ERROR             "unexpected backend readiness status: ${status}"
+    case "${pid}" in
+    ''|*[!0-9]*)
+        rm -f -- "${RECONCILER_PID_FILE}"
         return 1
         ;;
     esac
 
-    # DSM performs delayed firewall processing after package startup.
-    # Do not validate the transient state observed immediately after the
-    # daemon creates its chains.
-    sleep "${NETFILTER_SETTLE_SECONDS}"
-
-    if netfilter_hooks_complete; then
-        log_message INFO \
-            "Tailscale netfilter hooks are complete after startup"
+    if kill -0 "${pid}" >/dev/null 2>&1; then
         return 0
     fi
 
-    log_message NOTICE \
-        "Tailscale netfilter hooks are incomplete after DSM startup processing; rebuilding"
+    rm -f -- "${RECONCILER_PID_FILE}"
 
-    output="$(
-        "${TAILSCALE_BIN}" \
-            --socket="${SOCKET_FILE}" \
-            set \
-            --netfilter-mode=off \
-            2>&1
-    )"
+    return 1
+}
 
-    status=$?
 
-    if [ "${status}" -ne 0 ]; then
+start_reconciler() {
+    local pid
+    local counter="${RECONCILER_START_ATTEMPTS}"
+
+    if reconciler_status; then
+        return 0
+    fi
+
+    [ -x "${RECONCILER_SCRIPT}" ] || {
         log_message ERROR \
-            "cannot disable netfilter for reconciliation: ${output}"
+            "netfilter reconciler is unavailable: ${RECONCILER_SCRIPT}"
         return 1
-    fi
+    }
 
-    if [ -n "${output}" ]; then
-        log_message NOTICE \
-            "netfilter disable output: ${output}"
-    fi
-
-    sleep 1
-
-    output="$(
-        "${TAILSCALE_BIN}" \
-            --socket="${SOCKET_FILE}" \
-            set \
-            --netfilter-mode=on \
-            2>&1
-    )"
-
-    status=$?
-
-    if [ "${status}" -ne 0 ]; then
+    secure_root_path "${RECONCILER_SCRIPT}" || {
         log_message ERROR \
-            "cannot re-enable netfilter during reconciliation: ${output}"
+            "netfilter reconciler ownership or mode is unsafe: ${RECONCILER_SCRIPT}"
         return 1
-    fi
+    }
 
-    if [ -n "${output}" ]; then
-        log_message INFO \
-            "netfilter enable output: ${output}"
-    fi
+    rm -f -- "${RECONCILER_PID_FILE}"
 
-    counter="${NETFILTER_REPAIR_ATTEMPTS}"
+    touch "${RECONCILER_LOG_FILE}" ||
+        return 1
+
+    chmod 0600 "${RECONCILER_LOG_FILE}" ||
+        return 1
+
+    TAILSCALE_RECONCILER_PKGVAR="${PKGVAR}" \
+    TAILSCALE_RECONCILER_TAILSCALE_BIN="${TAILSCALE_BIN}" \
+    TAILSCALE_RECONCILER_SOCKET_FILE="${SOCKET_FILE}" \
+    TAILSCALE_RECONCILER_PID_FILE="${RECONCILER_PID_FILE}" \
+    TAILSCALE_RECONCILER_PENDING_FILE="${RECONCILER_PENDING_FILE}" \
+        "${RECONCILER_SCRIPT}" \
+        >>"${RECONCILER_LOG_FILE}" \
+        2>&1 &
+
+    pid=$!
+
+    printf '%s\n' \
+        "${pid}" \
+        >"${RECONCILER_PID_FILE}" ||
+        return 1
+
+    chmod 0600 "${RECONCILER_PID_FILE}" ||
+        return 1
 
     while [ "${counter}" -gt 0 ]; do
-        if netfilter_hooks_complete; then
-            # Verify that DSM does not immediately remove the reconstructed
-            # hooks again.
-            sleep "${NETFILTER_POST_REPAIR_SETTLE_SECONDS}"
-
-            if netfilter_hooks_complete; then
-                log_message INFO \
-                    "Tailscale netfilter reconciliation completed successfully"
-                return 0
-            fi
-
-            log_message ERROR \
-                "DSM removed the reconstructed Tailscale hooks during the post-repair settle period"
-            return 1
+        if reconciler_status; then
+            log_message INFO \
+                "started netfilter reconciler PID=${pid}"
+            return 0
         fi
 
         counter=$((counter - 1))
@@ -981,9 +821,51 @@ reconcile_netfilter_after_start() {
     done
 
     log_message ERROR \
-        "Tailscale netfilter hooks remain incomplete after reconciliation"
+        "netfilter reconciler did not remain running"
+
+    rm -f -- "${RECONCILER_PID_FILE}"
 
     return 1
+}
+
+
+stop_reconciler() {
+    local pid=""
+    local counter=20
+
+    if ! reconciler_status; then
+        rm -f -- "${RECONCILER_PID_FILE}"
+        return 0
+    fi
+
+    IFS= read -r pid <"${RECONCILER_PID_FILE}" ||
+        pid=""
+
+    log_message INFO \
+        "stopping netfilter reconciler PID=${pid}"
+
+    kill -TERM "${pid}" >/dev/null 2>&1 ||
+        true
+
+    while [ "${counter}" -gt 0 ]; do
+        if ! kill -0 "${pid}" >/dev/null 2>&1; then
+            rm -f -- "${RECONCILER_PID_FILE}"
+            return 0
+        fi
+
+        counter=$((counter - 1))
+        sleep 1
+    done
+
+    log_message WARNING \
+        "netfilter reconciler did not stop after SIGTERM; sending SIGKILL"
+
+    kill -KILL "${pid}" >/dev/null 2>&1 ||
+        true
+
+    rm -f -- "${RECONCILER_PID_FILE}"
+
+    return 0
 }
 
 
@@ -1018,13 +900,18 @@ start)
         start_daemon
 
         if ! wait_for_status 0; then
-            log_message ERROR                 "tailscaled did not remain running after startup"
+            log_message ERROR \
+                "tailscaled did not remain running after startup"
             stop_daemon
             exit 1
         fi
 
-        if ! reconcile_netfilter_after_start; then
-            log_message ERROR                 "post-start netfilter reconciliation failed"
+        if ! wait_for_localapi; then
+            stop_daemon
+            exit 1
+        fi
+
+        if ! start_reconciler; then
             stop_daemon
             exit 1
         fi
@@ -1033,16 +920,30 @@ start)
     fi
     ;;
 stop)
-    if daemon_status; then
-        stop_daemon
-        exit $?
-    else
-        exit 0
+    STOP_STATUS=0
+
+    if reconciler_status; then
+        stop_reconciler ||
+            STOP_STATUS=1
     fi
+
+    if daemon_status; then
+        stop_daemon ||
+            STOP_STATUS=1
+    fi
+
+    exit "${STOP_STATUS}"
     ;;
 status)
     if daemon_status; then
         echo "${SERVICE_NAME} is running"
+
+        if reconciler_status; then
+            echo "netfilter reconciler is running"
+        else
+            echo "netfilter reconciler is not running"
+        fi
+
         exit 0
     else
         if ! bootstrap_is_current; then

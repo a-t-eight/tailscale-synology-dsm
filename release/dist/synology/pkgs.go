@@ -118,6 +118,11 @@ func (t *target) buildSPK(b *dist.Build, inner *innerPkg) ([]string, error) {
 		file(inner.path, "package.tgz", 0644),
 		dir("scripts"),
 		static("scripts/start-stop-status", "scripts/start-stop-status", 0644),
+		static(
+			"scripts/tailscale-netfilter-reconciler",
+			"scripts/tailscale-netfilter-reconciler",
+			0755,
+		),
 		static("scripts/postupgrade", "scripts/postupgrade", 0644),
 		static("scripts/preupgrade", "scripts/preupgrade", 0644),
 	)
