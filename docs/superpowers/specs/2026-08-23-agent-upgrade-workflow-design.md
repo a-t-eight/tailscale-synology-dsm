@@ -180,4 +180,3 @@ accepted candidate tree and no untracked or unstaged product change exists.
 Top-level patch copies may be removed only after recording equality or
 distinction from the canonical in-repository patch and confirming the canonical
 checksum. Ambiguous targets remain untouched.
-
