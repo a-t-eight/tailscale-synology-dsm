@@ -825,15 +825,18 @@ PY
   }
 
   mv \
-    --update=none-fail \
+    --no-clobber \
     --no-copy \
     --no-target-directory \
     -- \
     "$STAGING_DIR" \
     "$OUTPUT_ROOT"
   INSTALL_RC=$?
-  if [ "$INSTALL_RC" -ne 0 ]; then
+  if [ "$INSTALL_RC" -ne 0 ] || [ -e "$STAGING_DIR" ]; then
     release_fail "review artifact installation failed"
+    if [ "$INSTALL_RC" -eq 0 ]; then
+      INSTALL_RC=1
+    fi
     exit "$INSTALL_RC"
   fi
   STAGING_DIR=""
