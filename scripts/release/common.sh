@@ -540,7 +540,17 @@ release_apply_patch_series() (
       done
       ;;
     mail)
-      release_clean_git -C "$target_worktree" am --3way "${patch_files[@]}"
+      release_clean_git \
+        -c \
+        commit.gpgsign=false \
+        -c \
+        user.name='Tailscale Synology release validator' \
+        -c \
+        user.email='validator@localhost.invalid' \
+        -C "$target_worktree" \
+        am \
+        --3way \
+        "${patch_files[@]}"
       apply_rc=$?
       if [ "$apply_rc" -ne 0 ]; then
         release_clean_git -C "$target_worktree" am --abort > /dev/null 2>&1 || true
