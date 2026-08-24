@@ -18,7 +18,9 @@ Usage:
     [--dry-run]
 
 Control worktrees use their own committed .githooks directory. Source, work and
-release worktrees receive generated wrappers in the common Git directory.
+release worktrees receive generated wrappers in the common Git directory. The
+control role is available only when the selected worktree contains the complete
+control-only validator at scripts/validate-repository.sh.
 USAGE
 }
 
@@ -114,6 +116,12 @@ WORKTREE_ROOT="$(
     rev-parse \
     --show-toplevel
 )"
+
+if [ "$ROLE" = "control" ] &&
+  [ ! -x "$WORKTREE_ROOT/scripts/validate-repository.sh" ]; then
+  fail "control role requires scripts/validate-repository.sh in the selected worktree"
+  exit 1
+fi
 
 path_id="$(
   printf '%s\n' \
