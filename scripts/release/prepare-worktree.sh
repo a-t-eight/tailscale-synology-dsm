@@ -1040,7 +1040,7 @@ if [ -n "$REMOTE_MATCH" ]; then
   exit 1
 fi
 
-release_clean_git \
+release_hookless_git \
   -C "$SOURCE_REPO" \
   worktree \
   add \
