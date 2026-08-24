@@ -28,7 +28,12 @@ done < <(
       -- \
       '*.sh' \
       '*.bash'
-    printf '%s\n' .githooks/pre-commit .githooks/commit-msg
+    printf '%s\n' \
+      .githooks/pre-commit \
+      .githooks/commit-msg \
+      release/dist/synology/files/scripts/start-stop-status \
+      release/dist/synology/files/scripts/tailscale-netfilter-reconciler \
+      release/dist/synology/files/scripts/tailscale-synology-bootstrap
   } | sort -u
 )
 

@@ -90,6 +90,7 @@ setup_case() {
     MOCK_CHAINS="${MOCK_IPTABLES_STATE}/chains"
     MOCK_HOOKS="${MOCK_IPTABLES_STATE}/hooks"
     MOCK_MASQUERADE="${MOCK_IPTABLES_STATE}/masquerade"
+    MOCK_DELETE_COUNT="${MOCK_IPTABLES_STATE}/delete-count"
     DEFINITIONS="${CASE_ROOT}/start-stop-definitions.sh"
 
     mkdir -p \
@@ -103,6 +104,7 @@ setup_case() {
     : >"${MOCK_CHAINS}"
     : >"${MOCK_HOOKS}"
     : >"${MOCK_MASQUERADE}"
+    printf '0\n' >"${MOCK_DELETE_COUNT}"
 
     awk '
         /^case \$1 in/ {
@@ -124,6 +126,7 @@ COMMAND_LOG="${STATE}/commands.log"
 CHAINS="${STATE}/chains"
 HOOKS="${STATE}/hooks"
 MASQUERADE="${STATE}/masquerade"
+DELETE_COUNT="${STATE}/delete-count"
 
 printf '%s\n' "$*" >>"${COMMAND_LOG}"
 
@@ -326,17 +329,18 @@ case "${operation}" in
         iptables_error
     fi
 
-    add_line "${chain}" "${MASQUERADE}"
-    ;;
+	add_line "${chain}" "${MASQUERADE}"
+
+	;;
 
 -C)
     chain="${1:-}"
     shift || true
 
-    [ "${table}" = "nat" ] ||
-        iptables_error
+	[ "${table}" = "nat" ] ||
+		iptables_error
 
-    case "${chain}" in
+	case "${chain}" in
     POSTROUTING)
         [ "${1:-}" = "-j" ] ||
             iptables_error
@@ -377,10 +381,19 @@ case "${operation}" in
         ;;
     esac
 
-    [ "${jump_option}" = "-j" ] ||
-        iptables_error
+	[ "${jump_option}" = "-j" ] ||
+		iptables_error
 
-    remove_line "${target}" "${HOOKS}" ||
+	delete_count="$(cat "${DELETE_COUNT}")"
+	no_progress_successes="${MOCK_IPTABLES_DELETE_NO_PROGRESS_SUCCESSES:-0}"
+	if [ "${delete_count}" -lt "${no_progress_successes}" ]; then
+		printf '%s\n' \
+			"$((delete_count + 1))" \
+			>"${DELETE_COUNT}"
+		exit 0
+	fi
+
+	remove_line "${target}" "${HOOKS}" ||
         iptables_error
     ;;
 
@@ -434,6 +447,8 @@ IPTABLES
 
     export MOCK_IPTABLES_STATE
     export MOCK_IPTABLES_FAIL_MASQUERADE=0
+    export MOCK_IPTABLES_DELETE_NO_PROGRESS_SUCCESSES=0
+    export TAILSCALE_SYNOLOGY_TEST_MODE=1
 
     # shellcheck disable=SC1090
     source "${DEFINITIONS}"
@@ -521,6 +536,134 @@ test_tailscale_nat_topology_failure_cleanup() {
     assert_probe_state_clean
 }
 
+test_tailscale_nat_cleanup_rejects_success_without_progress() {
+    local chain="ts-pf-nat-no-progress"
+    local delete_attempts
+    local status
+
+    setup_case
+
+    "${IPTABLES_BIN}" -t nat -N "${chain}"
+    "${IPTABLES_BIN}" -t nat -I POSTROUTING 1 -j "${chain}"
+    : >"${MOCK_IPTABLES_LOG}"
+
+    export MOCK_IPTABLES_DELETE_NO_PROGRESS_SUCCESSES=20
+
+    set +e
+    cleanup_tailscale_nat_preflight "${chain}"
+    status=$?
+    set -e
+
+    assert_nonzero_status "${status}"
+
+    delete_attempts="$(
+        grep -Ec -- \
+            "-t nat -D (POSTROUTING|DEFAULT_POSTROUTING) -j ${chain}" \
+            "${MOCK_IPTABLES_LOG}" ||
+            true
+    )"
+
+    if [ "${delete_attempts}" -gt 1 ]; then
+        fail \
+            "NAT cleanup retried a successful no-progress deletion ${delete_attempts} times"
+    fi
+
+    if [ "$(sed -n '1p' "${MOCK_IPTABLES_LOG}")" != "-t nat -S" ]; then
+        fail "NAT cleanup attempted deletion before checking hook existence"
+    fi
+
+    if [ "$(sed -n '2p' "${MOCK_IPTABLES_LOG}")" != \
+        "-t nat -D DEFAULT_POSTROUTING -j ${chain}" ]; then
+        fail "NAT cleanup did not delete the observed DSM hook"
+    fi
+
+    if [ "$(sed -n '3p' "${MOCK_IPTABLES_LOG}")" != "-t nat -S" ]; then
+        fail "NAT cleanup did not verify state after reported deletion"
+    fi
+}
+
+test_tailscale_nat_cleanup_checks_hook_before_delete() {
+    local chain="ts-pf-nat-no-hook"
+
+    setup_case
+
+    "${IPTABLES_BIN}" -t nat -N "${chain}"
+    : >"${MOCK_IPTABLES_LOG}"
+
+    cleanup_tailscale_nat_preflight "${chain}"
+
+    if grep -F -- \
+        "-t nat -D " \
+        "${MOCK_IPTABLES_LOG}" >/dev/null; then
+        fail "NAT cleanup attempted deletion without an existing hook"
+    fi
+
+    if [ "$(sed -n '1p' "${MOCK_IPTABLES_LOG}")" != "-t nat -S" ]; then
+        fail "NAT cleanup did not inspect hook existence before cleanup"
+    fi
+
+    assert_probe_state_clean
+}
+
+test_tailscale_nat_topology_no_progress_cleans_once() {
+    local delete_attempts
+    local output
+    local status
+
+    setup_case
+
+    export MOCK_IPTABLES_DELETE_NO_PROGRESS_SUCCESSES=20
+
+    set +e
+    output="$(check_tailscale_nat_topology 2>&1)"
+    status=$?
+    set -e
+
+    assert_nonzero_status "${status}"
+    assert_contains \
+        "${output}" \
+        "cannot remove the temporary NAT preflight topology"
+
+    delete_attempts="$(
+        grep -Ec -- \
+            '-t nat -D (POSTROUTING|DEFAULT_POSTROUTING) -j ts-pf-nat-' \
+            "${MOCK_IPTABLES_LOG}" ||
+            true
+    )"
+
+    if [ "${delete_attempts}" -ne 1 ]; then
+        fail \
+            "full NAT topology attempted ${delete_attempts} no-progress deletions, expected 1"
+    fi
+}
+
+test_tailscale_nat_signal_cleans_temporary_state() {
+    local probe_pid
+    local status
+
+    setup_case
+
+    # Invoked indirectly by the sourced lifecycle definitions.
+    # shellcheck disable=SC2329
+    tailscale_nat_preflight_test_checkpoint() {
+        kill -TERM "${BASHPID}"
+    }
+
+    (
+        check_tailscale_nat_topology
+    ) &
+    probe_pid=$!
+
+    set +e
+    wait "${probe_pid}" >/dev/null 2>&1
+    status=$?
+    set -e
+
+    assert_nonzero_status "${status}"
+
+    assert_probe_state_clean
+}
+
 run_case() {
     local name="$1"
     local function_name="$2"
@@ -550,6 +693,22 @@ run_case \
 run_case \
     "Tailscale NAT failure cleans up temporary state" \
     test_tailscale_nat_topology_failure_cleanup
+
+run_case \
+    "Tailscale NAT cleanup rejects success without progress" \
+    test_tailscale_nat_cleanup_rejects_success_without_progress
+
+run_case \
+    "Tailscale NAT cleanup checks hook existence before deletion" \
+    test_tailscale_nat_cleanup_checks_hook_before_delete
+
+run_case \
+    "Tailscale NAT topology performs one no-progress cleanup" \
+    test_tailscale_nat_topology_no_progress_cleans_once
+
+run_case \
+    "Tailscale NAT signal cleans temporary state" \
+    test_tailscale_nat_signal_cleans_temporary_state
 
 printf '\nResults: %s passed, %s failed\n' \
     "${PASS_COUNT}" \

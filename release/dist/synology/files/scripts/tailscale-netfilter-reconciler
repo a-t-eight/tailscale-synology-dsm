@@ -4,8 +4,6 @@ set -u
 
 export PATH="/usr/syno/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-SERVICE_NAME="tailscale-netfilter-reconciler"
-
 PKG_NAME="${SYNOPKG_PKGNAME:-Tailscale}"
 PKG_ROOT="${TAILSCALE_SYNOLOGY_PACKAGE_ROOT:-/var/packages/${PKG_NAME}}"
 

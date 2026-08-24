@@ -4,6 +4,7 @@ set -u
 export PATH="/usr/syno/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 PACKAGE_NAME="Tailscale"
+BOOTSTRAP_SOURCE_PATH="${BASH_SOURCE[0]}"
 PACKAGE_ROOT="${TAILSCALE_SYNOLOGY_PACKAGE_ROOT:-/var/packages/${PACKAGE_NAME}}"
 PACKAGE_TARGET="${PACKAGE_ROOT}/target"
 PACKAGE_CONF="${PACKAGE_ROOT}/conf"
@@ -16,8 +17,12 @@ ROOT_TEMPLATE="${PACKAGE_CONF}/privilege.bootstrap-root"
 STATE_FILE="${PACKAGE_VAR}/root-bootstrap.state"
 PID_FILE="${PACKAGE_VAR}/tailscaled.pid"
 BACKUP_ROOT="${PACKAGE_VAR}/bootstrap-backups"
+TARGET_BOOTSTRAP="${PACKAGE_TARGET}/bin/tailscale-synology-bootstrap"
+OUTER_BOOTSTRAP="${PACKAGE_ROOT}/scripts/tailscale-synology-bootstrap"
 
 SYNO_PKG="${TAILSCALE_SYNOLOGY_SYNOPKG:-/usr/syno/bin/synopkg}"
+TIMEOUT_BIN="${TAILSCALE_SYNOLOGY_TIMEOUT_BIN:-/usr/bin/timeout}"
+SYNOPKG_TIMEOUT_SECONDS="${TAILSCALE_SYNOLOGY_SYNOPKG_TIMEOUT_SECONDS:-60}"
 PROC_ROOT="/proc"
 
 if [ "${TAILSCALE_SYNOLOGY_TEST_MODE:-0}" = "1" ]; then
@@ -81,6 +86,31 @@ require_root() {
     fi
 }
 
+require_secure_privileged_entrypoint() {
+    local script_path
+    local target_bootstrap_path
+    local target_uid
+
+    script_path="$(readlink -f -- "${BOOTSTRAP_SOURCE_PATH}")" ||
+        die "cannot resolve bootstrap script path"
+
+    target_bootstrap_path="$(readlink -f -- "${TARGET_BOOTSTRAP}")" ||
+        die "cannot resolve target bootstrap script path"
+
+    if [ "${script_path}" != "${target_bootstrap_path}" ]; then
+        return 0
+    fi
+
+    target_uid="$(stat -c %u -- "${TARGET_BOOTSTRAP}")" ||
+        die "cannot read owner for ${TARGET_BOOTSTRAP}"
+
+    if [ "${target_uid}" != "0" ]; then
+        die "initial root bootstrap must use the root-owned package script: ${OUTER_BOOTSTRAP}"
+    fi
+
+    require_secure_root_file "${TARGET_BOOTSTRAP}"
+}
+
 require_secure_root_file() {
     local file="$1"
     local uid
@@ -132,7 +162,10 @@ validate_dsm() {
 }
 
 validate_layout() {
+    local outer_bootstrap_path
     local script_path
+    local target_bootstrap_mode
+    local target_bootstrap_path
 
     [ -d "${PACKAGE_ROOT}" ] ||
         die "package root is missing: ${PACKAGE_ROOT}"
@@ -149,10 +182,37 @@ validate_layout() {
     [ -x "${PACKAGE_TARGET}/bin/tailscaled" ] ||
         die "tailscaled is missing or not executable"
 
-    script_path="$(readlink -f -- "${BASH_SOURCE[0]}")" ||
+    [ -f "${TARGET_BOOTSTRAP}" ] ||
+        die "target bootstrap is missing: ${TARGET_BOOTSTRAP}"
+
+    script_path="$(readlink -f -- "${BOOTSTRAP_SOURCE_PATH}")" ||
         die "cannot resolve bootstrap script path"
 
-    require_secure_root_file "${script_path}"
+    outer_bootstrap_path="$(readlink -f -- "${OUTER_BOOTSTRAP}")" ||
+        die "cannot resolve outer bootstrap script path"
+
+    target_bootstrap_path="$(readlink -f -- "${TARGET_BOOTSTRAP}")" ||
+        die "cannot resolve target bootstrap script path"
+
+    case "${script_path}" in
+    "${outer_bootstrap_path}"|"${target_bootstrap_path}")
+        ;;
+    *)
+        die "bootstrap was invoked from an unexpected path: ${script_path}"
+        ;;
+    esac
+
+    require_secure_root_file "${OUTER_BOOTSTRAP}"
+
+    cmp -s "${TARGET_BOOTSTRAP}" "${OUTER_BOOTSTRAP}" ||
+        die "target bootstrap differs from the root-owned package copy"
+
+    target_bootstrap_mode="$(stat -c %a -- "${TARGET_BOOTSTRAP}")" ||
+        die "cannot read target bootstrap mode"
+
+    [ "${target_bootstrap_mode}" = "755" ] ||
+        die "target bootstrap mode is ${target_bootstrap_mode}, expected 755"
+
     require_secure_root_file "${SAFE_TEMPLATE}"
     require_secure_root_file "${ROOT_TEMPLATE}"
 
@@ -210,12 +270,31 @@ bootstrap_is_current() {
 
 daemon_pid() {
     local pid
+    local expected_executable
+    local actual_executable
 
     [ -r "${PID_FILE}" ] || return 1
 
-    pid="$(tr -cd '0-9' <"${PID_FILE}")"
-    [ -n "${pid}" ] || return 1
+    pid="$(cat -- "${PID_FILE}" 2>/dev/null)" || return 1
+
+    case "${pid}" in
+    ''|*[!0-9]*)
+        return 1
+        ;;
+    esac
+
     [ -d "${PROC_ROOT}/${pid}" ] || return 1
+
+    expected_executable="$(
+        readlink -f -- "${PACKAGE_TARGET}/bin/tailscaled"
+    )" || return 1
+
+    actual_executable="$(
+        readlink -f -- "${PROC_ROOT}/${pid}/exe"
+    )" || return 1
+
+    [ "${actual_executable}" = "${expected_executable}" ] ||
+        return 1
 
     printf '%s\n' "${pid}"
 }
@@ -237,11 +316,52 @@ daemon_uid() {
     ' "${PROC_ROOT}/${pid}/status"
 }
 
+run_synopkg_with_timeout() {
+    local status
+
+    case "${SYNOPKG_TIMEOUT_SECONDS}" in
+    ''|*[!0-9]*|0)
+        log_message ERROR \
+            "invalid synopkg timeout: ${SYNOPKG_TIMEOUT_SECONDS}"
+        return 2
+        ;;
+    esac
+
+    [ -x "${TIMEOUT_BIN}" ] || {
+        log_message ERROR \
+            "DSM timeout command is unavailable: ${TIMEOUT_BIN}"
+        return 127
+    }
+
+    "${TIMEOUT_BIN}" \
+        -s TERM \
+        -k 2 \
+        "${SYNOPKG_TIMEOUT_SECONDS}" \
+        "${SYNO_PKG}" \
+        "$@"
+    status=$?
+
+    if [ "${status}" -eq 124 ] ||
+        [ "${status}" -eq 137 ] ||
+        [ "${status}" -eq 143 ]
+    then
+        log_message ERROR \
+            "synopkg $1 exceeded ${SYNOPKG_TIMEOUT_SECONDS}s"
+    fi
+
+    return "${status}"
+}
+
 stop_package() {
     local counter
 
-    "${SYNO_PKG}" stop "${PACKAGE_NAME}" >/dev/null 2>&1 ||
-        true
+    if ! run_synopkg_with_timeout \
+        stop \
+        "${PACKAGE_NAME}" \
+        >/dev/null
+    then
+        die "DSM rejected or timed out the package stop"
+    fi
 
     counter=20
     while [ "${counter}" -gt 0 ]; do
@@ -311,6 +431,12 @@ set_target_owner() {
     chown -R "${owner}:${group}" "${target_real}"
 }
 
+set_target_bootstrap_mode() {
+    [ -f "${TARGET_BOOTSTRAP}" ] || return 1
+
+    chmod 0755 "${TARGET_BOOTSTRAP}"
+}
+
 write_state() {
     local temporary="${STATE_FILE}.bootstrap-new.$$"
     local binary_hash
@@ -342,7 +468,7 @@ start_and_verify() {
     local counter
     local uid
 
-    if ! "${SYNO_PKG}" start "${PACKAGE_NAME}"; then
+    if ! run_synopkg_with_timeout start "${PACKAGE_NAME}"; then
         log_message ERROR "DSM rejected the package start"
         return 1
     fi
@@ -374,8 +500,15 @@ restore_backup() {
 
     ROLLBACK_ARMED=0
 
-    "${SYNO_PKG}" stop "${PACKAGE_NAME}" >/dev/null 2>&1 ||
-        true
+    if ! run_synopkg_with_timeout \
+        stop \
+        "${PACKAGE_NAME}" \
+        >/dev/null
+    then
+        log_message ERROR \
+            "cannot stop the package safely during rollback"
+        return 1
+    fi
 
     if [ -f "${BACKUP_DIR}/privilege" ]; then
         install_privilege "${BACKUP_DIR}/privilege" ||
@@ -404,6 +537,8 @@ restore_backup() {
         set_target_owner tailscale tailscale || return 1
     fi
 
+    set_target_bootstrap_mode || return 1
+
     return 0
 }
 
@@ -423,6 +558,7 @@ rollback_on_exit() {
 
 install_action() {
     require_root
+    require_secure_privileged_entrypoint
     validate_dsm
     validate_layout
     stop_package
@@ -436,6 +572,9 @@ install_action() {
 
     set_target_owner root root ||
         die "cannot secure the package target as root-owned"
+
+    set_target_bootstrap_mode ||
+        die "cannot set the target bootstrap mode to 0755"
 
     write_state ||
         die "cannot write bootstrap state"
@@ -455,6 +594,7 @@ install_action() {
 
 remove_action() {
     require_root
+    require_secure_privileged_entrypoint
     validate_dsm
     validate_layout
     stop_package
@@ -468,6 +608,9 @@ remove_action() {
 
     set_target_owner tailscale tailscale ||
         die "cannot restore package target ownership"
+
+    set_target_bootstrap_mode ||
+        die "cannot restore the target bootstrap mode to 0755"
 
     rm -f -- "${STATE_FILE}"
 
@@ -511,14 +654,14 @@ status_action() {
 usage() {
     cat <<EOF
 Usage:
-  $0 install
+  sudo ${OUTER_BOOTSTRAP} install
   $0 status
-  $0 remove
+  sudo ${OUTER_BOOTSTRAP} remove
 
 Commands:
-  install  Enable and validate the root runtime
+  install  Enable and validate the root runtime using the root-owned script
   status   Show privilege, approval and runtime state
-  remove   Restore the safe package-user manifest and stop Tailscale
+  remove   Restore the safe package-user manifest using the root-owned script
 EOF
 }
 

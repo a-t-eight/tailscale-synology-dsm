@@ -10,12 +10,26 @@ mode. On supported DSM systems it:
 - uses the Linux netfilter backend for routing, forwarding and NAT;
 - preserves routing and netfilter preferences accepted by `tailscale up`;
 - supports subnet-routing behavior through the kernel router;
-- requires an administrator-installed root runtime before package startup;
+- enters an explicit bootstrap-pending staging state after installation, in
+  which DSM reports the package healthy only to retain package resources while
+  `tailscaled` remains stopped;
+- requires an administrator-installed root runtime before daemon startup;
 - verifies the root runtime and repairs required Tailscale netfilter hooks.
 
-Package startup fails closed when TUN, root-runtime or required netfilter
-prerequisites are unavailable. Agent workflows must not run bootstrap or alter
-those prerequisites on a NAS.
+Initial approval must run the root-owned outer package script:
+
+```text
+sudo /var/packages/Tailscale/scripts/tailscale-synology-bootstrap install
+```
+
+The `/usr/local/bin/tailscale-synology-bootstrap` linker target is
+package-owned before approval and must not be executed through `sudo` in that
+state. A successful bootstrap changes the package target to `root:root`; the
+linked command is then a trusted post-bootstrap convenience entry point.
+
+After approval, package startup fails closed when TUN, root-runtime or required
+netfilter prerequisites are unavailable. Agent workflows must not run
+bootstrap or alter those prerequisites on a NAS.
 
 ## r2 and later package contract
 

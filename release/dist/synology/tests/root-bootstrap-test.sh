@@ -130,6 +130,10 @@ setup_fixture() {
     "${BOOTSTRAP_SOURCE}" \
     "${PACKAGE_ROOT}/scripts/tailscale-synology-bootstrap"
 
+  cp -- \
+    "${BOOTSTRAP_SOURCE}" \
+    "${TARGET_REAL}/bin/tailscale-synology-bootstrap"
+
   cat >"${TARGET_REAL}/bin/tailscaled" <<'TAILSCALED'
 #!/bin/sh
 exit 0
@@ -144,7 +148,8 @@ TAILSCALED
     "${PACKAGE_ROOT}/scripts/tailscale-synology-bootstrap"
 
   chmod 0755 \
-    "${TARGET_REAL}/bin/tailscaled"
+    "${TARGET_REAL}/bin/tailscaled" \
+    "${TARGET_REAL}/bin/tailscale-synology-bootstrap"
 
   : >"${CHOWN_LOG}"
 
@@ -157,6 +162,14 @@ action="${1:-}"
 
 case "${action}" in
 stop)
+    if [ "${MOCK_STOP_FAIL:-0}" = "1" ]; then
+        exit 1
+    fi
+
+    if [ "${MOCK_STOP_HANG:-0}" = "1" ]; then
+        exec sleep 10
+    fi
+
     rm -f -- \
         "${MOCK_PACKAGE_ROOT}/var/tailscaled.pid"
 
@@ -170,8 +183,16 @@ start)
         exit 1
     fi
 
+    if [ "${MOCK_START_HANG:-0}" = "1" ]; then
+        exec sleep 10
+    fi
+
     mkdir -p \
         "${MOCK_PROC_ROOT}/${MOCK_PID}"
+
+    ln -sfn \
+        "${MOCK_TAILSCALED}" \
+        "${MOCK_PROC_ROOT}/${MOCK_PID}/exe"
 
     printf '%s\n' \
         "${MOCK_PID}" \
@@ -206,14 +227,22 @@ SYNOPKG
 
   MOCK_ID_UID=0
   MOCK_STAT_UID=0
+  MOCK_TARGET_BOOTSTRAP_UID=0
   MOCK_DAEMON_UID=0
   MOCK_START_FAIL=0
+  MOCK_START_HANG=0
+  MOCK_STOP_FAIL=0
+  MOCK_STOP_HANG=0
   MOCK_PID=4242
 
   export MOCK_PACKAGE_ROOT="${PACKAGE_ROOT}"
   export MOCK_PROC_ROOT="${FAKE_PROC_ROOT}"
+  export MOCK_TAILSCALED="${TARGET_REAL}/bin/tailscaled"
   export MOCK_DAEMON_UID
   export MOCK_START_FAIL
+  export MOCK_START_HANG
+  export MOCK_STOP_FAIL
+  export MOCK_STOP_HANG
   export MOCK_PID
   export TAILSCALE_SYNOLOGY_PACKAGE_ROOT="${PACKAGE_ROOT}"
   export TAILSCALE_SYNOLOGY_SYNOPKG="${MOCK_SYNOPKG}"
@@ -222,6 +251,8 @@ SYNOPKG
 }
 
 install_command_mocks() {
+  # Invoked by the sourced bootstrap implementation.
+  # shellcheck disable=SC2329
   id() {
     if [ "${1:-}" = "-u" ]; then
       printf '%s\n' "${MOCK_ID_UID}"
@@ -234,6 +265,13 @@ install_command_mocks() {
   stat() {
     if [ "${1:-}" = "-c" ] &&
       [ "${2:-}" = "%u" ]; then
+      if [ "${3:-}" = "--" ] &&
+        { [ "${4:-}" = "${TARGET_REAL}/bin/tailscale-synology-bootstrap" ] ||
+          [ "${4:-}" = "${PACKAGE_ROOT}/target/bin/tailscale-synology-bootstrap" ]; }; then
+        printf '%s\n' "${MOCK_TARGET_BOOTSTRAP_UID}"
+        return 0
+      fi
+
       printf '%s\n' "${MOCK_STAT_UID}"
       return 0
     fi
@@ -241,6 +279,8 @@ install_command_mocks() {
     command stat "$@"
   }
 
+  # Invoked by the sourced bootstrap implementation.
+  # shellcheck disable=SC2329
   chown() {
     printf '%s\n' "$*" >>"${CHOWN_LOG}"
     return 0
@@ -248,9 +288,17 @@ install_command_mocks() {
 }
 
 load_bootstrap() {
-  # shellcheck disable=SC1090
+  # shellcheck disable=SC1090,SC1091
   source \
     "${PACKAGE_ROOT}/scripts/tailscale-synology-bootstrap"
+
+  install_command_mocks
+}
+
+load_target_bootstrap() {
+  # shellcheck disable=SC1090,SC1091
+  source \
+    "${TARGET_REAL}/bin/tailscale-synology-bootstrap"
 
   install_command_mocks
 }
@@ -320,7 +368,7 @@ test_process_override_guard() {
   export TAILSCALE_SYNOLOGY_TEST_MODE=0
   export TAILSCALE_SYNOLOGY_PROC_ROOT="${FAKE_PROC_ROOT}"
 
-  # shellcheck disable=SC1090
+  # shellcheck disable=SC1090,SC1091
   source \
     "${PACKAGE_ROOT}/scripts/tailscale-synology-bootstrap"
 
@@ -412,6 +460,32 @@ test_successful_root_install() {
   assert_contains "${CAPTURED_OUTPUT}" "Privilege mode: root"
   assert_contains "${CAPTURED_OUTPUT}" "Bootstrap state: current"
   assert_contains "${CAPTURED_OUTPUT}" "Runtime: running, UID=0"
+}
+
+test_package_owned_target_cannot_install_root_runtime() {
+  setup_fixture
+
+  MOCK_TARGET_BOOTSTRAP_UID=1024
+  load_target_bootstrap
+
+  if [ "$(readlink -f -- "${BOOTSTRAP_SOURCE_PATH}")" != \
+    "$(readlink -f -- "${TARGET_REAL}/bin/tailscale-synology-bootstrap")" ]; then
+    fail "target fixture recorded an unexpected bootstrap source: ${BOOTSTRAP_SOURCE_PATH}"
+  fi
+
+  capture_main install
+
+  assert_nonzero_status "${CAPTURED_STATUS}"
+  assert_contains \
+    "${CAPTURED_OUTPUT}" \
+    "initial root bootstrap must use the root-owned package script"
+
+  assert_files_equal \
+    "${PACKAGE_ROOT}/conf/privilege" \
+    "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
+
+  assert_file_absent \
+    "${PACKAGE_ROOT}/var/root-bootstrap.state"
 }
 
 test_state_hashes() {
@@ -543,6 +617,36 @@ test_non_root_daemon_rolls_back() {
     "${PACKAGE_ROOT}/var/tailscaled.pid"
 }
 
+test_malformed_daemon_pid_is_rejected() {
+  setup_fixture
+  load_bootstrap
+
+  mkdir -p "${FAKE_PROC_ROOT}/4242"
+  printf 'pid=4242\n' >"${PACKAGE_ROOT}/var/tailscaled.pid"
+
+  if daemon_running; then
+    fail "bootstrap accepted a malformed daemon PID"
+  fi
+}
+
+test_unrelated_daemon_pid_is_rejected() {
+  setup_fixture
+  load_bootstrap
+
+  mkdir -p "${FAKE_PROC_ROOT}/4242"
+  cat >"${CASE_ROOT}/unrelated" <<'UNRELATED'
+#!/bin/sh
+exit 0
+UNRELATED
+  chmod 0755 "${CASE_ROOT}/unrelated"
+  ln -s "${CASE_ROOT}/unrelated" "${FAKE_PROC_ROOT}/4242/exe"
+  printf '4242\n' >"${PACKAGE_ROOT}/var/tailscaled.pid"
+
+  if daemon_running; then
+    fail "bootstrap accepted an unrelated process as tailscaled"
+  fi
+}
+
 test_failed_start_rolls_back() {
   setup_fixture
   load_bootstrap
@@ -553,6 +657,67 @@ test_failed_start_rolls_back() {
   capture_main install
 
   assert_nonzero_status "${CAPTURED_STATUS}"
+
+  assert_files_equal \
+    "${PACKAGE_ROOT}/conf/privilege" \
+    "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
+
+  assert_file_absent \
+    "${PACKAGE_ROOT}/var/root-bootstrap.state"
+}
+
+test_hung_package_start_times_out_and_rolls_back() {
+  local started_at
+  local elapsed
+
+  setup_fixture
+  export TAILSCALE_SYNOLOGY_SYNOPKG_TIMEOUT_SECONDS=1
+  load_bootstrap
+
+  MOCK_START_HANG=1
+  export MOCK_START_HANG
+
+  started_at="$(date +%s)"
+  capture_main install
+  elapsed=$(( $(date +%s) - started_at ))
+
+  assert_nonzero_status "${CAPTURED_STATUS}"
+
+  if [ "${elapsed}" -gt 5 ]; then
+    fail "hung package start exceeded the lifecycle deadline (${elapsed}s)"
+  fi
+
+  assert_files_equal \
+    "${PACKAGE_ROOT}/conf/privilege" \
+    "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
+
+  assert_file_absent \
+    "${PACKAGE_ROOT}/var/root-bootstrap.state"
+}
+
+test_hung_package_stop_aborts_before_mutation() {
+  local started_at
+  local elapsed
+
+  setup_fixture
+  export TAILSCALE_SYNOLOGY_SYNOPKG_TIMEOUT_SECONDS=1
+  load_bootstrap
+
+  MOCK_STOP_HANG=1
+  export MOCK_STOP_HANG
+
+  started_at="$(date +%s)"
+  capture_main install
+  elapsed=$(( $(date +%s) - started_at ))
+
+  assert_nonzero_status "${CAPTURED_STATUS}"
+  assert_contains \
+    "${CAPTURED_OUTPUT}" \
+    "DSM rejected or timed out the package stop"
+
+  if [ "${elapsed}" -gt 5 ]; then
+    fail "hung package stop exceeded the lifecycle deadline (${elapsed}s)"
+  fi
 
   assert_files_equal \
     "${PACKAGE_ROOT}/conf/privilege" \
@@ -587,6 +752,16 @@ test_remove_restores_safe_state() {
     "-R tailscale:tailscale" \
     "${CHOWN_LOG}" >/dev/null ||
     fail "remove did not request restoration to tailscale ownership"
+
+  if grep -F -- \
+    "root:root ${PACKAGE_ROOT}/target/bin/tailscale-synology-bootstrap" \
+    "${CHOWN_LOG}" >/dev/null; then
+    fail "remove unexpectedly preserved privileged target-bootstrap ownership"
+  fi
+
+  if [ "$(stat -c %a "${TARGET_REAL}/bin/tailscale-synology-bootstrap")" != "755" ]; then
+    fail "target bootstrap mode was not restored to 0755"
+  fi
 
 }
 
@@ -633,6 +808,10 @@ run_case \
   test_successful_root_install
 
 run_case \
+  "package-owned target cannot install root runtime" \
+  test_package_owned_target_cannot_install_root_runtime
+
+run_case \
   "state hashes match installed artifacts" \
   test_state_hashes
 
@@ -657,8 +836,24 @@ run_case \
   test_non_root_daemon_rolls_back
 
 run_case \
+  "malformed daemon PID is rejected" \
+  test_malformed_daemon_pid_is_rejected
+
+run_case \
+  "unrelated daemon PID is rejected" \
+  test_unrelated_daemon_pid_is_rejected
+
+run_case \
   "failed package start causes rollback" \
   test_failed_start_rolls_back
+
+run_case \
+  "hung package start times out and rolls back" \
+  test_hung_package_start_times_out_and_rolls_back
+
+run_case \
+  "hung package stop aborts before mutation" \
+  test_hung_package_stop_aborts_before_mutation
 
 run_case \
   "remove restores safe package state" \

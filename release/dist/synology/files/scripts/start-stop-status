@@ -34,6 +34,12 @@ STATE_FILE="${PKGVAR}/tailscaled.state"
 SOCKET_FILE="${PKGVAR}/tailscaled.sock"
 PORT="41641"
 
+PROC_ROOT="/proc"
+
+if [ "${TAILSCALE_SYNOLOGY_TEST_MODE:-0}" = "1" ]; then
+    PROC_ROOT="${TAILSCALE_SYNOLOGY_PROC_ROOT:-/proc}"
+fi
+
 TAILSCALE_BIN="${SYNOPKG_PKGDEST}/bin/tailscale"
 
 NETFILTER_LOCALAPI_ATTEMPTS="${TAILSCALE_SYNOLOGY_LOCALAPI_ATTEMPTS:-30}"
@@ -60,34 +66,104 @@ if [ "${SYNOPKG_DSM_VERSION_MAJOR}" -eq "6" ]; then
     chown -R tailscale:tailscale "${PKGVAR}/"
 fi
 
+process_executable_matches() {
+    local pid="$1"
+    local executable="$2"
+    local expected_executable
+    local actual_executable
+
+    expected_executable="$(readlink -f -- "${executable}")" ||
+        return 1
+
+    actual_executable="$(
+        readlink -f -- "${PROC_ROOT}/${pid}/exe"
+    )" || return 1
+
+    [ "${actual_executable}" = "${expected_executable}" ]
+}
+
+process_cmdline_has_arg() {
+    local pid="$1"
+    local expected_arg="$2"
+    local arg
+
+    [ -r "${PROC_ROOT}/${pid}/cmdline" ] || return 1
+
+    while IFS= read -r arg; do
+        if [ "${arg}" = "${expected_arg}" ]; then
+            return 0
+        fi
+    done < <(tr '\000' '\n' <"${PROC_ROOT}/${pid}/cmdline")
+
+    return 1
+}
+
+daemon_pid() {
+    local pid
+
+    [ -r "${PID_FILE}" ] || return 1
+
+    pid="$(cat -- "${PID_FILE}" 2>/dev/null)" || return 1
+
+    case "${pid}" in
+    ''|*[!0-9]*)
+        return 1
+        ;;
+    esac
+
+    [ -d "${PROC_ROOT}/${pid}" ] || return 1
+
+    process_executable_matches \
+        "${pid}" \
+        "${SYNOPKG_PKGDEST}/bin/tailscaled" ||
+        return 1
+
+    printf '%s\n' "${pid}"
+}
+
 start_daemon() {
-    local ts=$(date --iso-8601=second)
-    echo "${ts} Starting ${SERVICE_NAME} with: ${SERVICE_COMMAND}" >${LOG_FILE}
-    STATE_DIRECTORY=${PKGVAR} ${SERVICE_COMMAND} 2>&1 | sed -u '1,200p;201s,.*,[further tailscaled logs suppressed],p;d' >>${LOG_FILE} &
+    local ts
+
+    ts="$(date --iso-8601=second)"
+    echo "${ts} Starting ${SERVICE_NAME} with: ${SERVICE_COMMAND}" >"${LOG_FILE}"
+    STATE_DIRECTORY=${PKGVAR} ${SERVICE_COMMAND} 2>&1 | sed -u '1,200p;201s,.*,[further tailscaled logs suppressed],p;d' >>"${LOG_FILE}" &
     # We pipe tailscaled's output to sed, so "$!" retrieves the PID of sed not tailscaled.
     # Use jobs -p to retrieve the PID of the most recent process group leader.
     jobs -p >"${PID_FILE}"
 }
 
 stop_daemon() {
-    if [ -r "${PID_FILE}" ]; then
-        local PID=$(cat "${PID_FILE}")
-        local ts=$(date --iso-8601=second)
-        echo "${ts} Stopping ${SERVICE_NAME} service PID=${PID}" >>${LOG_FILE}
-        kill -TERM $PID >>${LOG_FILE} 2>&1
-        wait_for_status 1 || kill -KILL $PID >>${LOG_FILE} 2>&1
-        rm -f "${PID_FILE}" >/dev/null
+    local pid
+    local current_pid
+    local ts
+
+    pid="$(daemon_pid)" || {
+        rm -f -- "${PID_FILE}" >/dev/null
+        return 0
+    }
+
+    ts=$(date --iso-8601=second)
+    echo "${ts} Stopping ${SERVICE_NAME} service PID=${pid}" >>"${LOG_FILE}"
+    kill -TERM -- "${pid}" >>"${LOG_FILE}" 2>&1 || true
+
+    if ! wait_for_status 1; then
+        current_pid="$(daemon_pid)" || current_pid=""
+
+        if [ "${current_pid}" = "${pid}" ]; then
+            kill -KILL -- "${pid}" >>"${LOG_FILE}" 2>&1 || true
+        fi
     fi
+
+    rm -f -- "${PID_FILE}" >/dev/null
 }
 
 daemon_status() {
-    if [ -r "${PID_FILE}" ]; then
-        local PID=$(cat "${PID_FILE}")
-        if ps -o pid -p ${PID} > /dev/null; then
-            return
-        fi
-        rm -f "${PID_FILE}" >/dev/null
+    if daemon_pid >/dev/null 2>&1; then
+        return 0
     fi
+
+    rm -f -- "${PID_FILE}" >/dev/null
+
     return 1
 }
 
@@ -97,7 +173,7 @@ wait_for_status() {
     local counter=20
     while [ ${counter} -gt 0 ]; do
         daemon_status
-        [ $? -eq $1 ] && return
+        [ $? -eq "$1" ] && return
         counter=$((counter - 1))
         sleep 1
     done
@@ -396,27 +472,50 @@ check_iptables_rule_support() {
 
 cleanup_tailscale_nat_preflight() {
     local chain="$1"
+    local after_count
+    local before_count
     local failed=0
+    local parent
+    local parents
+    local updated_parents
 
-    while "${IPTABLES_BIN}" \
-        -t nat \
-        -D POSTROUTING \
-        -j "${chain}" \
-        >/dev/null 2>&1
-    do
-        :
-    done
+    parents="$(tailscale_nat_hook_parents "${chain}")" ||
+        failed=1
 
-    # DSM exposes its effective built-in NAT chain as
-    # DEFAULT_POSTROUTING in full table listings. This fallback is
-    # harmless when the normal POSTROUTING deletion already succeeded.
-    while "${IPTABLES_BIN}" \
-        -t nat \
-        -D DEFAULT_POSTROUTING \
-        -j "${chain}" \
-        >/dev/null 2>&1
-    do
-        :
+    while [ "${failed}" -eq 0 ] && [ -n "${parents}" ]; do
+        before_count="$(
+            printf '%s\n' "${parents}" |
+                awk 'NF { count++ } END { print count + 0 }'
+        )"
+        parent="$(printf '%s\n' "${parents}" | awk 'NF { print; exit }')"
+
+        if ! "${IPTABLES_BIN}" \
+            -t nat \
+            -D "${parent}" \
+            -j "${chain}" \
+            >/dev/null 2>&1
+        then
+            failed=1
+            break
+        fi
+
+        updated_parents="$(tailscale_nat_hook_parents "${chain}")" || {
+            failed=1
+            break
+        }
+        after_count="$(
+            printf '%s\n' "${updated_parents}" |
+                awk 'NF { count++ } END { print count + 0 }'
+        )"
+
+        if [ "${after_count}" -ge "${before_count}" ]; then
+            log_message ERROR \
+                "iptables reported successful deletion from nat/${parent}, but the ${chain} hook did not change"
+            failed=1
+            break
+        fi
+
+        parents="${updated_parents}"
     done
 
     "${IPTABLES_BIN}" \
@@ -435,10 +534,57 @@ cleanup_tailscale_nat_preflight() {
 }
 
 
-check_tailscale_nat_topology() {
-    local chain="ts-pf-nat-$$"
+tailscale_nat_hook_parents() {
+    local chain="$1"
     local output
     local status
+
+    output="$("${IPTABLES_BIN}" -t nat -S 2>&1)"
+    status=$?
+
+    if [ "${status}" -ne 0 ]; then
+        log_message ERROR \
+            "cannot inspect temporary NAT hooks for ${chain}: ${output}"
+        return 1
+    fi
+
+    printf '%s\n' "${output}" |
+        awk -v wanted="${chain}" '
+            $1 == "-A" &&
+            ($2 == "POSTROUTING" || $2 == "DEFAULT_POSTROUTING") {
+                for (field = 3; field < NF; field++) {
+                    if ($field == "-j" && $(field + 1) == wanted) {
+                        print $2
+                        break
+                    }
+                }
+            }
+        '
+}
+
+
+tailscale_nat_preflight_test_checkpoint() {
+    :
+}
+
+
+check_tailscale_nat_topology() (
+    local chain="ts-pf-nat-$$"
+    local cleanup_armed=0
+    local output
+    local status
+
+    # shellcheck disable=SC2329
+    cleanup_on_exit() {
+        if [ "${cleanup_armed}" -eq 1 ]; then
+            cleanup_tailscale_nat_preflight "${chain}" ||
+                true
+        fi
+    }
+
+    trap cleanup_on_exit EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
 
     output="$(
         "${IPTABLES_BIN}" \
@@ -454,6 +600,8 @@ check_tailscale_nat_topology() {
         return 1
     fi
 
+    cleanup_armed=1
+
     output="$(
         "${IPTABLES_BIN}" \
             -t nat \
@@ -465,9 +613,6 @@ check_tailscale_nat_topology() {
     status=$?
 
     if [ "${status}" -ne 0 ]; then
-        cleanup_tailscale_nat_preflight "${chain}" ||
-            true
-
         log_message ERROR \
             "cannot hook a temporary chain from nat/POSTROUTING: ${output}"
         return 1
@@ -483,12 +628,13 @@ check_tailscale_nat_topology() {
     status=$?
 
     if [ "${status}" -ne 0 ]; then
-        cleanup_tailscale_nat_preflight "${chain}" ||
-            true
-
         log_message ERROR \
             "cannot verify the temporary nat/POSTROUTING hook: ${output}"
         return 1
+    fi
+
+    if [ "${TAILSCALE_SYNOLOGY_TEST_MODE:-0}" = "1" ]; then
+        tailscale_nat_preflight_test_checkpoint
     fi
 
     output="$(
@@ -503,9 +649,6 @@ check_tailscale_nat_topology() {
     status=$?
 
     if [ "${status}" -ne 0 ]; then
-        cleanup_tailscale_nat_preflight "${chain}" ||
-            true
-
         log_message ERROR \
             "cannot add a marked MASQUERADE rule: ${output}"
         return 1
@@ -523,22 +666,25 @@ check_tailscale_nat_topology() {
     status=$?
 
     if [ "${status}" -ne 0 ]; then
-        cleanup_tailscale_nat_preflight "${chain}" ||
-            true
-
         log_message ERROR \
             "cannot verify the marked MASQUERADE rule: ${output}"
         return 1
     fi
 
-    if ! cleanup_tailscale_nat_preflight "${chain}"; then
+    cleanup_tailscale_nat_preflight "${chain}"
+    status=$?
+    cleanup_armed=0
+
+    if [ "${status}" -ne 0 ]; then
         log_message ERROR \
             "cannot remove the temporary NAT preflight topology"
         return 1
     fi
 
+    trap - EXIT INT TERM
+
     return 0
-}
+)
 
 check_netfilter_prerequisites() {
     if [ "${SYNOPKG_DSM_VERSION_MAJOR}" -ne "7" ]; then
@@ -849,7 +995,7 @@ wait_for_localapi() {
 }
 
 
-reconciler_status() {
+reconciler_pid() {
     local pid=""
 
     if [ ! -r "${RECONCILER_PID_FILE}" ]; then
@@ -861,12 +1007,22 @@ reconciler_status() {
 
     case "${pid}" in
     ''|*[!0-9]*)
-        rm -f -- "${RECONCILER_PID_FILE}"
         return 1
         ;;
     esac
 
-    if kill -0 "${pid}" >/dev/null 2>&1; then
+    kill -0 -- "${pid}" >/dev/null 2>&1 ||
+        return 1
+
+    process_cmdline_has_arg "${pid}" "${RECONCILER_SCRIPT}" ||
+        return 1
+
+    printf '%s\n' "${pid}"
+}
+
+
+reconciler_status() {
+    if reconciler_pid >/dev/null 2>&1; then
         return 0
     fi
 
@@ -879,6 +1035,8 @@ reconciler_status() {
 start_reconciler() {
     local pid
     local counter="${RECONCILER_START_ATTEMPTS}"
+    local stable_checks=0
+    local termination_wait=2
 
     if reconciler_status; then
         return 0
@@ -925,17 +1083,50 @@ start_reconciler() {
 
     while [ "${counter}" -gt 0 ]; do
         if reconciler_status; then
-            log_message INFO \
-                "started netfilter reconciler PID=${pid}"
-            return 0
+            stable_checks=$((stable_checks + 1))
+
+            if [ "${stable_checks}" -ge 2 ]; then
+                log_message INFO \
+                    "started stable netfilter reconciler PID=${pid}"
+                return 0
+            fi
+        else
+            stable_checks=0
         fi
 
         counter=$((counter - 1))
-        sleep 1
+
+        if [ "${counter}" -gt 0 ]; then
+            sleep 1
+        fi
     done
 
     log_message ERROR \
         "netfilter reconciler did not remain running"
+
+    if kill -0 -- "${pid}" >/dev/null 2>&1 &&
+        process_cmdline_has_arg "${pid}" "${RECONCILER_SCRIPT}"
+    then
+        kill -TERM -- "${pid}" >/dev/null 2>&1 ||
+            true
+
+        while [ "${termination_wait}" -gt 0 ] &&
+            kill -0 -- "${pid}" >/dev/null 2>&1
+        do
+            termination_wait=$((termination_wait - 1))
+            sleep 1
+        done
+
+        if kill -0 -- "${pid}" >/dev/null 2>&1 &&
+            process_cmdline_has_arg "${pid}" "${RECONCILER_SCRIPT}"
+        then
+            kill -KILL -- "${pid}" >/dev/null 2>&1 ||
+                true
+        fi
+    fi
+
+    wait "${pid}" >/dev/null 2>&1 ||
+        true
 
     rm -f -- "${RECONCILER_PID_FILE}"
 
@@ -945,24 +1136,24 @@ start_reconciler() {
 
 stop_reconciler() {
     local pid=""
+    local current_pid=""
     local counter=20
 
-    if ! reconciler_status; then
+    pid="$(reconciler_pid)" || {
         rm -f -- "${RECONCILER_PID_FILE}"
         return 0
-    fi
-
-    IFS= read -r pid <"${RECONCILER_PID_FILE}" ||
-        pid=""
+    }
 
     log_message INFO \
         "stopping netfilter reconciler PID=${pid}"
 
-    kill -TERM "${pid}" >/dev/null 2>&1 ||
+    kill -TERM -- "${pid}" >/dev/null 2>&1 ||
         true
 
     while [ "${counter}" -gt 0 ]; do
-        if ! kill -0 "${pid}" >/dev/null 2>&1; then
+        current_pid="$(reconciler_pid)" || current_pid=""
+
+        if [ "${current_pid}" != "${pid}" ]; then
             rm -f -- "${RECONCILER_PID_FILE}"
             return 0
         fi
@@ -974,12 +1165,40 @@ stop_reconciler() {
     log_message WARNING \
         "netfilter reconciler did not stop after SIGTERM; sending SIGKILL"
 
-    kill -KILL "${pid}" >/dev/null 2>&1 ||
-        true
+    current_pid="$(reconciler_pid)" || current_pid=""
+
+    if [ "${current_pid}" = "${pid}" ]; then
+        kill -KILL -- "${pid}" >/dev/null 2>&1 ||
+            true
+    fi
 
     rm -f -- "${RECONCILER_PID_FILE}"
 
     return 0
+}
+
+
+service_status() {
+    if daemon_status; then
+        echo "${SERVICE_NAME} is running"
+
+        if reconciler_status; then
+            echo "netfilter reconciler is running"
+            return 0
+        fi
+
+        echo "netfilter reconciler is not running"
+        return 1
+    fi
+
+    if ! bootstrap_is_current; then
+        echo "${SERVICE_NAME} requires administrator bootstrap"
+        echo "Run: ${BOOTSTRAP_COMMAND}"
+        return 0
+    fi
+
+    echo "${SERVICE_NAME} is not running"
+    return 3
 }
 
 
@@ -1049,25 +1268,8 @@ stop)
     exit "${STOP_STATUS}"
     ;;
 status)
-    if daemon_status; then
-        echo "${SERVICE_NAME} is running"
-
-        if reconciler_status; then
-            echo "netfilter reconciler is running"
-        else
-            echo "netfilter reconciler is not running"
-        fi
-
-        exit 0
-    else
-        if ! bootstrap_is_current; then
-            echo "${SERVICE_NAME} requires administrator bootstrap"
-            echo "Run: ${BOOTSTRAP_COMMAND}"
-        fi
-
-        echo "${SERVICE_NAME} is not running"
-        exit 3
-    fi
+    service_status
+    exit $?
     ;;
 log)
     exit 0
