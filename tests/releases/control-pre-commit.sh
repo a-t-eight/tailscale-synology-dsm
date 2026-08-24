@@ -48,11 +48,15 @@ hooks_after="$(
 
 TEMP_ROOT="$(mktemp -d /tmp/tailscale-control-hook-test.XXXXXX)"
 FIXTURE_ROOT="${TEMP_ROOT}/control"
+DIFFERENT_ROOT="${TEMP_ROOT}/different-control"
 HOOK_RECORD="${TEMP_ROOT}/hook-record"
 
 git init -b main "$FIXTURE_ROOT" > /dev/null 2>&1 ||
   fail "could not create control-role fixture"
+git init -b main "$DIFFERENT_ROOT" > /dev/null 2>&1 ||
+  fail "could not create differing-root fixture"
 mkdir -p "$FIXTURE_ROOT/.githooks" "$FIXTURE_ROOT/scripts"
+mkdir -p "$DIFFERENT_ROOT/scripts"
 cp "$REPO_ROOT/.githooks/pre-commit" "$FIXTURE_ROOT/.githooks/pre-commit"
 cp "$REPO_ROOT/.githooks/commit-msg" "$FIXTURE_ROOT/.githooks/commit-msg"
 cp "$REPO_ROOT/scripts/setup-worktree.sh" "$FIXTURE_ROOT/scripts/setup-worktree.sh"
@@ -65,6 +69,25 @@ chmod 0755 \
   "$FIXTURE_ROOT/.githooks/commit-msg" \
   "$FIXTURE_ROOT/scripts/setup-worktree.sh" \
   "$FIXTURE_ROOT/scripts/validate-repository.sh"
+
+cp \
+  "$FIXTURE_ROOT/scripts/validate-repository.sh" \
+  "$DIFFERENT_ROOT/scripts/validate-repository.sh"
+if bash "$FIXTURE_ROOT/scripts/setup-worktree.sh" \
+  --worktree "$DIFFERENT_ROOT" \
+  --control-worktree "$FIXTURE_ROOT" \
+  --role control \
+  --dry-run \
+  > "$SOURCE_LOG" 2>&1; then
+  fail "control role accepted different validation and configured roots"
+fi
+grep -Fxq \
+  "FAIL: control role requires worktree and control worktree to resolve to the same root" \
+  "$SOURCE_LOG" || fail "differing-root rejection omitted the exact diagnostic"
+if git -C "$DIFFERENT_ROOT" config --worktree --get core.hooksPath \
+  > /dev/null 2>&1; then
+  fail "differing-root rejection configured an unchecked hooks path"
+fi
 
 bash "$FIXTURE_ROOT/scripts/setup-worktree.sh" \
   --worktree "$FIXTURE_ROOT" \
