@@ -3,7 +3,9 @@
 ## Purpose
 
 This runbook closes a validated downstream Tailscale release after source,
-package, reproducibility and Synology DSM hardware acceptance are complete.
+package, reproducibility and Synology DSM hardware acceptance are complete. An
+acceptance closeout may precede the public GitHub release; publication is a
+later, separately approved action.
 
 It creates a permanent, reviewable record without changing the already accepted
 release source. The closeout change belongs on the control branch and must be
@@ -41,6 +43,10 @@ Do not use this runbook to:
 
 Installation, root bootstrap, firewall mutation and reboot testing remain
 human-controlled operations.
+
+Stable publication is not performed by this runbook. After a release is
+published, add a separate `PUBLICATION.md` beside the frozen acceptance record
+rather than rewriting the evidence and decision as they stood at closeout.
 
 ## Shell-safety rule
 
@@ -376,6 +382,28 @@ In order:
 
 Do not use a force removal for a worktree containing uncommitted changes.
 
+## Phase 9 — record later publication
+
+After explicit human approval creates the signed tag and public release, add:
+
+```text
+docs/releases/<package-release>/PUBLICATION.md
+```
+
+The publication record must include:
+
+- public release URL and publication timestamp;
+- release branch, commit, tree, signed tag, and tag object;
+- exact filenames, sizes, and checksums of every published asset;
+- post-publication reachability and checksum verification;
+- signing, immutability, or provenance controls that were and were not enabled;
+- an explicit statement that no accepted source, package, tag, or asset was
+  changed by recording publication.
+
+Create and integrate this record as a new signed, signed-off documentation-only
+commit. Do not amend the acceptance closeout commit or alter its historical
+statement that publication remained pending at acceptance time.
+
 ## Failure handling
 
 ### Base branch moved
@@ -429,6 +457,7 @@ At completion:
 - the release source commit and tree are unchanged;
 - accepted package bytes and checksums are unchanged;
 - release evidence remains available;
+- a separate publication record exists when a public release has occurred;
 - temporary local and remote documentation branches are absent;
 - the temporary worktree is absent;
 - the canonical release branch is retained according to repository policy;

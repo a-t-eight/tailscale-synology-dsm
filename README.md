@@ -1,100 +1,136 @@
 # Tailscale Synology DSM downstream
 
-Unofficial downstream patch, build and validation project for running Tailscale
-with kernel TUN, subnet routing and Linux netfilter support on supported
-Synology DSM systems.
+Unofficial downstream patch, build, and validation project for running
+Tailscale with kernel TUN, subnet routing, exit-node, and Linux netfilter
+support on compatible Synology DSM systems.
 
-This project is not affiliated with or supported by Tailscale Inc. or
-Synology Inc.
+This project is independently maintained and is not affiliated with or
+supported by Tailscale, Inc. or Synology Inc.
 
-## Branch model
+## Start here
 
-- `synology/main` contains downstream control assets, documentation, generated
-  patch series, tests, hooks and build orchestration.
-- `main` is an unmodified fast-forward mirror of `tailscale/tailscale`.
-- `release/<upstream>-synology` contains a pinned upstream release plus the
-  signed downstream commit stack.
-- `work/<upstream>-synology` is temporary adaptation state.
+| Audience | Entry point |
+| --- | --- |
+| Install the current package | [Published releases](https://github.com/a-t-eight/tailscale-synology-dsm/releases) and the release-specific installation notes |
+| Understand the repository | [Repository guide](docs/repository-guide.md) |
+| Understand the package and root bootstrap | [Package runtime guide](docs/package-runtime.md) |
+| Prepare a future Tailscale version | [Version-update runbook](docs/runbooks/tailscale-synology-version-update.md) |
+| Build or validate a release | [Governance tooling](docs/governance/tooling.md) |
+| Organise a local multi-worktree checkout | [Development workspace guide](docs/development-workspace.md) |
 
-## Canonical release metadata
+Package users normally do not need to clone this repository. Download the SPK
+and `SHA256SUMS` from the applicable GitHub release and follow that release's
+installation and administrator-bootstrap instructions.
 
-`release/manifest.yaml` is the machine-readable source of release identity,
-branch names, package identity, build entrypoints and evidence paths.
-
-Operational scripts must derive release values from that manifest. The
-accepted baseline explicitly records its aggregate `release-tree.patch`,
-contained `maintenance.patch` reference subset, legacy raw-diff format and exact
-historical commits that predate the sign-off rule. The reference subset is
-validated independently but is not applied as a second patch. These exceptions
-do not transfer to a future release.
-
-Closed release documents and retained evidence remain immutable historical
-records.
-
-## Current production baseline
+## Current production release
 
 | Property | Value |
 | --- | --- |
-| Upstream tag | `v1.98.9` |
-| Upstream commit | `6c167d40fa37aeb51afa7ff336730670ea4762bf` |
-| Downstream release commit | `20c86229955a3d03de01901aee1499cab87c571d` |
-| Release source tree | `6d022c18f27a42aab553697c69c852bebd8594b8` |
-| Release branch | `release/v1.98.9-synology` |
-| Signed release tag | `release/synology-v1.98.96-r1` |
-| Accepted package | `tailscale-x86_64-1.98.96-700098096-dsm7.spk` |
-| Accepted package SHA-256 | `bed218b4d0099102e9c3be18456d8a94be9a92b4a29295a9dab33932570cbce0` |
-| Tested platform | Synology DS920+ / geminilake |
-| Minimum DSM | `7.3-81180` |
-| Netfilter dependency | `tailscale-netfilter-modules >= 1.0.0-11` |
+| Upstream source tag | `v1.98.9` |
+| Upstream source commit | `6c167d40fa37aeb51afa7ff336730670ea4762bf` |
+| Downstream revision | `r2` |
+| Downstream release commit | `0fad8b81a3e0eb86c457bc79c474bcc213834c43` |
+| Release source tree | `33f5c5927ae4db54b9d582650ed31cc6a2eb7161` |
+| Release branch | `release/v1.98.9-r2-synology` |
+| Signed release tag | `release/synology-v1.98.96-r2` |
+| Published release | [Tailscale for Synology DSM 1.98.96-r2](https://github.com/a-t-eight/tailscale-synology-dsm/releases/tag/release/synology-v1.98.96-r2) |
+| Accepted package | `tailscale-x86_64-1.98.96-700098097-dsm7.spk` |
+| Accepted package SHA-256 | `f947a1747521c50edf49baf597cc18b512b3bb009c3b7afe963fa326ef2d6c16` |
+| Tested platform | Synology DS920+ / `geminilake` / `x86_64` |
+| Tested DSM | DSM 7.4.1 |
+| Package DSM minimum | `7.3-86009` |
+| Hard package dependency | `iptables-netfilter-extensions >= 1.1.0-2` |
 
-## Canonical commands
+Revision r1 remains in the repository as superseded release history. The
+machine-readable current identity is [release/manifest.yaml](release/manifest.yaml),
+and validated platform status is recorded in
+[support-matrix.yaml](support-matrix.yaml).
 
-Audit the accepted release inputs:
+## What this project changes
+
+The downstream source stack:
+
+- enables kernel TUN operation on DSM;
+- enables Tailscale's Linux routing and netfilter paths;
+- adds an attended administrator bootstrap for the required root runtime;
+- requires the separate netfilter-extension package;
+- reconstructs and supervises required DSM networking state;
+- adds deterministic package construction, inspection, and release evidence.
+
+The package declares a hard dependency on
+`iptables-netfilter-extensions >= 1.1.0-2`. That dependency is a separate
+Synology SPK built with the
+[SynoCommunity `spksrc` toolchain](https://github.com/SynoCommunity/spksrc).
+It supplies iptables and netfilter kernel modules that stock DSM does not make
+available to the package and that are required for Tailscale's full Linux
+networking feature set.
+
+## Repository model
+
+This is one GitHub repository containing multiple branch roots with distinct
+roles. The default branch is intentionally not the Tailscale source branch.
+
+| Ref | Purpose | Change policy |
+| --- | --- | --- |
+| `main` | Exact fast-forward mirror of upstream Tailscale | Never add downstream files or commits |
+| `synology/main` | Default downstream control branch: manifests, patches, tests, evidence indexes, tooling, and documentation | Documentation and control changes through reviewed signed commits |
+| `release/<upstream>-synology` | Pinned upstream source plus an accepted signed downstream source stack | Frozen after release acceptance |
+| `work/*` | Temporary source adaptation or release preparation | Disposable only after integration and evidence checks |
+| `codex/*`, `docs/*`, `operations/*` | Temporary control-branch changes | Merge into `synology/main`, then remove after verification |
+| `release/synology-*` tags | Signed release identities, treated as immutable by project policy | Never move or reuse |
+
+The signed source commit stack is authoritative. Generated mail patches on
+`synology/main` reproduce that stack and are validated by an exact round trip.
+See the [repository guide](docs/repository-guide.md) for the complete mental
+model and worktree workflow.
+
+## Maintainer workflow
+
+1. Clone the repository with its default `synology/main` branch.
+2. Read `release/manifest.yaml`; do not infer the current release from a
+   directory name or floating upstream reference.
+3. Use a separate Git worktree for upstream-derived source branches.
+4. Configure every worktree with `scripts/setup-worktree.sh`.
+5. Run the repository-owned validation and build entrypoints.
+6. Keep package installation, root bootstrap, firewall changes, reboot tests,
+   and stable publication as explicit human-approved operations.
+
+Validate the current control tree against an explicit accepted source
+worktree:
 
 ```text
-bash scripts/release/audit-inputs.sh \
-  --source-repo /path/to/accepted-release-worktree
+bash scripts/validate-repository.sh \
+  --source-environment /path/to/accepted-release-worktree \
+  --bootstrap
 ```
 
-Validate source and canonical patches:
+Validate the accepted source and patch round trip:
 
 ```text
 bash scripts/release/validate-release.sh \
-  --source-worktree /path/to/release-worktree \
-  --role release \
+  --source-worktree /path/to/accepted-release-worktree \
+  --role accepted \
   --round-trip
 ```
 
-Review a candidate build without executing it:
+Do not build from the repository workspace root, from `synology/main`, or from
+an arbitrarily selected source checkout.
 
-```text
-bash scripts/release/build-candidate.sh \
-  --source-worktree /path/to/release-worktree \
-  --role release \
-  --dry-run
-```
+## Project layout
 
-The complete future-version procedure is:
-
-```text
-docs/runbooks/tailscale-synology-version-update.md
-```
+- `release/manifest.yaml` — canonical current release identity and paths
+- `support-matrix.yaml` — tested and unsupported platform records
+- `patches/` — generated release patch series and retained historical exports
+- `scripts/release/` — guarded release audit, preparation, build, and evidence entrypoints
+- `scripts/governance/` — protected integration controls
+- `tests/releases/` — source, package, reproducibility, and DSM acceptance evidence
+- `docs/releases/` — frozen release closeout records and separate publication records
+- `docs/runbooks/` — release and integration procedures
+- `build-environment/` — build-toolchain ownership and separation
 
 ## Safety boundary
 
-Automation may inspect, adapt, validate and build candidate artefacts.
-
-Installation, root bootstrap, firewall mutation, reboot testing and stable
-publication remain explicit human-controlled operations.
-
-## Repository layout
-
-- `release/manifest.yaml` — canonical release identity and paths
-- `patches/` — generated per-release patch series and manifests
-- `scripts/release/` — guarded release entrypoints
-- `scripts/setup-worktree.sh` — worktree-specific hooks and signing setup
-- `tests/releases/` — source, package, reproducibility and acceptance evidence
-- `docs/runbooks/` — operator procedures
-- `docs/releases/` — immutable closed-release records
-- `build-environment/` — build-environment ownership and pinning
-- `support-matrix.yaml` — validated DSM and architecture combinations
+Automation may inspect, adapt, validate, and build non-production candidates.
+It must not install packages on production DSM, run administrator bootstrap,
+change production firewall state, reboot DSM, approve its own changes, or
+publish a stable release without explicit maintainer approval.

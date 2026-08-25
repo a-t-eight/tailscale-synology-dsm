@@ -25,20 +25,23 @@ The worktree and `release/manifest.yaml` provide:
 
 Host `go`, npm and pip installations are not release dependencies.
 
-The accepted `v1.98.96-r1` worked baseline is identified by:
+The accepted `1.98.96-r2` production baseline is identified by:
 
 ```text
-commit: 20c86229955a3d03de01901aee1499cab87c571d
-tree:   6d022c18f27a42aab553697c69c852bebd8594b8
+commit: 0fad8b81a3e0eb86c457bc79c474bcc213834c43
+tree:   33f5c5927ae4db54b9d582650ed31cc6a2eb7161
 ```
 
-A future release must replace those manifest values with its own reviewed
-identity. It must not silently reuse the current release identity.
+The earlier r1 identity is retained in its release record and historical
+manifest. A future release must replace the current manifest values with its
+own reviewed identity; it must not silently reuse r2.
 
 ## DSM netfilter-module environment
 
-The netfilter-module package uses the corresponding `spksrc` cross-compilation
-environment and Synology kernel/toolchain inputs for the target DSM platform.
+The `iptables-netfilter-extensions` package uses the corresponding
+[SynoCommunity `spksrc` toolchain](https://github.com/SynoCommunity/spksrc)
+and Synology kernel/toolchain inputs for the target DSM platform. The Tailscale
+SPK declares it as a hard package dependency.
 
 Its outputs must be validated separately for:
 

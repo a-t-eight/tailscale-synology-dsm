@@ -178,7 +178,17 @@ bash scripts/release/collect-evidence.sh \
 
 Runtime evidence must be sanitised manually before it enters Git.
 
-## Phase 10 — publish and close out
+## Phase 10 — close out, publish, and record publication
+
+First complete the acceptance closeout on `synology/main` using:
+
+```text
+docs/runbooks/tailscale-synology-release-closeout.md
+```
+
+The closeout record freezes the accepted source, package, evidence, hardware
+validation, limitations, and future-change rule. It may be completed before a
+public GitHub release exists.
 
 Stable publication remains a separate explicit human action after:
 
@@ -187,13 +197,19 @@ Stable publication remains a separate explicit human action after:
 - reproducibility;
 - DSM hardware acceptance;
 - evidence review;
-- rollback review.
+- rollback review;
+- acceptance closeout review and integration.
 
-After publication, use:
+After publication, create a separate publication record at:
 
 ```text
-docs/runbooks/tailscale-synology-release-closeout.md
+docs/releases/<package-release>/PUBLICATION.md
 ```
+
+Record the signed tag and object, publication timestamp, exact public asset
+identities and checksums, reachability checks, and any publication-control
+limitations. Do not rewrite the frozen acceptance closeout to make it read as
+if publication had already occurred.
 
 Future functional changes require a new downstream revision or a newer pinned
 upstream release.
