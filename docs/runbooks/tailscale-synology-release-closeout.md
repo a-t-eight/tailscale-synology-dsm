@@ -48,6 +48,13 @@ Stable publication is not performed by this runbook. After a release is
 published, add a separate `PUBLICATION.md` beside the frozen acceptance record
 rather than rewriting the evidence and decision as they stood at closeout.
 
+For the next stable publication, sign the final `SHA256SUMS` bytes with the
+maintainer's SSH signing key in the `file` namespace and publish the detached
+signature as `SHA256SUMS.sig`. Verify it with the protected
+`.github/allowed_signers` file before publication is declared complete. This
+control is prospective and does not authorise changes to an already closed
+release.
+
 ## Shell-safety rule
 
 Long procedures must be saved as complete Bash scripts and launched from the
@@ -395,6 +402,8 @@ The publication record must include:
 - public release URL and publication timestamp;
 - release branch, commit, tree, signed tag, and tag object;
 - exact filenames, sizes, and checksums of every published asset;
+- the `SHA256SUMS.sig` filename and checksum, signing principal and key
+  fingerprint, and the detached-signature verification result;
 - post-publication reachability and checksum verification;
 - signing, immutability, or provenance controls that were and were not enabled;
 - an explicit statement that no accepted source, package, tag, or asset was
@@ -403,6 +412,32 @@ The publication record must include:
 Create and integrate this record as a new signed, signed-off documentation-only
 commit. Do not amend the acceptance closeout commit or alter its historical
 statement that publication remained pending at acceptance time.
+
+The detached checksum signature uses OpenSSH's `file` namespace. Create it from
+the final checksum file with the maintainer-controlled signing key:
+
+```text
+ssh-keygen -Y sign \
+  -f /path/to/maintainer-signing-key \
+  -n file \
+  SHA256SUMS
+```
+
+Verify the exact bytes before upload, substituting the principal declared in
+the protected allowed-signers file:
+
+```text
+ssh-keygen -Y verify \
+  -f .github/allowed_signers \
+  -I maintainer@example.invalid \
+  -n file \
+  -s SHA256SUMS.sig \
+  < SHA256SUMS
+```
+
+The verification command must exit successfully. A checksum file, its
+signature, and the allowed-signers file are three separate inputs; publishing
+only the checksum does not satisfy this gate.
 
 ## Failure handling
 

@@ -56,8 +56,11 @@
 - [ ] Stable publication received explicit human approval.
 - [ ] Signed release tag points to the final release commit.
 - [ ] Published assets match accepted checksums.
+- [ ] `SHA256SUMS` has a detached SSH signature published as `SHA256SUMS.sig`.
+- [ ] The detached signature verifies with the protected allowed-signers file,
+  expected maintainer identity, and `file` signing namespace.
 - [ ] Public release and assets are reachable.
-- [ ] A separate `PUBLICATION.md` records tag, assets, checksums, timestamp and control limitations.
+- [ ] A separate `PUBLICATION.md` records tag, assets, checksums, checksum-signature identity and verification, timestamp, and control limitations.
 - [ ] The frozen acceptance closeout was not rewritten after publication.
 
 ## Local cleanup

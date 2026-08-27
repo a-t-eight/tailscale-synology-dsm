@@ -110,6 +110,10 @@ acceptance, release approval, and publication are separate gates.
 Production package installation, administrator bootstrap, firewall changes,
 reboot testing, and stable publication require explicit maintainer approval.
 
+The control and source branches intentionally define different GitHub Actions
+workflows. See [automation governance](governance/automation.md) for the
+validation lanes, exact workflow catalogue, and required-check relationships.
+
 ## Worktree configuration
 
 Operations that require both downstream control files and Tailscale source use

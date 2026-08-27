@@ -66,6 +66,11 @@ The canonical validator applies:
   from the repository-owned pre-commit hook;
 - synthetic positive and negative tests for the non-installing SPK inspector.
 
+The cross-branch workflow catalogue, validation lanes, and required-check
+relationships are defined in [automation governance](automation.md). The
+canonical validator checks its stable identifiers against both the control
+tree and the pinned accepted-source tree without querying GitHub.
+
 ## Automation boundary
 
 CI may:

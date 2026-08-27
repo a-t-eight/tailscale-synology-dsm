@@ -1313,6 +1313,17 @@ else
   fail_check "living r2 release contract or retained checksums failed"
 fi
 
+printf '\n=== Automation governance contract ===\n'
+
+if bash \
+  tests/governance/automation-contract.sh \
+  --source-environment \
+  "$SOURCE_ENV_ROOT"; then
+  pass_check "automation governance catalogue matches pinned workflow definitions."
+else
+  fail_check "automation governance catalogue validation failed"
+fi
+
 printf '\n=== GitHub Actions ===\n'
 
 WORKFLOW_FILES=()
@@ -1418,7 +1429,9 @@ REQUIRED_FILES=(
   scripts/validate-repository.sh
   scripts/release/inspect-spk.sh
   tests/quality/inspect-spk.sh
+  tests/governance/automation-contract.sh
   .github/workflows/validate.yml
+  docs/governance/automation.md
   docs/governance/repository-governance.md
   docs/governance/tooling.md
 )

@@ -13,6 +13,7 @@ supported by Tailscale, Inc. or Synology Inc.
 | --- | --- |
 | Install the current package | [Published releases](https://github.com/a-t-eight/tailscale-synology-dsm/releases) and the release-specific installation notes |
 | Understand the repository | [Repository guide](docs/repository-guide.md) |
+| Understand CI and required checks | [Automation governance](docs/governance/automation.md) |
 | Understand the package and root bootstrap | [Package runtime guide](docs/package-runtime.md) |
 | Prepare a future Tailscale version | [Version-update runbook](docs/runbooks/tailscale-synology-version-update.md) |
 | Build or validate a release | [Governance tooling](docs/governance/tooling.md) |
@@ -82,7 +83,8 @@ roles. The default branch is intentionally not the Tailscale source branch.
 The signed source commit stack is authoritative. Generated mail patches on
 `synology/main` reproduce that stack and are validated by an exact round trip.
 See the [repository guide](docs/repository-guide.md) for the complete mental
-model and worktree workflow.
+model and worktree workflow, and [automation governance](docs/governance/automation.md)
+for the cross-branch validation model.
 
 ## Maintainer workflow
 
