@@ -2,7 +2,7 @@
 
 ## Identity
 
-- [ ] Release issue exists.
+- [ ] A durable release tracking record exists as a release issue, pull request or frozen closeout record.
 - [ ] Upstream tag is explicit.
 - [ ] Upstream commit is a full verified SHA.
 - [ ] Downstream revision is new.
