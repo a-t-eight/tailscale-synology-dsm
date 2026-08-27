@@ -45,13 +45,26 @@
 - [ ] Rollback remains viable.
 - [ ] Runtime evidence was sanitised.
 
-## Publication and closeout
+## Acceptance closeout
 
-- [ ] Stable publication received explicit human approval.
-- [ ] Published assets match accepted checksums.
-- [ ] Signed release tag points to the final release commit.
 - [ ] Permanent release record was reviewed.
 - [ ] Release closeout runbook completed.
+- [ ] Acceptance closeout was integrated without changing accepted source or package bytes.
+
+## Publication record
+
+- [ ] Stable publication received explicit human approval.
+- [ ] Signed release tag points to the final release commit.
+- [ ] Published assets match accepted checksums.
+- [ ] Public release and assets are reachable.
+- [ ] A separate `PUBLICATION.md` records tag, assets, checksums, timestamp and control limitations.
+- [ ] The frozen acceptance closeout was not rewritten after publication.
+
+## Local cleanup
+
+- [ ] Workspace inventory classifies every temporary path and retained evidence root.
+- [ ] No cleanup candidate has dirty files, unique commits, active worktree use or unsealed evidence.
+- [ ] Exact cleanup targets received separate maintainer approval.
 - [ ] Temporary branches and worktrees were cleaned up.
 
 ## Signed protected integration

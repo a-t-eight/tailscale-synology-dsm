@@ -5,7 +5,7 @@
 Create or reuse a clean detached worktree at the accepted release commit:
 
 ```text
-20c86229955a3d03de01901aee1499cab87c571d
+0fad8b81a3e0eb86c457bc79c474bcc213834c43
 ```
 
 When exactly one clean registered worktree matches that commit and tree, run:
@@ -25,7 +25,7 @@ bash scripts/validate-repository.sh \
 The source environment must have tree:
 
 ```text
-6d022c18f27a42aab553697c69c852bebd8594b8
+33f5c5927ae4db54b9d582650ed31cc6a2eb7161
 ```
 
 All Go operations use that worktree's repository-pinned:
