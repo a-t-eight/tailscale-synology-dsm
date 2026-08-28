@@ -1,0 +1,264 @@
+# Final productionisation status
+
+This document is the canonical status list for the remaining productionisation
+work after the accepted `v1.98.96-r2` release and the August 2026 governance
+closeout.
+
+The accepted r2 release is closed and must not be rewritten. Remaining work
+applies to a new downstream revision and/or a newer explicitly pinned upstream
+Tailscale release.
+
+## Product architecture invariant
+
+The supported downstream architecture deliberately uses an attended
+administrator bootstrap to promote the DSM package into a persistent root
+runtime.
+
+After successful bootstrap:
+
+- `tailscaled` MUST run as UID 0;
+- effective package execution MUST remain `run-as: root`;
+- the promoted package target MUST remain `root:root`;
+- kernel TUN MUST remain enabled;
+- subnet routing and `--accept-routes` MUST remain supported;
+- exit-node operation MUST remain supported;
+- the Linux netfilter backend MUST remain enabled;
+- the required Synology netfilter extensions MUST remain usable;
+- upstream Synology policy gates that disable those capabilities MUST NOT be
+  reintroduced.
+
+Security hardening must therefore protect what the privileged runtime trusts;
+it must not reduce Tailscale's runtime privilege. See
+[ADR 0002](../adr/0002-privileged-bootstrap-trust-boundary.md).
+
+## Completed productionisation work
+
+### 1. Repository and release governance — complete
+
+- downstream/upstream branch roles are documented and enforced;
+- signed downstream commits and protected integration are required;
+- release/control branches and release tags are protected;
+- release identity is pinned in `release/manifest.yaml`;
+- release automation and validation lanes are documented and contract-tested.
+
+### 2. r2 reproducibility and acceptance — complete
+
+- accepted r2 source and package identities are frozen;
+- the 58-patch round trip reproduces the accepted source tree;
+- independent builds produced byte-identical r2 SPKs;
+- exact-artifact DS920+/DSM 7.4.1 installation, bootstrap, lifecycle, routing,
+  IPv4/IPv6 and netfilter acceptance is retained;
+- the published r2 release remains unchanged.
+
+### 3. Publication and supply-chain governance — complete for policy
+
+- signed release tags are required;
+- future releases require a detached OpenSSH signature for `SHA256SUMS`;
+- publication evidence and closeout are separate records;
+- immutable releases remain intentionally deferred unless separately approved.
+
+### 4. Workspace, archive and automation closeout — complete
+
+- temporary governance worktrees and branches were removed;
+- the retained development workspace is documented;
+- the sealed r2 archive was copied to independent macOS storage and verified;
+- automation governance and offline workflow validation are integrated.
+
+## Remaining productionisation work
+
+### 5. Harden the persistent UID-0 runtime trust boundary — required
+
+This task replaces the ambiguous phrase "redesign the root-control trust
+boundary". It does **not** mean dropping root privileges or returning to the
+ordinary DSM package-user/Package Center capability model.
+
+The approved design is deliberately upstream-compatible. It keeps
+`tailscaled.state`, `tailscaled.sock`, `tailscaled.pid`,
+`tailscaled.stdout.log`, `STATE_DIRECTORY`, logrotate and DSM package-data
+ownership in their existing upstream locations. Task 5 must not relocate or
+recursively re-own that application state.
+
+The authoritative implementation contract is the
+[upstream-compatible root-control design](../superpowers/specs/2026-08-28-upstream-compatible-root-control-design.md).
+
+#### 5.1 Establish the narrow root-control surfaces
+
+Use the existing DSM-installed, root-owned package `scripts` and `conf`
+directories. Add:
+
+- `conf/root-payload.manifest` for exact build-generated payload identities;
+- `conf/root-control/` for bootstrap approval state and private promotion
+  transactions; and
+- `/run/tailscale-synology/` for the downstream reconciler PID and pending
+  repair marker.
+
+Validate the installed owner, mode, type and complete ancestor chain. Promotion
+fails closed if DSM does not preserve the observed root-controlled `scripts`
+and `conf` boundary.
+
+All `install` and `remove` mutations enter through the root-owned package-script
+bootstrap. The `/usr/local/bin` target link remains a status-only convenience.
+
+#### 5.2 Authenticate the payload before privilege promotion
+
+Before package ownership is promoted or any package payload executes as UID 0,
+validate the exact inspected SPK payload against root-trusted expected
+identities.
+
+At minimum authenticate:
+
+- `tailscaled`;
+- `tailscale`;
+- bootstrap/controller code;
+- privileged lifecycle scripts;
+- reconciler helpers;
+- privileged templates.
+
+The trusted expected manifest must be generated from the exact reviewed build
+and stored where the package account cannot replace it. Promotion fails closed
+on any mismatch.
+
+#### 5.3 Harden privileged filesystem operations
+
+Privileged code must:
+
+- validate the resolved path and every relevant ancestor using
+  `lstat`/equivalent checks;
+- reject symlinks, multiple hard links and unexpected file types;
+- reject unsafe modes or ownership drift;
+- create temporary objects exclusively inside trusted root-controlled
+  directories;
+- use safe atomic replacement only after validating the temporary object;
+- reject unexpected pre-existing backup/destination entries.
+
+#### 5.4 Adapt reconciliation without changing LocalAPI
+
+Keep the LocalAPI socket in `SYNOPKG_PKGVAR`. Move only the reconciler's own PID
+and pending-repair marker to `/run/tailscale-synology/`. Replace its separate
+root-opened application-data log with `/usr/bin/logger` and retain its existing
+repair, cooldown, process-identity and shutdown behaviour.
+
+The iptables preflight and guarded cleanup, TUN creation, routing sysctls,
+in-daemon netfilter repairs, dependency checks, `/usr/local/bin` linker entries
+and daemon logrotate contract require no Task 5 path change.
+
+#### 5.5 Implement migration and lifecycle handling
+
+Cover:
+
+- existing r2 installations;
+- fresh installation;
+- upgrade;
+- rollback;
+- bootstrap removal/re-application;
+- uninstall;
+- reboot;
+- DSM volume migration;
+- log rotation;
+- backup retention/recovery.
+
+Existing r2 state beneath `SYNOPKG_PKGVAR` is not trusted as approval for the new
+payload. Upgrade requires fresh attended promotion when the exact manifest
+identity changes. Removal must not move, delete or re-own upstream daemon state.
+
+#### 5.6 Validate the exact implementation
+
+Require automated fixtures for:
+
+- malicious symlink substitution;
+- directory-entry replacement;
+- unsafe file types;
+- ownership/mode drift;
+- payload tampering;
+- trusted-manifest mismatch;
+- unexpected pre-existing destinations/backups.
+
+Also require regression tests for the `/run` reconciler lifecycle and logging,
+and exact assertions that upstream daemon state, socket, PID, stdout-log and
+logrotate paths remain unchanged.
+
+Then require exact-artifact DSM UAT proving that after the hardening change:
+
+- `tailscaled` remains UID 0;
+- target ownership remains `root:root`;
+- TUN works;
+- subnet routing works;
+- `--accept-routes` works;
+- exit-node behaviour works;
+- IPv4 and IPv6 routing/netfilter work;
+- reboot, upgrade and rollback work.
+
+Task 5 is complete only after those gates pass in a new downstream revision.
+
+### 6. Close agent/release-tool safety defects — required before autonomous port work
+
+- pin the version-preparation signing fixture to an explicit `ssh-keygen`
+  implementation rather than inheriting the host's global SSH signing program;
+- isolate fixture Git configuration;
+- redact private-key material from failure logs;
+- verify build-output cleanup cannot delete an unsafe or ambiguously resolved
+  path;
+- enforce expected signer identity where signatures are used as a release gate.
+
+These are repository/tooling controls and should land on `synology/main` before
+an agent is allowed to perform a largely autonomous version port.
+
+### 7. Pin complete netfilter-extension provenance — required for whole-product reproducibility
+
+The Tailscale SPK currently records a minimum dependency version. Before the
+next stable release, pin and retain the exact netfilter-extension provenance,
+including:
+
+- package source revision;
+- `spksrc` revision;
+- Synology kernel/toolchain inputs;
+- architecture and DSM floor;
+- accepted SPK SHA-256;
+- matching hardware acceptance evidence.
+
+Only then can reproducibility be claimed for the complete Tailscale plus
+netfilter-extension product rather than the Tailscale SPK alone.
+
+### 8. Port to the next explicitly selected upstream release — planned
+
+For the currently assessed `v1.102.3` candidate, use the standard version-update
+runbook with these additional constraints:
+
+1. start from the exact verified upstream tag and commit;
+2. create an isolated worktree;
+3. compare the old/new upstream snapshots and use `git range-diff` for the
+   downstream commit stack;
+4. adapt Linux router/netfilter changes individually rather than replaying the
+   old patches mechanically;
+5. establish a port-only compile/test checkpoint before adding new trust-boundary
+   implementation work;
+6. implement task 5 as separate logical signed commits;
+7. regenerate the complete mail patch series;
+8. perform two clean byte-identical builds and static SPK inspection;
+9. validate the pinned netfilter-extension dependency;
+10. perform exact-artifact DSM acceptance including upgrade, bootstrap, reboot,
+    rollback, IPv4/IPv6, subnet routing, accept-routes, exit-node and netfilter;
+11. publish only after human review and the normal release closeout;
+12. publish and verify signed `SHA256SUMS` for the new stable release.
+
+An agent may prepare, port, test and build candidates under the permissions in
+`AGENTS.md`. It may not install the production NAS package, run root bootstrap,
+change production networking, approve its own work or publish the stable
+release.
+
+## Definition of final production readiness for the next release
+
+The next release is production-ready only when all applicable items above are
+complete and the release has fresh evidence for:
+
+- source identity and signed downstream history;
+- patch round-trip reproducibility;
+- byte-identical package builds;
+- static package inspection;
+- exact netfilter dependency provenance;
+- persistent UID-0 trust-boundary security tests;
+- exact-artifact DSM installation/upgrade/rollback/reboot acceptance;
+- TUN, subnet routing, accept-routes, exit-node and IPv4/IPv6 netfilter
+  functionality;
+- reviewed/sanitised evidence;
+- signed checksums and human-controlled stable publication.
