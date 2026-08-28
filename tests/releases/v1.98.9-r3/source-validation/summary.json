@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "upstream_commit": "6c167d40fa37aeb51afa7ff336730670ea4762bf",
+  "release_commit": "f49613eccf9350583cc328183f192a591cd76348",
+  "release_tree": "44c0bc3cd3bbcd3eb70cacf34e9611909a38bd10",
+  "patch_layers": [{"name": "r2-base", "patch_count": 58, "release_commit": "0fad8b81a3e0eb86c457bc79c474bcc213834c43", "release_tree": "33f5c5927ae4db54b9d582650ed31cc6a2eb7161"}, {"name": "r3-delta", "patch_count": 7}],
+  "downstream_commit_count": 65,
+  "valid_signature_count": 65,
+  "matching_single_signoff_count": 65,
+  "patch_round_trip_tree": "44c0bc3cd3bbcd3eb70cacf34e9611909a38bd10",
+  "patch_round_trip": "PASS",
+  "verdict": "PASS"
+}

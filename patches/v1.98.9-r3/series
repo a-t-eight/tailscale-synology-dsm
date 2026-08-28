@@ -1,0 +1,7 @@
+0001-synology-authenticate-root-payload-manifest.patch
+0002-synology-harden-root-payload-promotion.patch
+0003-synology-isolate-reconciler-control-state.patch
+0004-docs-define-Synology-r3-root-control-acceptance.patch
+0005-fix-authenticate-Synology-package-variants.patch
+0006-fix-close-Synology-root-lifecycle-gaps.patch
+0007-fix-tolerate-DSM-managed-resource-rewrites.patch

@@ -1,0 +1,169 @@
+From d7881956c32bf81138c77b37389f8a866be8b1b5 Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Fri, 28 Aug 2026 20:23:43 +1000
+Subject: [PATCH 4/7] docs: define Synology r3 root-control acceptance
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ docs/product/unjailed-synology-contract.md    | 115 +++++++++++++++++-
+ .../2026-08-24-dsm741-bootstrap-hardening.md  |   7 ++
+ 2 files changed, 117 insertions(+), 5 deletions(-)
+
+diff --git a/docs/product/unjailed-synology-contract.md b/docs/product/unjailed-synology-contract.md
+index 0b02c3f0a..4c6d58761 100644
+--- a/docs/product/unjailed-synology-contract.md
++++ b/docs/product/unjailed-synology-contract.md
+@@ -22,16 +22,22 @@ Initial approval must run the root-owned outer package script:
+ sudo /var/packages/Tailscale/scripts/tailscale-synology-bootstrap install
+ ```
+ 
+-The `/usr/local/bin/tailscale-synology-bootstrap` linker target is
+-package-owned before approval and must not be executed through `sudo` in that
+-state. A successful bootstrap changes the package target to `root:root`; the
+-linked command is then a trusted post-bootstrap convenience entry point.
++Removal must use the same root-owned outer package script:
++
++```text
++sudo /var/packages/Tailscale/scripts/tailscale-synology-bootstrap remove
++```
++
++The `/usr/local/bin/tailscale-synology-bootstrap` linker target is a
++status-only convenience command. It rejects `install` and `remove`, including
++after the package target has been promoted to `root:root`. This keeps every
++root-control mutation behind the DSM-installed, root-owned outer entrypoint.
+ 
+ After approval, package startup fails closed when TUN, root-runtime or required
+ netfilter prerequisites are unavailable. Agent workflows must not run
+ bootstrap or alter those prerequisites on a NAS.
+ 
+-## r2 and later package contract
++## Package metadata contract
+ 
+ The dependency file is exactly:
+ 
+@@ -49,6 +55,105 @@ The dependency declaration is only a declaration. This repository does not
+ build, install or publish the `iptables-netfilter-extensions` SPK as part of a
+ Tailscale version preparation.
+ 
++## r3 root-control contract
++
++The r3 package authenticates the exact payload before any package-owned file
++can execute as root. The build writes a deterministic
++`conf/root-payload.manifest` containing the installed mode and SHA-256 digest
++of every regular file in the target payload, every package lifecycle script,
++the immutable privilege templates and the static package resource files. The
++manifest excludes itself and the mutable active `conf/privilege` file.
++
++The outer bootstrap performs promotion in this order:
++
++1. validate the DSM version, trusted ancestors, manifest syntax, inventory,
++   modes and file identities;
++2. stop the package through the bounded DSM package-control wrapper;
++3. create one private transaction under `conf/root-control/transactions`;
++4. replace each target file with a validated, root-owned, same-directory inode;
++5. repeat the complete no-follow target inventory and identity check;
++6. write bootstrap state bound to the manifest digest;
++7. install the root privilege template and start the package; and
++8. verify that `tailscaled` runs as UID 0 before removing the transaction.
++
++Privilege activation is deliberately last. Missing, extra, malformed,
++linked, unsafe-mode or identity-mismatched payload entries fail before root
++execution. A failed operation restores the prior privilege, target ownership
++and trusted bootstrap state when rollback can be proven. An incomplete
++rollback retains the single recovery transaction and blocks later mutations.
++
++The persistent downstream trust anchor is limited to:
++
++| Path | Required state | Purpose |
++| --- | --- | --- |
++| `/var/packages/Tailscale/scripts` | DSM-installed `root:root`, not group/other-writable | authoritative lifecycle and bootstrap entrypoints |
++| `/var/packages/Tailscale/conf/root-payload.manifest` | `root:root 0644` | expected identities for the promoted payload |
++| `/var/packages/Tailscale/conf/root-control` | `root:root 0755` | bootstrap state namespace |
++| `.../root-control/root-bootstrap.state` | `root:root 0644` | schema, privilege mode and accepted manifest digest |
++| `.../root-control/transactions` | `root:root 0700` while active | private bounded rollback material |
++
++The controller rejects unexpected owners, types, links and write permissions
++on these paths. A package upgrade whose payload identity changes requires a
++new attended bootstrap. Legacy r2 bootstrap state beneath `SYNOPKG_PKGVAR` is
++not trusted as approval for an r3 payload.
++
++## Reconciliation and upstream compatibility
++
++Only the downstream reconciler's volatile control files move outside package
++data. Root lifecycle code validates or creates
++`/run/tailscale-synology` as `root:root 0700`; `reconciler.pid` and
++`repair.pending` live there. Package-account lifecycle and all status paths are
++observation-only and never create, repair or remove this runtime directory.
++Root stop removes exact control files only after process-identity validation.
++
++Reconciler messages use `/usr/bin/logger` with the stable
++`tailscale-netfilter-reconciler` tag and mapped system-log priorities. Logger
++failure is reported on stderr but does not create a package-data fallback log
++or turn successful firewall repair into a retry loop.
++
++The following upstream application paths and semantics remain unchanged:
++
++- `tailscaled.state`, `tailscaled.sock`, `tailscaled.pid`,
++  `tailscaled.stdout.log` and `STATE_DIRECTORY` remain beneath
++  `SYNOPKG_PKGVAR`;
++- the DSM web interface and LocalAPI continue to use the upstream socket;
++- daemon logrotate configuration remains unchanged;
++- the existing TUN, routing, sysctl and netfilter behavior remains unchanged;
++- iptables cleanup still checks whether a rule exists before deleting it and
++  requires observable progress within the deletion routine; and
++- bootstrap removal restores package-account execution and
++  `tailscale:tailscale` target ownership without moving or re-owning upstream
++  daemon state.
++
++This boundary intentionally retains the upstream package-data risk. A
++compromised package account can still alter application files it is expected
++to own beneath `@appdata`, including paths beneath predictable daemon PID and
++stdout-log ancestors. Executable-identity checks constrain process signalling,
++but eliminating all package-account influence over daemon state would require
++a broader package fork and is outside this port.
++
++## r3 acceptance contract
++
++Release acceptance requires two clean builds from the same signed source
++commit and fixed source epoch, with byte-identical sideload and Package Center
++SPKs. The static inspector must verify archive safety, metadata, script syntax
++and the complete root-payload manifest for every candidate.
++
++Attended DSM testing must use the recorded artifact digest and cover:
++
++- fresh install and upgrade from the accepted r2 package;
++- package-account pre-bootstrap status and rejection of linked mutations;
++- outer-script bootstrap, idempotent re-bootstrap, remove and re-bootstrap;
++- manifest-bound state, `root:root` target ownership and `tailscaled` UID 0;
++- package restart, NAS reboot, rollback, uninstall and volume migration;
++- DSM UI, LocalAPI and system-log visibility;
++- interrupted netfilter repair across same-boot restart and reboot; and
++- TUN, IPv4 and IPv6 netfilter, subnet routing, accepted routes and exit-node
++  operation.
++
++Build or static-inspection success does not authorise NAS installation,
++bootstrap, reboot or network mutation. Those remain attended UAT steps.
++
+ ## Preservation boundary
+ 
+ `release/upgrade-baseline.json` records the accepted candidate and the five
+diff --git a/docs/superpowers/plans/2026-08-24-dsm741-bootstrap-hardening.md b/docs/superpowers/plans/2026-08-24-dsm741-bootstrap-hardening.md
+index 73893c9eb..572dfb7f1 100644
+--- a/docs/superpowers/plans/2026-08-24-dsm741-bootstrap-hardening.md
++++ b/docs/superpowers/plans/2026-08-24-dsm741-bootstrap-hardening.md
+@@ -1,5 +1,12 @@
+ # DSM 7.4.1 Bootstrap Hardening Implementation Plan
+ 
++> **Historical record:** This plan describes the accepted r2 implementation.
++> The r3 root-control architecture and acceptance requirements supersede its
++> package-data trust-boundary decisions; see
++> `docs/superpowers/specs/2026-08-28-upstream-compatible-root-control-design.md`
++> and `docs/product/unjailed-synology-contract.md`. The completed r2 task record
++> below is intentionally unchanged.
++
+ > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+ 
+ **Goal:** Make the unjailed Synology startup transaction terminate safely on DSM 7.4.1, prove daemon identity before accepting or signalling PIDs, supervise the reconciler reliably, and expose the attended bootstrap at `/usr/local/bin/tailscale-synology-bootstrap`.
+-- 
+2.53.0
+

@@ -22,6 +22,44 @@
 - Examples in documentation must be clearly labelled and must not override the
   manifest.
 
+## Runtime architecture invariants
+
+The downstream product deliberately promotes the installed DSM package into a
+persistent root runtime through an attended administrator bootstrap. Security
+work must harden what that privileged runtime trusts; it must not reduce the
+runtime privilege required by the product.
+
+After successful bootstrap, future changes must preserve:
+
+- `tailscaled` running as UID 0;
+- effective `run-as: root` package execution;
+- the promoted package target owned `root:root`;
+- kernel TUN operation;
+- subnet routing and `--accept-routes` support;
+- exit-node operation;
+- the normal Linux netfilter backend;
+- use of the required Synology netfilter-extension package;
+- downstream removal of upstream Synology feature gates that conflict with
+  these capabilities;
+- upstream `SYNOPKG_PKGVAR` locations for daemon state, LocalAPI socket, PID and
+  stdout log;
+- upstream logrotate, DSM web-interface and package-data ownership semantics.
+
+Do not reinterpret trust-boundary hardening as a mandate to return to the
+ordinary DSM package-user or Package Center capability model. Do not re-enable
+upstream Synology restrictions merely to reduce privilege. Any proposal that
+changes one of these invariants requires an explicit architecture decision and
+must be treated as a product regression risk.
+
+Task 5 is defined by
+`docs/adr/0002-privileged-bootstrap-trust-boundary.md` and the authoritative
+`docs/superpowers/specs/2026-08-28-upstream-compatible-root-control-design.md`.
+Do not relocate or recursively re-own upstream daemon application state as part
+of that task. Only downstream bootstrap/reconciliation control material may
+move to the approved `conf/root-control` and `/run/tailscale-synology`
+boundaries. Task 5 `install` and `remove` operations must enter through the
+root-owned package-script bootstrap; the target-linked command is status-only.
+
 ## Commit and patch rules
 
 - Sign every downstream commit.

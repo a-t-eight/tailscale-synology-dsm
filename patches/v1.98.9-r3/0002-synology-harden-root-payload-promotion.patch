@@ -1,0 +1,1876 @@
+From dcc5bf3df9c338272d67ccaf2bd9248eec434a78 Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Fri, 28 Aug 2026 20:00:01 +1000
+Subject: [PATCH 2/7] synology: harden root payload promotion
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ .../scripts/tailscale-synology-bootstrap      | 960 ++++++++++++------
+ .../tests/bootstrap-synopkg-path-test.sh      |  31 +
+ .../synology/tests/root-bootstrap-test.sh     | 380 ++++++-
+ 3 files changed, 1020 insertions(+), 351 deletions(-)
+
+diff --git a/release/dist/synology/files/scripts/tailscale-synology-bootstrap b/release/dist/synology/files/scripts/tailscale-synology-bootstrap
+index ca74b37c0..ee3cef59e 100755
+--- a/release/dist/synology/files/scripts/tailscale-synology-bootstrap
++++ b/release/dist/synology/files/scripts/tailscale-synology-bootstrap
+@@ -2,6 +2,7 @@
+ set -u
+ 
+ export PATH="/usr/syno/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
++export LC_ALL=C
+ 
+ PACKAGE_NAME="Tailscale"
+ BOOTSTRAP_SOURCE_PATH="${BASH_SOURCE[0]}"
+@@ -13,24 +14,38 @@ PACKAGE_VAR="${PACKAGE_ROOT}/var"
+ ACTIVE_PRIVILEGE="${PACKAGE_CONF}/privilege"
+ SAFE_TEMPLATE="${PACKAGE_CONF}/privilege.bootstrap-package"
+ ROOT_TEMPLATE="${PACKAGE_CONF}/privilege.bootstrap-root"
++ROOT_PAYLOAD_MANIFEST="${PACKAGE_CONF}/root-payload.manifest"
++ROOT_CONTROL_DIR="${PACKAGE_CONF}/root-control"
++STATE_FILE="${ROOT_CONTROL_DIR}/root-bootstrap.state"
++TRANSACTION_ROOT="${ROOT_CONTROL_DIR}/transactions"
++LEGACY_STATE_FILE="${PACKAGE_VAR}/root-bootstrap.state"
+ 
+-STATE_FILE="${PACKAGE_VAR}/root-bootstrap.state"
+ PID_FILE="${PACKAGE_VAR}/tailscaled.pid"
+-BACKUP_ROOT="${PACKAGE_VAR}/bootstrap-backups"
+ TARGET_BOOTSTRAP="${PACKAGE_TARGET}/bin/tailscale-synology-bootstrap"
+ OUTER_BOOTSTRAP="${PACKAGE_ROOT}/scripts/tailscale-synology-bootstrap"
+ 
+ SYNO_PKG="${TAILSCALE_SYNOLOGY_SYNOPKG:-/usr/syno/bin/synopkg}"
+ TIMEOUT_BIN="${TAILSCALE_SYNOLOGY_TIMEOUT_BIN:-/usr/bin/timeout}"
+ SYNOPKG_TIMEOUT_SECONDS="${TAILSCALE_SYNOLOGY_SYNOPKG_TIMEOUT_SECONDS:-60}"
++TARGET_ANCESTOR_STOP="${TAILSCALE_SYNOLOGY_TARGET_ANCESTOR_STOP:-/}"
+ PROC_ROOT="/proc"
+ 
+ if [ "${TAILSCALE_SYNOLOGY_TEST_MODE:-0}" = "1" ]; then
+     PROC_ROOT="${TAILSCALE_SYNOLOGY_PROC_ROOT:-/proc}"
+ fi
+-STATE_SCHEMA="1"
++
++STATE_SCHEMA="2"
++MANIFEST_SCHEMA="tailscale-synology-root-payload-v1"
+ ROLLBACK_ARMED=0
+-BACKUP_DIR=""
++TRANSACTION_DIR=""
++STAGED_TEMP=""
++PREVIOUS_MODE="package"
++RESOLVED_TARGET=""
++MANIFEST_HASH=""
++
++declare -a ROOT_PAYLOAD_PATHS=()
++declare -a ROOT_PAYLOAD_MODES=()
++declare -a ROOT_PAYLOAD_DIGESTS=()
+ 
+ log_message() {
+     local level="$1"
+@@ -86,64 +101,128 @@ require_root() {
+     fi
+ }
+ 
+-require_secure_privileged_entrypoint() {
+-    local script_path
+-    local target_bootstrap_path
+-    local target_uid
++mode_is_safe() {
++    local mode="$1"
++    local mode_value
+ 
+-    script_path="$(readlink -f -- "${BOOTSTRAP_SOURCE_PATH}")" ||
+-        die "cannot resolve bootstrap script path"
++    case "${mode}" in
++    ''|*[!0-7]*)
++        return 1
++        ;;
++    esac
+ 
+-    target_bootstrap_path="$(readlink -f -- "${TARGET_BOOTSTRAP}")" ||
+-        die "cannot resolve target bootstrap script path"
++    mode_value=$((8#${mode}))
++    (( (mode_value & 8#022) == 0 ))
++}
+ 
+-    if [ "${script_path}" != "${target_bootstrap_path}" ]; then
+-        return 0
+-    fi
++require_root_identity() {
++    local path="$1"
++    local uid
++    local gid
+ 
+-    target_uid="$(stat -c %u -- "${TARGET_BOOTSTRAP}")" ||
+-        die "cannot read owner for ${TARGET_BOOTSTRAP}"
++    uid="$(stat -c %u -- "${path}")" ||
++        die "cannot read owner for ${path}"
++    gid="$(stat -c %g -- "${path}")" ||
++        die "cannot read group for ${path}"
+ 
+-    if [ "${target_uid}" != "0" ]; then
+-        die "initial root bootstrap must use the root-owned package script: ${OUTER_BOOTSTRAP}"
+-    fi
++    [ "${uid}" = "0" ] ||
++        die "path is not root-owned: ${path}"
++    [ "${gid}" = "0" ] ||
++        die "path is not root-group-owned: ${path}"
++}
++
++require_trusted_directory() {
++    local directory="$1"
++    local expected_mode="$2"
++    local mode
+ 
+-    require_secure_root_file "${TARGET_BOOTSTRAP}"
++    [ ! -L "${directory}" ] ||
++        die "trusted directory is a symlink: ${directory}"
++    [ -d "${directory}" ] ||
++        die "trusted directory is missing: ${directory}"
++    require_root_identity "${directory}"
++
++    mode="$(stat -c %a -- "${directory}")" ||
++        die "cannot read mode for ${directory}"
++    [ "${mode}" = "${expected_mode}" ] ||
++        die "trusted directory mode is ${mode}, expected ${expected_mode}: ${directory}"
++}
++
++require_trusted_safe_directory() {
++    local directory="$1"
++    local mode
++
++    [ ! -L "${directory}" ] ||
++        die "trusted ancestor is a symlink: ${directory}"
++    [ -d "${directory}" ] ||
++        die "trusted ancestor is missing: ${directory}"
++    require_root_identity "${directory}"
++    mode="$(stat -c %a -- "${directory}")" ||
++        die "cannot read mode for ${directory}"
++    mode_is_safe "${mode}" ||
++        die "trusted ancestor is group or other writable: ${directory}"
+ }
+ 
+-require_secure_root_file() {
++require_trusted_regular_file() {
+     local file="$1"
+-    local uid
++    local expected_mode="$2"
+     local mode
+-    local mode_value
++    local links
++    local kind
+ 
++    [ ! -L "${file}" ] ||
++        die "trusted file is a symlink: ${file}"
+     [ -f "${file}" ] ||
+-        die "required file is missing: ${file}"
++        die "trusted file is missing: ${file}"
++
++    kind="$(stat -c %F -- "${file}")" ||
++        die "cannot read file type for ${file}"
++    [ "${kind}" = "regular file" ] ||
++        die "trusted path is not a regular file: ${file}"
++    links="$(stat -c %h -- "${file}")" ||
++        die "cannot read link count for ${file}"
++    [ "${links}" = "1" ] ||
++        die "trusted file has multiple hard links: ${file}"
++
++    require_root_identity "${file}"
++    mode="$(stat -c %a -- "${file}")" ||
++        die "cannot read mode for ${file}"
++    [ "${mode}" = "${expected_mode}" ] ||
++        die "trusted file mode is ${mode}, expected ${expected_mode}: ${file}"
++}
+ 
+-    uid="$(stat -c %u -- "${file}")" ||
+-        die "cannot read owner for ${file}"
++resolve_bootstrap_path() {
++    readlink -f -- "${BOOTSTRAP_SOURCE_PATH}"
++}
+ 
+-    [ "${uid}" = "0" ] ||
+-        die "file is not root-owned: ${file}"
++source_is_target_bootstrap() {
++    local source_path
++    local target_path
+ 
+-    mode="$(stat -c %a -- "${file}")" ||
+-        die "cannot read mode for ${file}"
++    source_path="$(resolve_bootstrap_path)" || return 1
++    target_path="$(readlink -f -- "${TARGET_BOOTSTRAP}")" || return 1
++    [ "${source_path}" = "${target_path}" ]
++}
+ 
+-    mode_value=$((8#${mode}))
++require_outer_mutation_entrypoint() {
++    local source_path
++    local outer_path
+ 
+-    if (( mode_value & 8#022 )); then
+-        die "file is writable by group or other: ${file}"
+-    fi
++    source_path="$(resolve_bootstrap_path)" ||
++        die "cannot resolve bootstrap script path"
++    outer_path="$(readlink -f -- "${OUTER_BOOTSTRAP}")" ||
++        die "cannot resolve outer bootstrap script path"
++    [ "${source_path}" = "${outer_path}" ] ||
++        die "mutating bootstrap commands require the root-owned package script: ${OUTER_BOOTSTRAP}"
++    require_trusted_regular_file "${OUTER_BOOTSTRAP}" 755
+ }
+ 
+ validate_dsm() {
+     local major
+ 
+-    # Test harnesses can supply an alternate package root.
+     if [ "${PACKAGE_ROOT}" != "/var/packages/Tailscale" ]; then
+         return 0
+     fi
+-
+     [ -r /etc.defaults/VERSION ] ||
+         die "cannot read /etc.defaults/VERSION"
+ 
+@@ -156,116 +235,348 @@ validate_dsm() {
+             }
+         ' /etc.defaults/VERSION
+     )"
+-
+     [ "${major}" = "7" ] ||
+         die "this bootstrap supports DSM 7 only"
+ }
+ 
+-validate_layout() {
+-    local outer_bootstrap_path
+-    local script_path
+-    local target_bootstrap_mode
+-    local target_bootstrap_path
+-
+-    [ -d "${PACKAGE_ROOT}" ] ||
+-        die "package root is missing: ${PACKAGE_ROOT}"
+-
+-    [ -d "${PACKAGE_TARGET}" ] ||
+-        die "package target is missing: ${PACKAGE_TARGET}"
+-
+-    [ -d "${PACKAGE_CONF}" ] ||
+-        die "package conf directory is missing: ${PACKAGE_CONF}"
++resolve_target() {
++    local target_uid
++    local target_gid
++    local current
++    local parent
++
++    [ -L "${PACKAGE_TARGET}" ] ||
++        die "package target is not the expected DSM symlink: ${PACKAGE_TARGET}"
++    target_uid="$(stat -c %u -- "${PACKAGE_TARGET}")" ||
++        die "cannot read package target owner"
++    target_gid="$(stat -c %g -- "${PACKAGE_TARGET}")" ||
++        die "cannot read package target group"
++    [ "${target_uid}" = "0" ] && [ "${target_gid}" = "0" ] ||
++        die "package target symlink is not root-owned"
++
++    RESOLVED_TARGET="$(readlink -f -- "${PACKAGE_TARGET}")" ||
++        die "cannot resolve package target"
++    [ -n "${RESOLVED_TARGET}" ] && [ "${RESOLVED_TARGET}" != "/" ] ||
++        die "package target resolved to an unsafe path"
++    [ ! -L "${RESOLVED_TARGET}" ] && [ -d "${RESOLVED_TARGET}" ] ||
++        die "resolved package target is not a directory"
++
++    current="$(dirname -- "${RESOLVED_TARGET}")"
++    while :; do
++        require_trusted_safe_directory "${current}"
++        if [ "${current}" = "${TARGET_ANCESTOR_STOP}" ] ||
++            [ "${current}" = "/" ]; then
++            break
++        fi
++        parent="$(dirname -- "${current}")"
++        [ "${parent}" != "${current}" ] ||
++            die "cannot validate target ancestors"
++        current="${parent}"
++    done
+ 
+-    [ -d "${PACKAGE_VAR}" ] ||
+-        die "package var directory is missing: ${PACKAGE_VAR}"
++    if [ "${TARGET_ANCESTOR_STOP}" != "/" ] &&
++        [ "${current}" != "${TARGET_ANCESTOR_STOP}" ]; then
++        die "target does not descend from the configured trusted ancestor"
++    fi
++}
+ 
+-    [ -x "${PACKAGE_TARGET}/bin/tailscaled" ] ||
+-        die "tailscaled is missing or not executable"
++validate_status_layout() {
++    [ -d "${PACKAGE_ROOT}" ] || die "package root is missing: ${PACKAGE_ROOT}"
++    [ -d "${PACKAGE_CONF}" ] || die "package conf directory is missing: ${PACKAGE_CONF}"
++    [ -d "${PACKAGE_VAR}" ] || die "package var directory is missing: ${PACKAGE_VAR}"
++    [ -r "${SAFE_TEMPLATE}" ] || die "safe privilege template is missing"
++    [ -r "${ROOT_TEMPLATE}" ] || die "root privilege template is missing"
++    [ -x "${PACKAGE_TARGET}/bin/tailscaled" ] || die "tailscaled is missing or not executable"
++}
+ 
+-    [ -f "${TARGET_BOOTSTRAP}" ] ||
+-        die "target bootstrap is missing: ${TARGET_BOOTSTRAP}"
++validate_trusted_layout() {
++    validate_status_layout
++    require_trusted_directory "${PACKAGE_ROOT}" 755
++    require_trusted_directory "${PACKAGE_CONF}" 755
++    require_trusted_directory "${PACKAGE_ROOT}/scripts" 755
++    require_trusted_directory "${ROOT_CONTROL_DIR}" 755
++    require_trusted_regular_file "${ROOT_PAYLOAD_MANIFEST}" 644
++    require_trusted_regular_file "${SAFE_TEMPLATE}" 644
++    require_trusted_regular_file "${ROOT_TEMPLATE}" 644
++    require_trusted_regular_file "${ACTIVE_PRIVILEGE}" 644
++    if [ -e "${STATE_FILE}" ] || [ -L "${STATE_FILE}" ]; then
++        require_trusted_regular_file "${STATE_FILE}" 644
++    fi
++    resolve_target
+ 
+-    script_path="$(readlink -f -- "${BOOTSTRAP_SOURCE_PATH}")" ||
+-        die "cannot resolve bootstrap script path"
++    grep -Eq '"run-as"[[:space:]]*:[[:space:]]*"package"' "${SAFE_TEMPLATE}" ||
++        die "safe privilege template is invalid"
++    grep -Eq '"run-as"[[:space:]]*:[[:space:]]*"root"' "${ROOT_TEMPLATE}" ||
++        die "root privilege template is invalid"
++    if ! cmp -s "${ACTIVE_PRIVILEGE}" "${SAFE_TEMPLATE}" &&
++        ! cmp -s "${ACTIVE_PRIVILEGE}" "${ROOT_TEMPLATE}"; then
++        die "active privilege is not a recognised template"
++    fi
++}
+ 
+-    outer_bootstrap_path="$(readlink -f -- "${OUTER_BOOTSTRAP}")" ||
+-        die "cannot resolve outer bootstrap script path"
++manifest_has_path() {
++    local expected="$1"
++    local path
+ 
+-    target_bootstrap_path="$(readlink -f -- "${TARGET_BOOTSTRAP}")" ||
+-        die "cannot resolve target bootstrap script path"
++    for path in "${ROOT_PAYLOAD_PATHS[@]}"; do
++        [ "${path}" = "${expected}" ] && return 0
++    done
++    return 1
++}
+ 
+-    case "${script_path}" in
+-    "${outer_bootstrap_path}"|"${target_bootstrap_path}")
++expected_outer_mode() {
++    case "$1" in
++    conf/resource)
++        printf '0600\n'
++        ;;
++    conf/PKG_DEPS|conf/privilege.bootstrap-package|conf/privilege.bootstrap-root)
++        printf '0644\n'
++        ;;
++    scripts/start-stop-status|scripts/tailscale-synology-bootstrap|scripts/tailscale-netfilter-reconciler|scripts/preupgrade|scripts/postupgrade)
++        printf '0755\n'
+         ;;
+     *)
+-        die "bootstrap was invoked from an unexpected path: ${script_path}"
++        return 1
+         ;;
+     esac
++}
+ 
+-    require_secure_root_file "${OUTER_BOOTSTRAP}"
+-
+-    cmp -s "${TARGET_BOOTSTRAP}" "${OUTER_BOOTSTRAP}" ||
+-        die "target bootstrap differs from the root-owned package copy"
+-
+-    target_bootstrap_mode="$(stat -c %a -- "${TARGET_BOOTSTRAP}")" ||
+-        die "cannot read target bootstrap mode"
+-
+-    [ "${target_bootstrap_mode}" = "755" ] ||
+-        die "target bootstrap mode is ${target_bootstrap_mode}, expected 755"
++parse_root_payload_manifest() {
++    local header
++    local type
++    local mode
++    local digest
++    local relative
++    local extra
++    local previous=""
++    local expected_mode
++    local mode_value
+ 
+-    require_secure_root_file "${SAFE_TEMPLATE}"
+-    require_secure_root_file "${ROOT_TEMPLATE}"
++    ROOT_PAYLOAD_PATHS=()
++    ROOT_PAYLOAD_MODES=()
++    ROOT_PAYLOAD_DIGESTS=()
++
++    IFS= read -r header <"${ROOT_PAYLOAD_MANIFEST}" ||
++        die "cannot read root payload manifest"
++    [ "${header}" = "${MANIFEST_SCHEMA}" ] ||
++        die "root payload manifest schema is unsupported"
++
++    while IFS=' ' read -r type mode digest relative extra; do
++        [ -n "${type}" ] || die "root payload manifest contains a blank record"
++        [ "${type}" = "file" ] && [ -z "${extra:-}" ] ||
++            die "root payload manifest contains a malformed record"
++        [[ "${mode}" =~ ^0[0-7]{3}$ ]] ||
++            die "root payload manifest contains an invalid mode"
++        [[ "${digest}" =~ ^[0-9a-f]{64}$ ]] ||
++            die "root payload manifest contains an invalid SHA-256"
++        [[ "${relative}" =~ ^[A-Za-z0-9._/-]+$ ]] ||
++            die "root payload manifest contains an unsafe path"
++
++        case "/${relative}/" in
++        *"//"*|*"/../"*|*"/./"*)
++            die "root payload manifest contains an unsafe path: ${relative}"
++            ;;
++        esac
++        case "${relative}" in
++        /*|.|..|*/|conf/privilege|conf/root-payload.manifest|conf/root-control/*)
++            die "root payload manifest contains a forbidden path: ${relative}"
++            ;;
++        target/*)
++            ;;
++        conf/*|scripts/*)
++            expected_mode="$(expected_outer_mode "${relative}")" ||
++                die "root payload manifest contains an unexpected outer path: ${relative}"
++            [ "${mode}" = "${expected_mode}" ] ||
++                die "root payload manifest mode is incorrect for ${relative}"
++            ;;
++        *)
++            die "root payload manifest path is outside the covered roots: ${relative}"
++            ;;
++        esac
++
++        mode_value=$((8#${mode}))
++        (( (mode_value & 8#022) == 0 )) ||
++            die "root payload manifest permits group or other writes: ${relative}"
++        if [ -n "${previous}" ] &&
++            [[ "${previous}" > "${relative}" || "${previous}" = "${relative}" ]]; then
++            die "root payload manifest paths are not strictly sorted and unique"
++        fi
+ 
+-    grep -Eq \
+-        '"run-as"[[:space:]]*:[[:space:]]*"package"' \
+-        "${SAFE_TEMPLATE}" ||
+-        die "safe privilege template is invalid"
++        ROOT_PAYLOAD_PATHS+=("${relative}")
++        ROOT_PAYLOAD_MODES+=("${mode}")
++        ROOT_PAYLOAD_DIGESTS+=("${digest}")
++        previous="${relative}"
++    done < <(tail -n +2 -- "${ROOT_PAYLOAD_MANIFEST}")
++
++    [ "${#ROOT_PAYLOAD_PATHS[@]}" -gt 0 ] ||
++        die "root payload manifest has no records"
++    for relative in \
++        conf/PKG_DEPS \
++        conf/privilege.bootstrap-package \
++        conf/privilege.bootstrap-root \
++        conf/resource \
++        scripts/start-stop-status \
++        scripts/tailscale-netfilter-reconciler \
++        scripts/tailscale-synology-bootstrap \
++        target/bin/tailscale \
++        target/bin/tailscale-synology-bootstrap \
++        target/bin/tailscaled; do
++        manifest_has_path "${relative}" ||
++            die "root payload manifest is missing ${relative}"
++    done
+ 
+-    grep -Eq \
+-        '"run-as"[[:space:]]*:[[:space:]]*"root"' \
+-        "${ROOT_TEMPLATE}" ||
+-        die "root privilege template is invalid"
++    MANIFEST_HASH="$(sha256_file "${ROOT_PAYLOAD_MANIFEST}")" ||
++        die "cannot hash root payload manifest"
+ }
+ 
+-bootstrap_is_current() {
+-    local stored_binary_hash
+-    local stored_privilege_hash
+-    local current_binary_hash
+-    local current_privilege_hash
++manifest_index_for() {
++    local expected="$1"
++    local index
+ 
+-    [ -r "${STATE_FILE}" ] || return 1
+-    [ -r "${ACTIVE_PRIVILEGE}" ] || return 1
++    for index in "${!ROOT_PAYLOAD_PATHS[@]}"; do
++        if [ "${ROOT_PAYLOAD_PATHS[${index}]}" = "${expected}" ]; then
++            printf '%s\n' "${index}"
++            return 0
++        fi
++    done
++    return 1
++}
+ 
+-    [ "$(state_value schema)" = "${STATE_SCHEMA}" ] ||
+-        return 1
++verify_regular_payload_file() {
++    local file="$1"
++    local mode="$2"
++    local digest="$3"
++    local require_root_owner="$4"
++    local observed_mode
++    local observed_digest
++    local links
++    local kind
++
++    [ ! -L "${file}" ] || return 1
++    [ -f "${file}" ] || return 1
++    kind="$(stat -c %F -- "${file}")" || return 1
++    [ "${kind}" = "regular file" ] || return 1
++    links="$(stat -c %h -- "${file}")" || return 1
++    [ "${links}" = "1" ] || return 1
++    observed_mode="$(stat -c %a -- "${file}")" || return 1
++    [ "0${observed_mode}" = "${mode}" ] || return 1
++    observed_digest="$(sha256_file "${file}")" || return 1
++    [ "${observed_digest}" = "${digest}" ] || return 1
++
++    if [ "${require_root_owner}" = "root" ]; then
++        [ "$(stat -c %u -- "${file}")" = "0" ] || return 1
++        [ "$(stat -c %g -- "${file}")" = "0" ] || return 1
++    fi
++}
+ 
+-    [ "$(state_value mode)" = "root" ] ||
+-        return 1
++verify_outer_payload() {
++    local index
++    local relative
++    local file
++
++    for index in "${!ROOT_PAYLOAD_PATHS[@]}"; do
++        relative="${ROOT_PAYLOAD_PATHS[${index}]}"
++        case "${relative}" in
++        target/*)
++            continue
++            ;;
++        esac
++
++        file="${PACKAGE_ROOT}/${relative}"
++        require_trusted_regular_file "${file}" "${ROOT_PAYLOAD_MODES[${index}]#0}"
++        [ "$(sha256_file "${file}")" = "${ROOT_PAYLOAD_DIGESTS[${index}]}" ] ||
++            die "root payload digest mismatch: ${relative}"
++    done
++}
+ 
+-    stored_binary_hash="$(state_value tailscaled_sha256)"
+-    stored_privilege_hash="$(state_value privilege_sha256)"
++directory_is_manifest_parent() {
++    local relative="$1"
++    local path
+ 
+-    [ -n "${stored_binary_hash}" ] || return 1
+-    [ -n "${stored_privilege_hash}" ] || return 1
++    for path in "${ROOT_PAYLOAD_PATHS[@]}"; do
++        case "${path}" in
++        "${relative}"/*)
++            return 0
++            ;;
++        esac
++    done
++    return 1
++}
+ 
+-    current_binary_hash="$(
+-        sha256_file "${PACKAGE_TARGET}/bin/tailscaled"
+-    )" || return 1
++inventory_target_payload() {
++    local owner_requirement="$1"
++    local entry
++    local relative
++    local manifest_path
++    local index
++    local seen=0
++    local expected=0
++    local mode
+ 
+-    current_privilege_hash="$(
+-        sha256_file "${ROOT_TEMPLATE}"
+-    )" || return 1
++    for manifest_path in "${ROOT_PAYLOAD_PATHS[@]}"; do
++        case "${manifest_path}" in
++        target/*)
++            expected=$((expected + 1))
++            ;;
++        esac
++    done
+ 
+-    [ "${stored_binary_hash}" = "${current_binary_hash}" ] ||
+-        return 1
++    while IFS= read -r -d '' entry; do
++        relative="${entry#${RESOLVED_TARGET}/}"
++        manifest_path="target/${relative}"
++        if [ -L "${entry}" ]; then
++            die "target payload contains a symlink: ${manifest_path}"
++        elif [ -d "${entry}" ]; then
++            directory_is_manifest_parent "${manifest_path}" ||
++                die "target payload contains an unmanifested directory: ${manifest_path}"
++            mode="$(stat -c %a -- "${entry}")" ||
++                die "cannot read target directory mode"
++            mode_is_safe "${mode}" ||
++                die "target directory is group or other writable: ${manifest_path}"
++            if [ "${owner_requirement}" = "root" ]; then
++                require_root_identity "${entry}"
++            fi
++        elif [ -f "${entry}" ]; then
++            index="$(manifest_index_for "${manifest_path}")" ||
++                die "target payload contains an unmanifested file: ${manifest_path}"
++            verify_regular_payload_file \
++                "${entry}" \
++                "${ROOT_PAYLOAD_MODES[${index}]}" \
++                "${ROOT_PAYLOAD_DIGESTS[${index}]}" \
++                "${owner_requirement}" ||
++                die "target payload verification failed: ${manifest_path}"
++            seen=$((seen + 1))
++        else
++            die "target payload contains an unsupported object: ${manifest_path}"
++        fi
++    done < <(find "${RESOLVED_TARGET}" -mindepth 1 -print0)
+ 
+-    [ "${stored_privilege_hash}" = "${current_privilege_hash}" ] ||
+-        return 1
++    [ "${seen}" -eq "${expected}" ] ||
++        die "target payload inventory is incomplete"
++}
+ 
+-    cmp -s "${ACTIVE_PRIVILEGE}" "${ROOT_TEMPLATE}" ||
+-        return 1
++verify_promoted_target_payload() {
++    require_root_identity "${RESOLVED_TARGET}"
++    inventory_target_payload root
++}
+ 
+-    return 0
++bootstrap_is_current() {
++    local stored_manifest_hash
++
++    (
++        require_trusted_regular_file "${STATE_FILE}" 644
++        require_trusted_regular_file "${ROOT_PAYLOAD_MANIFEST}" 644
++        validate_trusted_layout
++        [ "$(state_value schema)" = "${STATE_SCHEMA}" ] || exit 1
++        [ "$(state_value mode)" = "root" ] || exit 1
++        stored_manifest_hash="$(state_value manifest_sha256)"
++        [ -n "${stored_manifest_hash}" ] || exit 1
++        [ "${stored_manifest_hash}" = "$(sha256_file "${ROOT_PAYLOAD_MANIFEST}")" ] || exit 1
++        cmp -s "${ACTIVE_PRIVILEGE}" "${ROOT_TEMPLATE}" || exit 1
++        parse_root_payload_manifest
++        verify_outer_payload
++        verify_promoted_target_payload
++    ) >/dev/null 2>&1
+ }
+ 
+ daemon_pid() {
+@@ -274,9 +585,7 @@ daemon_pid() {
+     local actual_executable
+ 
+     [ -r "${PID_FILE}" ] || return 1
+-
+     pid="$(cat -- "${PID_FILE}" 2>/dev/null)" || return 1
+-
+     case "${pid}" in
+     ''|*[!0-9]*)
+         return 1
+@@ -284,18 +593,9 @@ daemon_pid() {
+     esac
+ 
+     [ -d "${PROC_ROOT}/${pid}" ] || return 1
+-
+-    expected_executable="$(
+-        readlink -f -- "${PACKAGE_TARGET}/bin/tailscaled"
+-    )" || return 1
+-
+-    actual_executable="$(
+-        readlink -f -- "${PROC_ROOT}/${pid}/exe"
+-    )" || return 1
+-
+-    [ "${actual_executable}" = "${expected_executable}" ] ||
+-        return 1
+-
++    expected_executable="$(readlink -f -- "${PACKAGE_TARGET}/bin/tailscaled")" || return 1
++    actual_executable="$(readlink -f -- "${PROC_ROOT}/${pid}/exe")" || return 1
++    [ "${actual_executable}" = "${expected_executable}" ] || return 1
+     printf '%s\n' "${pid}"
+ }
+ 
+@@ -307,7 +607,6 @@ daemon_uid() {
+     local pid
+ 
+     pid="$(daemon_pid)" || return 1
+-
+     awk '
+         $1 == "Uid:" {
+             print $2
+@@ -321,15 +620,13 @@ run_synopkg_with_timeout() {
+ 
+     case "${SYNOPKG_TIMEOUT_SECONDS}" in
+     ''|*[!0-9]*|0)
+-        log_message ERROR \
+-            "invalid synopkg timeout: ${SYNOPKG_TIMEOUT_SECONDS}"
++        log_message ERROR "invalid synopkg timeout: ${SYNOPKG_TIMEOUT_SECONDS}"
+         return 2
+         ;;
+     esac
+ 
+     [ -x "${TIMEOUT_BIN}" ] || {
+-        log_message ERROR \
+-            "DSM timeout command is unavailable: ${TIMEOUT_BIN}"
++        log_message ERROR "DSM timeout command is unavailable: ${TIMEOUT_BIN}"
+         return 127
+     }
+ 
+@@ -343,23 +640,16 @@ run_synopkg_with_timeout() {
+ 
+     if [ "${status}" -eq 124 ] ||
+         [ "${status}" -eq 137 ] ||
+-        [ "${status}" -eq 143 ]
+-    then
+-        log_message ERROR \
+-            "synopkg $1 exceeded ${SYNOPKG_TIMEOUT_SECONDS}s"
++        [ "${status}" -eq 143 ]; then
++        log_message ERROR "synopkg $1 exceeded ${SYNOPKG_TIMEOUT_SECONDS}s"
+     fi
+-
+     return "${status}"
+ }
+ 
+ stop_package() {
+     local counter
+ 
+-    if ! run_synopkg_with_timeout \
+-        stop \
+-        "${PACKAGE_NAME}" \
+-        >/dev/null
+-    then
++    if ! run_synopkg_with_timeout stop "${PACKAGE_NAME}" >/dev/null; then
+         die "DSM rejected or timed out the package stop"
+     fi
+ 
+@@ -368,100 +658,168 @@ stop_package() {
+         if ! daemon_running; then
+             return 0
+         fi
+-
+         counter=$((counter - 1))
+         sleep 1
+     done
+-
+     die "tailscaled did not stop"
+ }
+ 
+-create_backup() {
+-    local timestamp
+-
+-    timestamp="$(date +%Y%m%d-%H%M%S)"
+-    BACKUP_DIR="${BACKUP_ROOT}/${timestamp}-$$"
++transaction_root_is_clear() {
++    local entry
+ 
+-    mkdir -p -- "${BACKUP_DIR}" ||
+-        die "cannot create backup directory"
++    if [ ! -e "${TRANSACTION_ROOT}" ] && [ ! -L "${TRANSACTION_ROOT}" ]; then
++        return 0
++    fi
++    require_trusted_directory "${TRANSACTION_ROOT}" 700
++    entry="$(find "${TRANSACTION_ROOT}" -mindepth 1 -maxdepth 1 -print -quit)"
++    [ -z "${entry}" ] ||
++        die "an incomplete bootstrap transaction requires attended recovery: ${entry}"
++}
+ 
+-    cp -p -- \
+-        "${ACTIVE_PRIVILEGE}" \
+-        "${BACKUP_DIR}/privilege" ||
+-        die "cannot back up active privilege file"
++create_transaction() {
++    local state_present=0
+ 
+-    if [ -e "${STATE_FILE}" ]; then
+-        cp -p -- \
+-            "${STATE_FILE}" \
+-            "${BACKUP_DIR}/root-bootstrap.state" ||
++    if [ ! -e "${TRANSACTION_ROOT}" ] && [ ! -L "${TRANSACTION_ROOT}" ]; then
++        mkdir -m 0700 -- "${TRANSACTION_ROOT}" || die "cannot create transaction root"
++        chown root:root "${TRANSACTION_ROOT}" || die "cannot secure transaction root"
++    fi
++    require_trusted_directory "${TRANSACTION_ROOT}" 700
++
++    TRANSACTION_DIR="${TRANSACTION_ROOT}/active-$$"
++    [ ! -e "${TRANSACTION_DIR}" ] && [ ! -L "${TRANSACTION_DIR}" ] ||
++        die "transaction path already exists"
++    mkdir -m 0700 -- "${TRANSACTION_DIR}" || die "cannot create transaction directory"
++    chown root:root "${TRANSACTION_DIR}" || die "cannot secure transaction directory"
++
++    cp -- "${ACTIVE_PRIVILEGE}" "${TRANSACTION_DIR}/privilege" ||
++        die "cannot back up active privilege"
++    chown root:root "${TRANSACTION_DIR}/privilege" || die "cannot secure privilege backup"
++    chmod 0600 "${TRANSACTION_DIR}/privilege" || die "cannot secure privilege backup mode"
++
++    if [ -e "${STATE_FILE}" ] || [ -L "${STATE_FILE}" ]; then
++        require_trusted_regular_file "${STATE_FILE}" 644
++        cp -- "${STATE_FILE}" "${TRANSACTION_DIR}/state" ||
+             die "cannot back up bootstrap state"
++        chown root:root "${TRANSACTION_DIR}/state" || die "cannot secure state backup"
++        chmod 0600 "${TRANSACTION_DIR}/state" || die "cannot secure state backup mode"
++        state_present=1
+     fi
+ 
+-    {
+-        printf 'tailscaled_sha256=%s\n' \
+-            "$(sha256_file "${PACKAGE_TARGET}/bin/tailscaled")"
+-        printf 'active_privilege_sha256=%s\n' \
+-            "$(sha256_file "${ACTIVE_PRIVILEGE}")"
+-    } >"${BACKUP_DIR}/checksums"
++    if cmp -s "${ACTIVE_PRIVILEGE}" "${ROOT_TEMPLATE}"; then
++        PREVIOUS_MODE="root"
++    else
++        PREVIOUS_MODE="package"
++    fi
+ 
+-    chmod 0700 "${BACKUP_DIR}"
++    printf '%s\n' "${state_present}" >"${TRANSACTION_DIR}/state.present"
++    printf '%s\n' "${PREVIOUS_MODE}" >"${TRANSACTION_DIR}/previous-mode"
++    chmod 0600 "${TRANSACTION_DIR}/state.present" "${TRANSACTION_DIR}/previous-mode"
++    chown root:root "${TRANSACTION_DIR}/state.present" "${TRANSACTION_DIR}/previous-mode"
+ }
+ 
+ install_privilege() {
+     local source="$1"
+     local temporary="${ACTIVE_PRIVILEGE}.bootstrap-new.$$"
+ 
+-    cp -- "${source}" "${temporary}" || return 1
+-    chown root:root "${temporary}" || return 1
+-    chmod 0644 "${temporary}" || return 1
+-
+-    mv -f -- "${temporary}" "${ACTIVE_PRIVILEGE}"
++    [ ! -e "${temporary}" ] && [ ! -L "${temporary}" ] || return 1
++    if ! cp -- "${source}" "${temporary}" ||
++        ! chown root:root "${temporary}" ||
++        ! chmod 0644 "${temporary}" ||
++        ! mv -f -- "${temporary}" "${ACTIVE_PRIVILEGE}"; then
++        rm -f -- "${temporary}"
++        return 1
++    fi
+ }
+ 
+ set_target_owner() {
+     local owner="$1"
+     local group="$2"
+-    local target_real
++    local entry
+ 
+-    target_real="$(readlink -f -- "${PACKAGE_TARGET}")" ||
++    [ -n "${RESOLVED_TARGET}" ] && [ -d "${RESOLVED_TARGET}" ] && [ ! -L "${RESOLVED_TARGET}" ] ||
+         return 1
++    while IFS= read -r -d '' entry; do
++        [ ! -L "${entry}" ] || return 1
++        chown "${owner}:${group}" "${entry}" || return 1
++    done < <(find "${RESOLVED_TARGET}" -print0)
++}
+ 
+-    [ -d "${target_real}" ] || return 1
++secure_target_directories() {
++    local directory
++    local mode
+ 
+-    chown -R "${owner}:${group}" "${target_real}"
++    chown root:root "${RESOLVED_TARGET}" || return 1
++    mode="$(stat -c %a -- "${RESOLVED_TARGET}")" || return 1
++    mode_is_safe "${mode}" || return 1
++    while IFS= read -r -d '' directory; do
++        [ ! -L "${directory}" ] || return 1
++        chown root:root "${directory}" || return 1
++        mode="$(stat -c %a -- "${directory}")" || return 1
++        mode_is_safe "${mode}" || return 1
++    done < <(find "${RESOLVED_TARGET}" -mindepth 1 -type d -print0)
+ }
+ 
+-set_target_bootstrap_mode() {
+-    [ -f "${TARGET_BOOTSTRAP}" ] || return 1
+-
+-    chmod 0755 "${TARGET_BOOTSTRAP}"
++promote_target_payload() {
++    local index
++    local relative
++    local file
++    local directory
++
++    secure_target_directories || return 1
++    for index in "${!ROOT_PAYLOAD_PATHS[@]}"; do
++        relative="${ROOT_PAYLOAD_PATHS[${index}]}"
++        case "${relative}" in
++        target/*)
++            ;;
++        *)
++            continue
++            ;;
++        esac
++
++        file="${PACKAGE_ROOT}/${relative}"
++        verify_regular_payload_file \
++            "${file}" \
++            "${ROOT_PAYLOAD_MODES[${index}]}" \
++            "${ROOT_PAYLOAD_DIGESTS[${index}]}" \
++            any || return 1
++        directory="$(dirname -- "${file}")"
++        STAGED_TEMP="${directory}/.tailscale-root-promote.$$-${index}"
++        [ ! -e "${STAGED_TEMP}" ] && [ ! -L "${STAGED_TEMP}" ] || return 1
++
++        (
++            umask 077
++            cp -- "${file}" "${STAGED_TEMP}"
++        ) || return 1
++        chown root:root "${STAGED_TEMP}" || return 1
++        chmod "${ROOT_PAYLOAD_MODES[${index}]}" "${STAGED_TEMP}" || return 1
++        verify_regular_payload_file \
++            "${STAGED_TEMP}" \
++            "${ROOT_PAYLOAD_MODES[${index}]}" \
++            "${ROOT_PAYLOAD_DIGESTS[${index}]}" \
++            root || return 1
++        mv -f -- "${STAGED_TEMP}" "${file}" || return 1
++        STAGED_TEMP=""
++    done
++    verify_promoted_target_payload
+ }
+ 
+ write_state() {
+-    local temporary="${STATE_FILE}.bootstrap-new.$$"
+-    local binary_hash
+-    local privilege_hash
+-
+-    binary_hash="$(
+-        sha256_file "${PACKAGE_TARGET}/bin/tailscaled"
+-    )" || return 1
+-
+-    privilege_hash="$(
+-        sha256_file "${ROOT_TEMPLATE}"
+-    )" || return 1
++    local temporary="${ROOT_CONTROL_DIR}/.root-bootstrap.state.$$"
+ 
+-    {
++    [ ! -e "${temporary}" ] && [ ! -L "${temporary}" ] || return 1
++    if ! {
+         printf 'schema=%s\n' "${STATE_SCHEMA}"
+         printf 'mode=root\n'
+         printf 'package=%s\n' "${PACKAGE_NAME}"
+-        printf 'tailscaled_sha256=%s\n' "${binary_hash}"
+-        printf 'privilege_sha256=%s\n' "${privilege_hash}"
++        printf 'manifest_sha256=%s\n' "${MANIFEST_HASH}"
+         printf 'installed_at=%s\n' "$(date --iso-8601=second)"
+-    } >"${temporary}" || return 1
+-
+-    chown root:root "${temporary}" || return 1
+-    chmod 0644 "${temporary}" || return 1
+-    mv -f -- "${temporary}" "${STATE_FILE}"
++    } >"${temporary}" ||
++        ! chown root:root "${temporary}" ||
++        ! chmod 0644 "${temporary}" ||
++        ! mv -f -- "${temporary}" "${STATE_FILE}"; then
++        rm -f -- "${temporary}"
++        return 1
++    fi
+ }
+ 
+ start_and_verify() {
+@@ -477,156 +835,162 @@ start_and_verify() {
+     while [ "${counter}" -gt 0 ]; do
+         if daemon_running; then
+             uid="$(daemon_uid)" || return 1
+-
+             if [ "${uid}" = "0" ]; then
+                 return 0
+             fi
+-
+-            log_message ERROR \
+-                "tailscaled started with UID ${uid}, expected UID 0"
++            log_message ERROR "tailscaled started with UID ${uid}, expected UID 0"
+             return 1
+         fi
+-
+         counter=$((counter - 1))
+         sleep 1
+     done
+-
+     log_message ERROR "tailscaled did not enter the running state"
+     return 1
+ }
+ 
+-restore_backup() {
+-    local restored_mode="package"
+-
+-    ROLLBACK_ARMED=0
+-
+-    if ! run_synopkg_with_timeout \
+-        stop \
+-        "${PACKAGE_NAME}" \
+-        >/dev/null
+-    then
+-        log_message ERROR \
+-            "cannot stop the package safely during rollback"
+-        return 1
++remove_exact_legacy_state() {
++    if [ -L "${LEGACY_STATE_FILE}" ]; then
++        rm -f -- "${LEGACY_STATE_FILE}"
++    elif [ -e "${LEGACY_STATE_FILE}" ]; then
++        [ -f "${LEGACY_STATE_FILE}" ] || return 1
++        [ "$(stat -c %h -- "${LEGACY_STATE_FILE}")" = "1" ] || return 1
++        rm -f -- "${LEGACY_STATE_FILE}"
+     fi
++}
+ 
+-    if [ -f "${BACKUP_DIR}/privilege" ]; then
+-        install_privilege "${BACKUP_DIR}/privilege" ||
+-            return 1
+-    else
+-        install_privilege "${SAFE_TEMPLATE}" ||
+-            return 1
+-    fi
++cleanup_transaction() {
++    [ -n "${TRANSACTION_DIR}" ] || return 0
++    rm -f -- \
++        "${TRANSACTION_DIR}/privilege" \
++        "${TRANSACTION_DIR}/state" \
++        "${TRANSACTION_DIR}/state.present" \
++        "${TRANSACTION_DIR}/previous-mode" || return 1
++    rmdir -- "${TRANSACTION_DIR}" || return 1
++    TRANSACTION_DIR=""
++}
+ 
+-    if [ -f "${BACKUP_DIR}/root-bootstrap.state" ]; then
+-        cp -p -- \
+-            "${BACKUP_DIR}/root-bootstrap.state" \
+-            "${STATE_FILE}" ||
+-            return 1
+-    else
+-        rm -f -- "${STATE_FILE}"
+-    fi
++restore_transaction() {
++    local state_present
++    local previous_mode
+ 
+-    if cmp -s "${ACTIVE_PRIVILEGE}" "${ROOT_TEMPLATE}"; then
+-        restored_mode="root"
+-    fi
++    trap - EXIT
++    run_synopkg_with_timeout stop "${PACKAGE_NAME}" >/dev/null || return 1
++    require_trusted_regular_file "${TRANSACTION_DIR}/privilege" 600
++    install_privilege "${TRANSACTION_DIR}/privilege" || return 1
++
++    state_present="$(cat -- "${TRANSACTION_DIR}/state.present")" || return 1
++    previous_mode="$(cat -- "${TRANSACTION_DIR}/previous-mode")" || return 1
++    case "${state_present}" in
++    0)
++        rm -f -- "${STATE_FILE}" || return 1
++        ;;
++    1)
++        require_trusted_regular_file "${TRANSACTION_DIR}/state" 600
++        cp -- "${TRANSACTION_DIR}/state" "${STATE_FILE}" || return 1
++        chown root:root "${STATE_FILE}" || return 1
++        chmod 0644 "${STATE_FILE}" || return 1
++        ;;
++    *)
++        return 1
++        ;;
++    esac
+ 
+-    if [ "${restored_mode}" = "root" ]; then
++    case "${previous_mode}" in
++    root)
+         set_target_owner root root || return 1
+-    else
++        ;;
++    package)
+         set_target_owner tailscale tailscale || return 1
+-    fi
+-
+-    set_target_bootstrap_mode || return 1
++        ;;
++    *)
++        return 1
++        ;;
++    esac
+ 
+-    return 0
++    if [ -n "${STAGED_TEMP}" ] &&
++        { [ -e "${STAGED_TEMP}" ] || [ -L "${STAGED_TEMP}" ]; }; then
++        rm -f -- "${STAGED_TEMP}" || return 1
++        STAGED_TEMP=""
++    fi
++    cleanup_transaction || return 1
++    ROLLBACK_ARMED=0
+ }
+ 
+ rollback_on_exit() {
+     local status=$?
+ 
++    trap - EXIT
+     if [ "${ROLLBACK_ARMED}" = "1" ]; then
+-        log_message ERROR \
+-            "bootstrap failed; restoring ${BACKUP_DIR}"
+-
+-        restore_backup ||
+-            log_message ERROR "automatic rollback also failed"
++        log_message ERROR "bootstrap failed; restoring the private transaction"
++        if ! restore_transaction; then
++            log_message ERROR "automatic rollback failed; retained ${TRANSACTION_DIR}"
++        fi
+     fi
+-
+     exit "${status}"
+ }
+ 
+ install_action() {
+     require_root
+-    require_secure_privileged_entrypoint
++    require_outer_mutation_entrypoint
+     validate_dsm
+-    validate_layout
++    validate_trusted_layout
++    transaction_root_is_clear
++    parse_root_payload_manifest
++    verify_outer_payload
++    inventory_target_payload any
+     stop_package
+-    create_backup
+ 
++    parse_root_payload_manifest
++    verify_outer_payload
++    inventory_target_payload any
++    create_transaction
+     ROLLBACK_ARMED=1
+     trap rollback_on_exit EXIT
+ 
+-    install_privilege "${ROOT_TEMPLATE}" ||
+-        die "cannot install root privilege manifest"
+-
+-    set_target_owner root root ||
+-        die "cannot secure the package target as root-owned"
+-
+-    set_target_bootstrap_mode ||
+-        die "cannot set the target bootstrap mode to 0755"
+-
+-    write_state ||
+-        die "cannot write bootstrap state"
+-
+-    bootstrap_is_current ||
+-        die "bootstrap state validation failed"
+-
+-    start_and_verify ||
+-        die "root package startup validation failed"
++    promote_target_payload || die "cannot promote the authenticated target payload"
++    verify_outer_payload
++    verify_promoted_target_payload
++    write_state || die "cannot write bootstrap state"
++    install_privilege "${ROOT_TEMPLATE}" || die "cannot install root privilege manifest"
++    bootstrap_is_current || die "bootstrap state validation failed"
++    start_and_verify || die "root package startup validation failed"
+ 
++    remove_exact_legacy_state || die "cannot remove the exact legacy bootstrap state"
++    cleanup_transaction || die "cannot remove the completed bootstrap transaction"
+     ROLLBACK_ARMED=0
+     trap - EXIT
+-
+     log_message INFO "root runtime bootstrap completed"
+-    log_message INFO "backup stored at ${BACKUP_DIR}"
+ }
+ 
+ remove_action() {
+     require_root
+-    require_secure_privileged_entrypoint
++    require_outer_mutation_entrypoint
+     validate_dsm
+-    validate_layout
++    validate_trusted_layout
++    transaction_root_is_clear
++    parse_root_payload_manifest
++    verify_outer_payload
++    inventory_target_payload root
+     stop_package
+-    create_backup
+-
++    create_transaction
+     ROLLBACK_ARMED=1
+     trap rollback_on_exit EXIT
+ 
+-    install_privilege "${SAFE_TEMPLATE}" ||
+-        die "cannot restore package-user privilege manifest"
+-
+-    set_target_owner tailscale tailscale ||
+-        die "cannot restore package target ownership"
+-
+-    set_target_bootstrap_mode ||
+-        die "cannot restore the target bootstrap mode to 0755"
+-
+-    rm -f -- "${STATE_FILE}"
+-
++    install_privilege "${SAFE_TEMPLATE}" || die "cannot restore package-user privilege manifest"
++    set_target_owner tailscale tailscale || die "cannot restore package target ownership"
++    rm -f -- "${STATE_FILE}" || die "cannot remove bootstrap state"
++    remove_exact_legacy_state || die "cannot remove the exact legacy bootstrap state"
++    cleanup_transaction || die "cannot remove the completed bootstrap transaction"
+     ROLLBACK_ARMED=0
+     trap - EXIT
+-
+     log_message INFO "root runtime permission removed"
+     log_message INFO "the package remains stopped"
+-    log_message INFO "backup stored at ${BACKUP_DIR}"
+ }
+ 
+ status_action() {
+     local uid
+ 
+-    validate_layout
+-
++    validate_status_layout
+     if cmp -s "${ACTIVE_PRIVILEGE}" "${ROOT_TEMPLATE}"; then
+         printf 'Privilege mode: root\n'
+     elif cmp -s "${ACTIVE_PRIVILEGE}" "${SAFE_TEMPLATE}"; then
+@@ -637,7 +1001,7 @@ status_action() {
+ 
+     if bootstrap_is_current; then
+         printf 'Bootstrap state: current\n'
+-    elif [ -e "${STATE_FILE}" ]; then
++    elif [ -e "${STATE_FILE}" ] || [ -L "${STATE_FILE}" ]; then
+         printf 'Bootstrap state: stale\n'
+     else
+         printf 'Bootstrap state: absent\n'
+@@ -667,15 +1031,19 @@ EOF
+ 
+ main() {
+     case "${1:-}" in
+-    install)
+-        install_action
++    install|remove)
++        if source_is_target_bootstrap; then
++            die "mutating bootstrap commands require the root-owned package script: ${OUTER_BOOTSTRAP}"
++        fi
++        if [ "$1" = "install" ]; then
++            install_action
++        else
++            remove_action
++        fi
+         ;;
+     status)
+         status_action
+         ;;
+-    remove)
+-        remove_action
+-        ;;
+     *)
+         usage >&2
+         exit 2
+diff --git a/release/dist/synology/tests/bootstrap-synopkg-path-test.sh b/release/dist/synology/tests/bootstrap-synopkg-path-test.sh
+index 0a0b8229a..8ad4351b1 100755
+--- a/release/dist/synology/tests/bootstrap-synopkg-path-test.sh
++++ b/release/dist/synology/tests/bootstrap-synopkg-path-test.sh
+@@ -58,6 +58,33 @@ test_synopkg_override() {
+         fail "synopkg override was not preserved: ${actual}"
+ }
+ 
++test_root_control_paths() {
++    local package_root="/tmp/tailscale-bootstrap-path-test"
++    local actual
++
++    actual="$(
++        export TAILSCALE_SYNOLOGY_PACKAGE_ROOT="${package_root}"
++
++        # shellcheck disable=SC1090
++        source "${BOOTSTRAP_SOURCE}"
++
++        printf '%s\n' \
++            "${ROOT_PAYLOAD_MANIFEST}" \
++            "${ROOT_CONTROL_DIR}" \
++            "${STATE_FILE}" \
++            "${TRANSACTION_ROOT}" \
++            "${PID_FILE}"
++    )"
++
++    [ "${actual}" = "$(printf '%s\n' \
++        "${package_root}/conf/root-payload.manifest" \
++        "${package_root}/conf/root-control" \
++        "${package_root}/conf/root-control/root-bootstrap.state" \
++        "${package_root}/conf/root-control/transactions" \
++        "${package_root}/var/tailscaled.pid")" ] ||
++        fail "unexpected bootstrap control paths: ${actual}"
++}
++
+ run_case() {
+     local name="$1"
+     local function_name="$2"
+@@ -84,6 +111,10 @@ run_case \
+     "bootstrap preserves explicit synopkg override" \
+     test_synopkg_override
+ 
++run_case \
++    "bootstrap separates trusted control state from package runtime state" \
++    test_root_control_paths
++
+ printf '\nResults: %s passed, %s failed\n' \
+     "${PASS_COUNT}" \
+     "${FAIL_COUNT}"
+diff --git a/release/dist/synology/tests/root-bootstrap-test.sh b/release/dist/synology/tests/root-bootstrap-test.sh
+index 3278adfdb..94142e62e 100755
+--- a/release/dist/synology/tests/root-bootstrap-test.sh
++++ b/release/dist/synology/tests/root-bootstrap-test.sh
+@@ -15,6 +15,16 @@ BOOTSTRAP_SOURCE="${REPO_ROOT}/release/dist/synology/files/scripts/tailscale-syn
+ START_STOP_SOURCE="${REPO_ROOT}/release/dist/synology/files/scripts/start-stop-status"
+ SAFE_SOURCE="${REPO_ROOT}/release/dist/synology/files/privilege-dsm7"
+ ROOT_SOURCE="${REPO_ROOT}/release/dist/synology/files/privilege-dsm7.root"
++RECONCILER_SOURCE="${REPO_ROOT}/release/dist/synology/files/scripts/tailscale-netfilter-reconciler"
++PREUPGRADE_SOURCE="${REPO_ROOT}/release/dist/synology/files/scripts/preupgrade"
++POSTUPGRADE_SOURCE="${REPO_ROOT}/release/dist/synology/files/scripts/postupgrade"
++RESOURCE_SOURCE="${REPO_ROOT}/release/dist/synology/files/resource"
++PKG_DEPS_SOURCE="${REPO_ROOT}/release/dist/synology/files/PKG_DEPS"
++TAILSCALE_SC_SOURCE="${REPO_ROOT}/release/dist/synology/files/Tailscale.sc"
++LOGROTATE_SOURCE="${REPO_ROOT}/release/dist/synology/files/logrotate-dsm7"
++ICON_SOURCE="${REPO_ROOT}/release/dist/synology/files/PACKAGE_ICON_256.PNG"
++CONFIG_SOURCE="${REPO_ROOT}/release/dist/synology/files/config"
++INDEX_SOURCE="${REPO_ROOT}/release/dist/synology/files/index.cgi"
+ TEST_ROOT="$(mktemp -d)"
+ PASS_COUNT=0
+ FAIL_COUNT=0
+@@ -29,7 +39,17 @@ for required_file in \
+   "${BOOTSTRAP_SOURCE}" \
+   "${START_STOP_SOURCE}" \
+   "${SAFE_SOURCE}" \
+-  "${ROOT_SOURCE}"; do
++  "${ROOT_SOURCE}" \
++  "${RECONCILER_SOURCE}" \
++  "${PREUPGRADE_SOURCE}" \
++  "${POSTUPGRADE_SOURCE}" \
++  "${RESOURCE_SOURCE}" \
++  "${PKG_DEPS_SOURCE}" \
++  "${TAILSCALE_SC_SOURCE}" \
++  "${LOGROTATE_SOURCE}" \
++  "${ICON_SOURCE}" \
++  "${CONFIG_SOURCE}" \
++  "${INDEX_SOURCE}"; do
+ 
+   if [ ! -f "${required_file}" ]; then
+     printf 'ERROR: required test input is missing: %s\n' \
+@@ -92,6 +112,56 @@ assert_files_equal() {
+     fail "files differ: ${first} and ${second}"
+ }
+ 
++assert_directory_empty() {
++  local path="$1"
++
++  [ -d "${path}" ] || fail "expected directory to exist: ${path}"
++
++  if find "${path}" -mindepth 1 -print -quit | grep -q .; then
++    fail "expected directory to be empty: ${path}"
++  fi
++}
++
++manifest_record() {
++  local mode="$1"
++  local relative="$2"
++  local absolute="$3"
++
++  printf 'file %s %s %s\n' \
++    "${mode}" \
++    "$(sha256sum "${absolute}" | awk '{print $1}')" \
++    "${relative}"
++}
++
++write_fixture_manifest() {
++  local records="${CASE_ROOT}/manifest-records"
++
++  {
++    manifest_record 0644 conf/PKG_DEPS "${PACKAGE_ROOT}/conf/PKG_DEPS"
++    manifest_record 0644 conf/privilege.bootstrap-package "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
++    manifest_record 0644 conf/privilege.bootstrap-root "${PACKAGE_ROOT}/conf/privilege.bootstrap-root"
++    manifest_record 0600 conf/resource "${PACKAGE_ROOT}/conf/resource"
++    manifest_record 0755 scripts/postupgrade "${PACKAGE_ROOT}/scripts/postupgrade"
++    manifest_record 0755 scripts/preupgrade "${PACKAGE_ROOT}/scripts/preupgrade"
++    manifest_record 0755 scripts/start-stop-status "${PACKAGE_ROOT}/scripts/start-stop-status"
++    manifest_record 0755 scripts/tailscale-netfilter-reconciler "${PACKAGE_ROOT}/scripts/tailscale-netfilter-reconciler"
++    manifest_record 0755 scripts/tailscale-synology-bootstrap "${PACKAGE_ROOT}/scripts/tailscale-synology-bootstrap"
++    manifest_record 0755 target/bin/tailscale "${TARGET_REAL}/bin/tailscale"
++    manifest_record 0755 target/bin/tailscale-synology-bootstrap "${TARGET_REAL}/bin/tailscale-synology-bootstrap"
++    manifest_record 0755 target/bin/tailscaled "${TARGET_REAL}/bin/tailscaled"
++    manifest_record 0644 target/conf/Tailscale.sc "${TARGET_REAL}/conf/Tailscale.sc"
++    manifest_record 0644 target/conf/logrotate.conf "${TARGET_REAL}/conf/logrotate.conf"
++    manifest_record 0644 target/ui/PACKAGE_ICON_256.PNG "${TARGET_REAL}/ui/PACKAGE_ICON_256.PNG"
++    manifest_record 0644 target/ui/config "${TARGET_REAL}/ui/config"
++    manifest_record 0755 target/ui/index.cgi "${TARGET_REAL}/ui/index.cgi"
++  } >"${records}"
++
++  {
++    printf 'tailscale-synology-root-payload-v1\n'
++    sort -k4,4 "${records}"
++  } >"${PACKAGE_ROOT}/conf/root-payload.manifest"
++}
++
+ setup_fixture() {
+   CASE_ROOT="${TEST_ROOT}/case"
+ 
+@@ -106,12 +176,26 @@ setup_fixture() {
+ 
+   mkdir -p \
+     "${PACKAGE_ROOT}/conf" \
++    "${PACKAGE_ROOT}/conf/root-control" \
+     "${PACKAGE_ROOT}/scripts" \
+     "${PACKAGE_ROOT}/var" \
+     "${TARGET_REAL}/bin" \
++    "${TARGET_REAL}/conf" \
++    "${TARGET_REAL}/ui" \
+     "${FAKE_PROC_ROOT}" \
+     "${MOCK_BIN}"
+ 
++  chmod 0700 "${CASE_ROOT}"
++  chmod 0755 \
++    "${PACKAGE_ROOT}" \
++    "${PACKAGE_ROOT}/conf" \
++    "${PACKAGE_ROOT}/scripts" \
++    "${PACKAGE_ROOT}/var" \
++    "${TARGET_REAL}" \
++    "${TARGET_REAL}/bin" \
++    "${TARGET_REAL}/conf" \
++    "${TARGET_REAL}/ui"
++
+   ln -s "${TARGET_REAL}" "${PACKAGE_ROOT}/target"
+ 
+   cp -- \
+@@ -130,6 +214,13 @@ setup_fixture() {
+     "${BOOTSTRAP_SOURCE}" \
+     "${PACKAGE_ROOT}/scripts/tailscale-synology-bootstrap"
+ 
++  cp -- "${START_STOP_SOURCE}" "${PACKAGE_ROOT}/scripts/start-stop-status"
++  cp -- "${RECONCILER_SOURCE}" "${PACKAGE_ROOT}/scripts/tailscale-netfilter-reconciler"
++  cp -- "${PREUPGRADE_SOURCE}" "${PACKAGE_ROOT}/scripts/preupgrade"
++  cp -- "${POSTUPGRADE_SOURCE}" "${PACKAGE_ROOT}/scripts/postupgrade"
++  cp -- "${RESOURCE_SOURCE}" "${PACKAGE_ROOT}/conf/resource"
++  cp -- "${PKG_DEPS_SOURCE}" "${PACKAGE_ROOT}/conf/PKG_DEPS"
++
+   cp -- \
+     "${BOOTSTRAP_SOURCE}" \
+     "${TARGET_REAL}/bin/tailscale-synology-bootstrap"
+@@ -139,17 +230,46 @@ setup_fixture() {
+ exit 0
+ TAILSCALED
+ 
++  cat >"${TARGET_REAL}/bin/tailscale" <<'TAILSCALE'
++#!/bin/sh
++exit 0
++TAILSCALE
++
++  cp -- "${TAILSCALE_SC_SOURCE}" "${TARGET_REAL}/conf/Tailscale.sc"
++  cp -- "${LOGROTATE_SOURCE}" "${TARGET_REAL}/conf/logrotate.conf"
++  cp -- "${ICON_SOURCE}" "${TARGET_REAL}/ui/PACKAGE_ICON_256.PNG"
++  cp -- "${CONFIG_SOURCE}" "${TARGET_REAL}/ui/config"
++  cp -- "${INDEX_SOURCE}" "${TARGET_REAL}/ui/index.cgi"
++
+   chmod 0644 \
+     "${PACKAGE_ROOT}/conf/privilege" \
++    "${PACKAGE_ROOT}/conf/PKG_DEPS" \
+     "${PACKAGE_ROOT}/conf/privilege.bootstrap-package" \
+-    "${PACKAGE_ROOT}/conf/privilege.bootstrap-root"
++    "${PACKAGE_ROOT}/conf/privilege.bootstrap-root" \
++    "${TARGET_REAL}/conf/Tailscale.sc" \
++    "${TARGET_REAL}/conf/logrotate.conf" \
++    "${TARGET_REAL}/ui/PACKAGE_ICON_256.PNG" \
++    "${TARGET_REAL}/ui/config"
+ 
+-  chmod 0700 \
++  chmod 0600 "${PACKAGE_ROOT}/conf/resource"
++
++  chmod 0755 \
++    "${PACKAGE_ROOT}/scripts/start-stop-status" \
++    "${PACKAGE_ROOT}/scripts/tailscale-netfilter-reconciler" \
++    "${PACKAGE_ROOT}/scripts/preupgrade" \
++    "${PACKAGE_ROOT}/scripts/postupgrade" \
+     "${PACKAGE_ROOT}/scripts/tailscale-synology-bootstrap"
+ 
+   chmod 0755 \
++    "${TARGET_REAL}/bin/tailscale" \
+     "${TARGET_REAL}/bin/tailscaled" \
+-    "${TARGET_REAL}/bin/tailscale-synology-bootstrap"
++    "${TARGET_REAL}/bin/tailscale-synology-bootstrap" \
++    "${TARGET_REAL}/ui/index.cgi"
++
++  chmod 0755 "${PACKAGE_ROOT}/conf/root-control"
++
++  write_fixture_manifest
++  chmod 0644 "${PACKAGE_ROOT}/conf/root-payload.manifest"
+ 
+   : >"${CHOWN_LOG}"
+ 
+@@ -248,6 +368,7 @@ SYNOPKG
+   export TAILSCALE_SYNOLOGY_SYNOPKG="${MOCK_SYNOPKG}"
+   export TAILSCALE_SYNOLOGY_TEST_MODE=1
+   export TAILSCALE_SYNOLOGY_PROC_ROOT="${FAKE_PROC_ROOT}"
++  export TAILSCALE_SYNOLOGY_TARGET_ANCESTOR_STOP="${CASE_ROOT}"
+ }
+ 
+ install_command_mocks() {
+@@ -264,7 +385,12 @@ install_command_mocks() {
+ 
+   stat() {
+     if [ "${1:-}" = "-c" ] &&
+-      [ "${2:-}" = "%u" ]; then
++      { [ "${2:-}" = "%u" ] || [ "${2:-}" = "%g" ]; }; then
++      if [ "${2:-}" = "%g" ]; then
++        printf '0\n'
++        return 0
++      fi
++
+       if [ "${3:-}" = "--" ] &&
+         { [ "${4:-}" = "${TARGET_REAL}/bin/tailscale-synology-bootstrap" ] ||
+           [ "${4:-}" = "${PACKAGE_ROOT}/target/bin/tailscale-synology-bootstrap" ]; }; then
+@@ -357,7 +483,7 @@ perform_successful_install() {
+     "${PACKAGE_ROOT}/conf/privilege" \
+     "${PACKAGE_ROOT}/conf/privilege.bootstrap-root"
+ 
+-  if [ ! -f "${PACKAGE_ROOT}/var/root-bootstrap.state" ]; then
++  if [ ! -f "${PACKAGE_ROOT}/conf/root-control/root-bootstrap.state" ]; then
+     fail "bootstrap state was not created"
+   fi
+ }
+@@ -407,7 +533,7 @@ test_non_root_install_rejected() {
+     "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
+ 
+   assert_file_absent \
+-    "${PACKAGE_ROOT}/var/root-bootstrap.state"
++    "${PACKAGE_ROOT}/conf/root-control/root-bootstrap.state"
+ }
+ 
+ test_invalid_root_template_rejected() {
+@@ -432,7 +558,7 @@ INVALID
+     "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
+ 
+   assert_file_absent \
+-    "${PACKAGE_ROOT}/var/root-bootstrap.state"
++    "${PACKAGE_ROOT}/conf/root-control/root-bootstrap.state"
+ }
+ 
+ test_insecure_bootstrap_script_rejected() {
+@@ -462,7 +588,7 @@ test_successful_root_install() {
+   assert_contains "${CAPTURED_OUTPUT}" "Runtime: running, UID=0"
+ }
+ 
+-test_package_owned_target_cannot_install_root_runtime() {
++test_target_entrypoint_is_status_only() {
+   setup_fixture
+ 
+   MOCK_TARGET_BOOTSTRAP_UID=1024
+@@ -473,67 +599,184 @@ test_package_owned_target_cannot_install_root_runtime() {
+     fail "target fixture recorded an unexpected bootstrap source: ${BOOTSTRAP_SOURCE_PATH}"
+   fi
+ 
++  capture_main status
++
++  assert_status 0 "${CAPTURED_STATUS}"
++  assert_contains "${CAPTURED_OUTPUT}" "Privilege mode: package"
++
+   capture_main install
+ 
+   assert_nonzero_status "${CAPTURED_STATUS}"
+   assert_contains \
+     "${CAPTURED_OUTPUT}" \
+-    "initial root bootstrap must use the root-owned package script"
++    "mutating bootstrap commands require the root-owned package script"
++
++  capture_main remove
++
++  assert_nonzero_status "${CAPTURED_STATUS}"
++  assert_contains \
++    "${CAPTURED_OUTPUT}" \
++    "mutating bootstrap commands require the root-owned package script"
+ 
+   assert_files_equal \
+     "${PACKAGE_ROOT}/conf/privilege" \
+     "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
+ 
+   assert_file_absent \
+-    "${PACKAGE_ROOT}/var/root-bootstrap.state"
++    "${PACKAGE_ROOT}/conf/root-control/root-bootstrap.state"
+ }
+ 
+-test_state_hashes() {
+-  local state_binary_hash
+-  local state_privilege_hash
+-  local expected_binary_hash
+-  local expected_privilege_hash
++test_state_records_manifest_hash() {
++  local state_manifest_hash
++  local expected_manifest_hash
+ 
+   perform_successful_install
+ 
+-  state_binary_hash="$(
+-    awk -F= '
+-            $1 == "tailscaled_sha256" {
+-                print $2
+-                exit
+-            }
+-        ' "${PACKAGE_ROOT}/var/root-bootstrap.state"
+-  )"
+-
+-  state_privilege_hash="$(
++  state_manifest_hash="$(
+     awk -F= '
+-            $1 == "privilege_sha256" {
++            $1 == "manifest_sha256" {
+                 print $2
+                 exit
+             }
+-        ' "${PACKAGE_ROOT}/var/root-bootstrap.state"
+-  )"
+-
+-  expected_binary_hash="$(
+-    sha256sum "${TARGET_REAL}/bin/tailscaled" |
+-      awk '{print $1}'
++        ' "${PACKAGE_ROOT}/conf/root-control/root-bootstrap.state"
+   )"
+ 
+-  expected_privilege_hash="$(
+-    sha256sum \
+-      "${PACKAGE_ROOT}/conf/privilege.bootstrap-root" |
++  expected_manifest_hash="$(
++    sha256sum "${PACKAGE_ROOT}/conf/root-payload.manifest" |
+       awk '{print $1}'
+   )"
+ 
+-  if [ "${state_binary_hash}" != "${expected_binary_hash}" ]; then
+-    fail "stored tailscaled hash is incorrect"
++  if [ "${state_manifest_hash}" != "${expected_manifest_hash}" ]; then
++    fail "stored root payload manifest hash is incorrect"
+   fi
++}
++
++test_manifest_mismatch_fails_before_privilege_change() {
++  setup_fixture
++  load_bootstrap
++
++  printf 'tampered\n' >>"${TARGET_REAL}/bin/tailscaled"
+ 
+-  if [ "${state_privilege_hash}" != "${expected_privilege_hash}" ]; then
+-    fail "stored root privilege hash is incorrect"
++  capture_main install
++
++  assert_nonzero_status "${CAPTURED_STATUS}"
++  assert_files_equal \
++    "${PACKAGE_ROOT}/conf/privilege" \
++    "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
++  assert_file_absent \
++    "${PACKAGE_ROOT}/conf/root-control/root-bootstrap.state"
++}
++
++test_unmanifested_target_file_is_rejected() {
++  setup_fixture
++  load_bootstrap
++
++  printf 'unexpected\n' >"${TARGET_REAL}/bin/unmanifested"
++  chmod 0755 "${TARGET_REAL}/bin/unmanifested"
++
++  capture_main install
++
++  assert_nonzero_status "${CAPTURED_STATUS}"
++  assert_files_equal \
++    "${PACKAGE_ROOT}/conf/privilege" \
++    "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
++}
++
++test_trusted_symlink_and_hardlink_are_rejected() {
++  setup_fixture
++  load_bootstrap
++
++  rm -f "${TARGET_REAL}/bin/tailscale"
++  ln -s tailscaled "${TARGET_REAL}/bin/tailscale"
++
++  capture_main install
++
++  assert_nonzero_status "${CAPTURED_STATUS}"
++  assert_files_equal \
++    "${PACKAGE_ROOT}/conf/privilege" \
++    "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
++
++  setup_fixture
++  load_bootstrap
++
++  rm -f "${TARGET_REAL}/bin/tailscale"
++  ln "${TARGET_REAL}/bin/tailscaled" "${TARGET_REAL}/bin/tailscale"
++
++  capture_main install
++
++  assert_nonzero_status "${CAPTURED_STATUS}"
++  assert_files_equal \
++    "${PACKAGE_ROOT}/conf/privilege" \
++    "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
++}
++
++test_open_writer_cannot_change_promoted_target() {
++  local expected_hash
++  local writer_fd
++
++  setup_fixture
++  load_bootstrap
++
++  expected_hash="$(sha256sum "${TARGET_REAL}/bin/tailscaled" | awk '{print $1}')"
++  exec {writer_fd}>>"${TARGET_REAL}/bin/tailscaled"
++
++  capture_main install
++  assert_status 0 "${CAPTURED_STATUS}"
++
++  printf 'write-through-old-inode\n' >&"${writer_fd}"
++  exec {writer_fd}>&-
++
++  if [ "$(sha256sum "${TARGET_REAL}/bin/tailscaled" | awk '{print $1}')" != "${expected_hash}" ]; then
++    fail "open writer changed the promoted target inode"
+   fi
+ }
+ 
++test_privilege_is_installed_after_final_target_verification() {
++  setup_fixture
++  load_bootstrap
++
++  verify_promoted_target_payload() {
++    assert_files_equal \
++      "${PACKAGE_ROOT}/conf/privilege" \
++      "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
++    return 1
++  }
++
++  capture_main install
++
++  assert_nonzero_status "${CAPTURED_STATUS}"
++  assert_files_equal \
++    "${PACKAGE_ROOT}/conf/privilege" \
++    "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
++}
++
++test_success_removes_private_transaction() {
++  perform_successful_install
++
++  assert_directory_empty \
++    "${PACKAGE_ROOT}/conf/root-control/transactions"
++}
++
++test_legacy_state_is_not_trusted() {
++  setup_fixture
++  load_bootstrap
++
++  cat >"${PACKAGE_ROOT}/var/root-bootstrap.state" <<'LEGACY'
++schema=1
++mode=root
++tailscaled_sha256=legacy
++privilege_sha256=legacy
++LEGACY
++
++  capture_main status
++  assert_status 0 "${CAPTURED_STATUS}"
++  assert_contains "${CAPTURED_OUTPUT}" "Bootstrap state: absent"
++
++  capture_main install
++  assert_status 0 "${CAPTURED_STATUS}"
++  assert_file_absent "${PACKAGE_ROOT}/var/root-bootstrap.state"
++}
++
+ test_stale_binary_rejected_by_startup_gate() {
+   perform_successful_install
+   load_start_stop_definitions
+@@ -611,7 +854,7 @@ test_non_root_daemon_rolls_back() {
+     "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
+ 
+   assert_file_absent \
+-    "${PACKAGE_ROOT}/var/root-bootstrap.state"
++    "${PACKAGE_ROOT}/conf/root-control/root-bootstrap.state"
+ 
+   assert_file_absent \
+     "${PACKAGE_ROOT}/var/tailscaled.pid"
+@@ -663,7 +906,7 @@ test_failed_start_rolls_back() {
+     "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
+ 
+   assert_file_absent \
+-    "${PACKAGE_ROOT}/var/root-bootstrap.state"
++    "${PACKAGE_ROOT}/conf/root-control/root-bootstrap.state"
+ }
+ 
+ test_hung_package_start_times_out_and_rolls_back() {
+@@ -692,7 +935,7 @@ test_hung_package_start_times_out_and_rolls_back() {
+     "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
+ 
+   assert_file_absent \
+-    "${PACKAGE_ROOT}/var/root-bootstrap.state"
++    "${PACKAGE_ROOT}/conf/root-control/root-bootstrap.state"
+ }
+ 
+ test_hung_package_stop_aborts_before_mutation() {
+@@ -724,7 +967,7 @@ test_hung_package_stop_aborts_before_mutation() {
+     "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
+ 
+   assert_file_absent \
+-    "${PACKAGE_ROOT}/var/root-bootstrap.state"
++    "${PACKAGE_ROOT}/conf/root-control/root-bootstrap.state"
+ }
+ 
+ test_remove_restores_safe_state() {
+@@ -743,21 +986,20 @@ test_remove_restores_safe_state() {
+     "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
+ 
+   assert_file_absent \
+-    "${PACKAGE_ROOT}/var/root-bootstrap.state"
++    "${PACKAGE_ROOT}/conf/root-control/root-bootstrap.state"
+ 
+   assert_file_absent \
+     "${PACKAGE_ROOT}/var/tailscaled.pid"
+ 
+   grep -F -- \
+-    "-R tailscale:tailscale" \
++    "tailscale:tailscale ${TARGET_REAL}" \
+     "${CHOWN_LOG}" >/dev/null ||
+     fail "remove did not request restoration to tailscale ownership"
+ 
+-  if grep -F -- \
+-    "root:root ${PACKAGE_ROOT}/target/bin/tailscale-synology-bootstrap" \
+-    "${CHOWN_LOG}" >/dev/null; then
+-    fail "remove unexpectedly preserved privileged target-bootstrap ownership"
+-  fi
++  grep -F -- \
++    "tailscale:tailscale ${TARGET_REAL}/bin/tailscale-synology-bootstrap" \
++    "${CHOWN_LOG}" >/dev/null ||
++    fail "remove did not restore target-bootstrap ownership"
+ 
+   if [ "$(stat -c %a "${TARGET_REAL}/bin/tailscale-synology-bootstrap")" != "755" ]; then
+     fail "target bootstrap mode was not restored to 0755"
+@@ -808,12 +1050,40 @@ run_case \
+   test_successful_root_install
+ 
+ run_case \
+-  "package-owned target cannot install root runtime" \
+-  test_package_owned_target_cannot_install_root_runtime
++  "target entrypoint is status-only" \
++  test_target_entrypoint_is_status_only
++
++run_case \
++  "state records the payload manifest hash" \
++  test_state_records_manifest_hash
++
++run_case \
++  "manifest mismatch fails before privilege change" \
++  test_manifest_mismatch_fails_before_privilege_change
++
++run_case \
++  "unmanifested target file is rejected" \
++  test_unmanifested_target_file_is_rejected
++
++run_case \
++  "trusted symlink and hardlink substitutions are rejected" \
++  test_trusted_symlink_and_hardlink_are_rejected
++
++run_case \
++  "open writer cannot change promoted target" \
++  test_open_writer_cannot_change_promoted_target
++
++run_case \
++  "privilege activation follows final target verification" \
++  test_privilege_is_installed_after_final_target_verification
++
++run_case \
++  "successful bootstrap removes its private transaction" \
++  test_success_removes_private_transaction
+ 
+ run_case \
+-  "state hashes match installed artifacts" \
+-  test_state_hashes
++  "legacy r2 state is not trusted" \
++  test_legacy_state_is_not_trusted
+ 
+ run_case \
+   "stale binary is rejected by startup gate" \
+-- 
+2.53.0
+

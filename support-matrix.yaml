@@ -19,7 +19,7 @@ platforms:
       ipv4_netfilter: passed
       ipv6_netfilter: passed
 
-  - status: production
+  - status: published
     model: DS920+
     synology_platform: geminilake
     package_arch: x86_64
@@ -34,6 +34,25 @@ platforms:
       controlled_restart: passed
       tun_reconstruction: passed
       reboot: not_repeated_ci_only
+      ipv4_netfilter: passed
+      ipv6_netfilter: passed
+
+  - status: unpublished-accepted
+    model: DS920+
+    synology_platform: geminilake
+    package_arch: x86_64
+    dsm_min_version: 7.3-86009
+    tested_dsm_version: 7.4.1-90080
+    upstream_version: v1.98.9
+    downstream_package_version: 1.98.96-700098098
+    release_branch: release/v1.98.9-r3-synology
+    downstream_commit: f49613eccf9350583cc328183f192a591cd76348
+    netfilter_package_min_version: 1.1.0-2
+    validation:
+      bootstrap_resource_boundary: passed
+      controlled_restart: passed
+      reboot: passed_attended
+      tun_reconstruction: passed
       ipv4_netfilter: passed
       ipv6_netfilter: passed
 

@@ -1,0 +1,204 @@
+From c956b939a7455f15a15c640c8cd47ca3c21c9a4d Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Fri, 28 Aug 2026 20:56:08 +1000
+Subject: [PATCH 5/7] fix: authenticate Synology package variants
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ release/dist/synology/pkgs.go         | 22 +++++----
+ release/dist/synology/pkgs_test.go    | 64 ++++++++++++++++++++++++++-
+ tool/build-synology-root-bootstrap.sh |  6 +++
+ 3 files changed, 81 insertions(+), 11 deletions(-)
+
+diff --git a/release/dist/synology/pkgs.go b/release/dist/synology/pkgs.go
+index 7e724e597..3c52ca6cd 100644
+--- a/release/dist/synology/pkgs.go
++++ b/release/dist/synology/pkgs.go
+@@ -115,20 +115,20 @@ func (t *target) buildSPK(b *dist.Build, inner *innerPkg) ([]string, error) {
+ 		return nil, errors.New("syno version exceeds int32 range")
+ 	}
+ 
++	privFile := fmt.Sprintf("privilege-dsm%d", t.dsmMajorVersion)
++	if t.packageCenter && t.dsmMajorVersion == 7 {
++		privFile += ".for-package-center"
++	}
++
+ 	var rootPayloadManifest []byte
+ 	var err error
+ 	if t.dsmMajorVersion == 7 {
+-		rootPayloadManifest, err = buildRootPayloadManifest(inner.path, t.dsmMajorVersion)
++		rootPayloadManifest, err = buildRootPayloadManifest(inner.path, t.dsmMajorVersion, privFile)
+ 		if err != nil {
+ 			return nil, fmt.Errorf("building root payload manifest: %w", err)
+ 		}
+ 	}
+ 
+-	privFile := fmt.Sprintf("privilege-dsm%d", t.dsmMajorVersion)
+-	if t.packageCenter && t.dsmMajorVersion == 7 {
+-		privFile += ".for-package-center"
+-	}
+-
+ 	f, err := os.Create(out)
+ 	if err != nil {
+ 		return nil, err
+@@ -150,7 +150,7 @@ func (t *target) buildSPK(b *dist.Build, inner *innerPkg) ([]string, error) {
+ 	if t.dsmMajorVersion == 7 {
+ 		entries = append(entries,
+ 			static("PKG_DEPS", "conf/PKG_DEPS", 0644),
+-			static("privilege-dsm7", "conf/privilege.bootstrap-package", 0644),
++			static(privFile, "conf/privilege.bootstrap-package", 0644),
+ 			static("privilege-dsm7.root", "conf/privilege.bootstrap-root", 0644),
+ 			memFile("conf/root-payload.manifest", rootPayloadManifest, 0644),
+ 			dir("conf/root-control"),
+@@ -205,7 +205,7 @@ func (t *target) buildSPK(b *dist.Build, inner *innerPkg) ([]string, error) {
+ 	return files, nil
+ }
+ 
+-func buildRootPayloadManifest(innerPath string, dsmVersion int) ([]byte, error) {
++func buildRootPayloadManifest(innerPath string, dsmVersion int, packagePrivilegeFile string) ([]byte, error) {
+ 	if dsmVersion != 7 {
+ 		return nil, fmt.Errorf("root payload manifest is unsupported for DSM %d", dsmVersion)
+ 	}
+@@ -267,7 +267,11 @@ func buildRootPayloadManifest(innerPath string, dsmVersion int) ([]byte, error)
+ 	}
+ 
+ 	for _, file := range rootPayloadOuterFiles {
+-		data, err := files.ReadFile("files/" + file.source)
++		source := file.source
++		if file.path == "conf/privilege.bootstrap-package" {
++			source = packagePrivilegeFile
++		}
++		data, err := files.ReadFile("files/" + source)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+diff --git a/release/dist/synology/pkgs_test.go b/release/dist/synology/pkgs_test.go
+index 65cff0cae..9fbb3922d 100644
+--- a/release/dist/synology/pkgs_test.go
++++ b/release/dist/synology/pkgs_test.go
+@@ -85,7 +85,7 @@ func TestRootPayloadManifestIsCompleteAndDeterministic(t *testing.T) {
+ 		testTarMember{name: "bin/tailscaled", mode: 0755, data: tailscaled},
+ 	)
+ 
+-	manifest, err := buildRootPayloadManifest(inner, 7)
++	manifest, err := buildRootPayloadManifest(inner, 7, "privilege-dsm7")
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+@@ -146,7 +146,7 @@ func TestRootPayloadManifestRejectsUnsafeInnerMembers(t *testing.T) {
+ 	for name, members := range tests {
+ 		t.Run(name, func(t *testing.T) {
+ 			inner := writeTestInnerPackage(t, members...)
+-			if _, err := buildRootPayloadManifest(inner, 7); err == nil {
++			if _, err := buildRootPayloadManifest(inner, 7, "privilege-dsm7"); err == nil {
+ 				t.Fatal("unsafe inner package member was accepted")
+ 			}
+ 		})
+@@ -199,6 +199,66 @@ func TestDSM7SPKContainsRootControlManifest(t *testing.T) {
+ 	}
+ }
+ 
++func TestDSM7PackageModeTemplateMatchesActivePrivilege(t *testing.T) {
++	innerPath := writeTestInnerPackage(t,
++		testTarMember{name: "bin/tailscale", mode: 0755, data: []byte("cli\n")},
++		testTarMember{name: "bin/tailscaled", mode: 0755, data: []byte("daemon\n")},
++	)
++	tests := []struct {
++		name   string
++		target target
++	}{
++		{"sideload", target{filenameArch: "x86_64", dsmMajorVersion: 7}},
++		{"package-center", target{filenameArch: "x86_64", dsmMajorVersion: 7, dsmMinorVersion: 2, packageCenter: true}},
++	}
++
++	for _, test := range tests {
++		t.Run(test.name, func(t *testing.T) {
++			build := r3TestBuild()
++			build.Out = t.TempDir()
++			files, err := test.target.buildSPK(build, &innerPkg{path: innerPath})
++			if err != nil {
++				t.Fatal(err)
++			}
++
++			archive, err := os.Open(files[0])
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer archive.Close()
++
++			members := map[string][]byte{}
++			reader := tar.NewReader(archive)
++			for {
++				header, err := reader.Next()
++				if err == io.EOF {
++					break
++				}
++				if err != nil {
++					t.Fatal(err)
++				}
++				switch header.Name {
++				case "conf/privilege", "conf/privilege.bootstrap-package", "conf/root-payload.manifest":
++					members[header.Name], err = io.ReadAll(reader)
++					if err != nil {
++						t.Fatal(err)
++					}
++				}
++			}
++
++			active := members["conf/privilege"]
++			safe := members["conf/privilege.bootstrap-package"]
++			if !bytes.Equal(active, safe) {
++				t.Fatal("active package privilege differs from immutable safe template")
++			}
++			wantRecord := manifestLine(0644, "conf/privilege.bootstrap-package", safe)
++			if !strings.Contains(string(members["conf/root-payload.manifest"]), wantRecord+"\n") {
++				t.Fatalf("root payload manifest does not authenticate selected safe template: %s", wantRecord)
++			}
++		})
++	}
++}
++
+ func TestDSM7InnerStaticEntriesIncludeBootstrap(t *testing.T) {
+ 	var buf bytes.Buffer
+ 	tw := tar.NewWriter(&buf)
+diff --git a/tool/build-synology-root-bootstrap.sh b/tool/build-synology-root-bootstrap.sh
+index 51cbc07ba..1d7385c80 100755
+--- a/tool/build-synology-root-bootstrap.sh
++++ b/tool/build-synology-root-bootstrap.sh
+@@ -315,6 +315,7 @@ python3 - \
+     "${SIDE}/conf/privilege.bootstrap-package" \
+     "${SIDE}/conf/privilege.bootstrap-root" \
+     "${CENTER}/conf/privilege" \
++    "${CENTER}/conf/privilege.bootstrap-package" \
+     "${SIDE}/conf/resource" \
+     "${SIDE}/package.tgz" \
+     "${SIDE}/scripts/tailscale-synology-bootstrap" <<'PYJSON'
+@@ -328,6 +329,7 @@ from pathlib import Path
+     safe_template_path,
+     root_template_path,
+     package_center_path,
++    package_center_safe_template_path,
+     resource_path,
+     inner_package_path,
+     outer_bootstrap_path,
+@@ -337,6 +339,9 @@ active_sideload = json.loads(active_sideload_path.read_text())
+ safe_template = json.loads(safe_template_path.read_text())
+ root_template = json.loads(root_template_path.read_text())
+ package_center = json.loads(package_center_path.read_text())
++package_center_safe_template = json.loads(
++    package_center_safe_template_path.read_text()
++)
+ resource = json.loads(resource_path.read_text())
+ 
+ assert active_sideload == safe_template
+@@ -351,6 +356,7 @@ assert package_center["tool"] == [{
+     "group": "package",
+     "capabilities": "cap_net_admin,cap_chown,cap_net_raw",
+ }]
++assert package_center == package_center_safe_template
+ 
+ assert resource["usr-local-linker"]["bin"] == [
+     "bin/tailscale",
+-- 
+2.53.0
+

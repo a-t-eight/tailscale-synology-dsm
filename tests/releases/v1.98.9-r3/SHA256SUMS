@@ -1,0 +1,6 @@
+199e16b19bd0a8e45492e001ab50ca02029de176c5582026ab3a621e40ad57d8  ./README.md
+342f4ff5052d8d3e59b62c7064c5b3449182a9eeeec139bcbc26adcd64cdc269  ./dsm-runtime/README.md
+1fd4331ef906ce090bf0cbf56f086a3a200aac35018616db2ef390036213eec3  ./dsm-runtime/acceptance.env
+c81e1ea4d89363a7bbbd9694fa0ad051c5ad9b2c8b7885f428a578c562473e74  ./release-assets.tsv
+7c0eba0e2b286ca08b6aceb4389516453ba8a75fadf7d3133210bfd009c7d7fb  ./reproducible-build/manifest.json
+31a097e2e70d5c4292c9fe5e9a7c7be097939b8bf5e8b704c206804cf50b279c  ./source-validation/summary.json

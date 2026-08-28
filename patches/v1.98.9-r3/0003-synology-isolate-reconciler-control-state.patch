@@ -1,0 +1,891 @@
+From e90d53b6f1d406b0a3bf52088095b64fd856dedb Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Fri, 28 Aug 2026 20:11:52 +1000
+Subject: [PATCH 3/7] synology: isolate reconciler control state
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ .../synology/files/scripts/start-stop-status  | 265 ++++++++++++++----
+ .../scripts/tailscale-netfilter-reconciler    |  43 ++-
+ .../tests/netfilter-reconciler-test.sh        | 102 ++++++-
+ .../tests/start-stop-definitions-test.sh      | 132 ++++++++-
+ 4 files changed, 462 insertions(+), 80 deletions(-)
+
+diff --git a/release/dist/synology/files/scripts/start-stop-status b/release/dist/synology/files/scripts/start-stop-status
+index f162460a2..0d96b4d17 100755
+--- a/release/dist/synology/files/scripts/start-stop-status
++++ b/release/dist/synology/files/scripts/start-stop-status
+@@ -23,7 +23,8 @@ fi
+ PKG_NAME="${SYNOPKG_PKGNAME:-Tailscale}"
+ PKG_ROOT="${TAILSCALE_SYNOLOGY_PACKAGE_ROOT:-/var/packages/${PKG_NAME}}"
+ 
+-BOOTSTRAP_STATE_FILE="${PKGVAR}/root-bootstrap.state"
++BOOTSTRAP_STATE_FILE="${PKG_ROOT}/conf/root-control/root-bootstrap.state"
++ROOT_PAYLOAD_MANIFEST="${PKG_ROOT}/conf/root-payload.manifest"
+ ACTIVE_PRIVILEGE_FILE="${PKG_ROOT}/conf/privilege"
+ ROOT_PRIVILEGE_TEMPLATE="${PKG_ROOT}/conf/privilege.bootstrap-root"
+ BOOTSTRAP_COMMAND="sudo ${PKG_ROOT}/scripts/tailscale-synology-bootstrap install"
+@@ -50,9 +51,9 @@ TUN_WAIT_ATTEMPTS="${TAILSCALE_SYNOLOGY_TUN_WAIT_ATTEMPTS:-10}"
+ TUN_WAIT_SECONDS="${TAILSCALE_SYNOLOGY_TUN_WAIT_SECONDS:-1}"
+ 
+ RECONCILER_SCRIPT="${PKG_ROOT}/scripts/tailscale-netfilter-reconciler"
+-RECONCILER_PID_FILE="${PKGVAR}/tailscale-netfilter-reconciler.pid"
+-RECONCILER_LOG_FILE="${PKGVAR}/tailscale-netfilter-reconciler.log"
+-RECONCILER_PENDING_FILE="${PKGVAR}/tailscale-netfilter-repair.pending"
++RECONCILER_RUNTIME_DIR="${TAILSCALE_SYNOLOGY_RUNTIME_DIR:-/run/tailscale-synology}"
++RECONCILER_PID_FILE="${RECONCILER_RUNTIME_DIR}/reconciler.pid"
++RECONCILER_PENDING_FILE="${RECONCILER_RUNTIME_DIR}/repair.pending"
+ 
+ RECONCILER_START_ATTEMPTS="${TAILSCALE_SYNOLOGY_RECONCILER_START_ATTEMPTS:-10}"
+ 
+@@ -227,15 +228,19 @@ bootstrap_state_value() {
+ secure_root_path() {
+     local path="$1"
+     local uid
++    local gid
+     local mode
+     local mode_value
+ 
++    [ ! -L "${path}" ] || return 1
+     [ -e "${path}" ] || return 1
+ 
+     uid="$(stat -c %u -- "${path}")" ||
+         return 1
++    gid="$(stat -c %g -- "${path}")" ||
++        return 1
+ 
+-    [ "${uid}" = "0" ] ||
++    [ "${uid}" = "0" ] && [ "${gid}" = "0" ] ||
+         return 1
+ 
+     mode="$(stat -c %a -- "${path}")" ||
+@@ -250,11 +255,52 @@ secure_root_path() {
+     return 0
+ }
+ 
++
++secure_root_regular_file() {
++    local path="$1"
++    local expected_mode="$2"
++
++    [ -f "${path}" ] && [ ! -L "${path}" ] || return 1
++    [ "$(stat -c %h -- "${path}")" = "1" ] || return 1
++    [ "$(stat -c %a -- "${path}")" = "${expected_mode}" ] || return 1
++    secure_root_path "${path}"
++}
++
++
++manifest_file_digest() {
++    local wanted="$1"
++
++    awk -v wanted="${wanted}" '
++        NR == 1 {
++            if ($0 != "tailscale-synology-root-payload-v1") {
++                exit 2
++            }
++            next
++        }
++
++        $1 == "file" && $4 == wanted {
++            if (found) {
++                exit 2
++            }
++            digest = $3
++            found = 1
++        }
++
++        END {
++            if (!found) {
++                exit 1
++            }
++            print digest
++        }
++    ' "${ROOT_PAYLOAD_MANIFEST}"
++}
++
++
+ bootstrap_is_current() {
+-    local stored_binary_hash
+-    local stored_privilege_hash
+-    local current_binary_hash
+-    local current_privilege_hash
++    local stored_manifest_hash
++    local current_manifest_hash
++    local expected_binary_hash
++    local expected_privilege_hash
+     local target_real
+ 
+     if [ "${SYNOPKG_DSM_VERSION_MAJOR}" -ne "7" ]; then
+@@ -262,6 +308,7 @@ bootstrap_is_current() {
+     fi
+ 
+     [ -r "${BOOTSTRAP_STATE_FILE}" ] || return 1
++    [ -r "${ROOT_PAYLOAD_MANIFEST}" ] || return 1
+     [ -r "${ACTIVE_PRIVILEGE_FILE}" ] || return 1
+     [ -r "${ROOT_PRIVILEGE_TEMPLATE}" ] || return 1
+     [ -x "${SYNOPKG_PKGDEST}/bin/tailscaled" ] || return 1
+@@ -273,44 +320,35 @@ bootstrap_is_current() {
+     secure_root_path "${target_real}" ||
+         return 1
+ 
+-    secure_root_path "${SYNOPKG_PKGDEST}/bin/tailscaled" ||
++    secure_root_regular_file "${SYNOPKG_PKGDEST}/bin/tailscaled" 755 ||
+         return 1
+ 
+-    secure_root_path "${ACTIVE_PRIVILEGE_FILE}" ||
++    secure_root_regular_file "${ACTIVE_PRIVILEGE_FILE}" 644 ||
+         return 1
+ 
+-    secure_root_path "${ROOT_PRIVILEGE_TEMPLATE}" ||
++    secure_root_regular_file "${ROOT_PRIVILEGE_TEMPLATE}" 644 ||
+         return 1
+ 
+-    secure_root_path "${BOOTSTRAP_STATE_FILE}" ||
++    secure_root_regular_file "${BOOTSTRAP_STATE_FILE}" 644 ||
+         return 1
+ 
+-    [ "$(bootstrap_state_value schema)" = "1" ] || return 1
+-    [ "$(bootstrap_state_value mode)" = "root" ] || return 1
+-
+-    stored_binary_hash="$(
+-        bootstrap_state_value tailscaled_sha256
+-    )"
+-
+-    stored_privilege_hash="$(
+-        bootstrap_state_value privilege_sha256
+-    )"
+-
+-    [ -n "${stored_binary_hash}" ] || return 1
+-    [ -n "${stored_privilege_hash}" ] || return 1
++    secure_root_regular_file "${ROOT_PAYLOAD_MANIFEST}" 644 ||
++        return 1
+ 
+-    current_binary_hash="$(
+-        sha256_file "${SYNOPKG_PKGDEST}/bin/tailscaled"
+-    )" || return 1
++    [ "$(bootstrap_state_value schema)" = "2" ] || return 1
++    [ "$(bootstrap_state_value mode)" = "root" ] || return 1
+ 
+-    current_privilege_hash="$(
+-        sha256_file "${ROOT_PRIVILEGE_TEMPLATE}"
+-    )" || return 1
++    stored_manifest_hash="$(bootstrap_state_value manifest_sha256)"
++    [ -n "${stored_manifest_hash}" ] || return 1
++    current_manifest_hash="$(sha256_file "${ROOT_PAYLOAD_MANIFEST}")" || return 1
++    [ "${stored_manifest_hash}" = "${current_manifest_hash}" ] || return 1
+ 
+-    [ "${stored_binary_hash}" = "${current_binary_hash}" ] ||
++    expected_binary_hash="$(manifest_file_digest target/bin/tailscaled)" || return 1
++    [ "${expected_binary_hash}" = "$(sha256_file "${SYNOPKG_PKGDEST}/bin/tailscaled")" ] ||
+         return 1
+ 
+-    [ "${stored_privilege_hash}" = "${current_privilege_hash}" ] ||
++    expected_privilege_hash="$(manifest_file_digest conf/privilege.bootstrap-root)" || return 1
++    [ "${expected_privilege_hash}" = "$(sha256_file "${ROOT_PRIVILEGE_TEMPLATE}")" ] ||
+         return 1
+ 
+     cmp -s \
+@@ -998,7 +1036,7 @@ wait_for_localapi() {
+ reconciler_pid() {
+     local pid=""
+ 
+-    if [ ! -r "${RECONCILER_PID_FILE}" ]; then
++    if ! reconciler_runtime_file_is_secure "${RECONCILER_PID_FILE}"; then
+         return 1
+     fi
+ 
+@@ -1022,13 +1060,94 @@ reconciler_pid() {
+ 
+ 
+ reconciler_status() {
+-    if reconciler_pid >/dev/null 2>&1; then
++    reconciler_pid >/dev/null 2>&1
++}
++
++
++reconciler_runtime_owner_is_root() {
++    local path="$1"
++
++    if [ "${TAILSCALE_SYNOLOGY_TEST_MODE:-0}" = "1" ]; then
++        return 0
++    fi
++
++    [ "$(stat -c %u -- "${path}")" = "0" ] &&
++        [ "$(stat -c %g -- "${path}")" = "0" ]
++}
++
++
++reconciler_runtime_dir_is_secure() {
++    [ -d "${RECONCILER_RUNTIME_DIR}" ] &&
++        [ ! -L "${RECONCILER_RUNTIME_DIR}" ] &&
++        [ "$(stat -c %a -- "${RECONCILER_RUNTIME_DIR}")" = "700" ] &&
++        reconciler_runtime_owner_is_root "${RECONCILER_RUNTIME_DIR}"
++}
++
++
++reconciler_runtime_file_is_secure() {
++    local path="$1"
++
++    [ -f "${path}" ] &&
++        [ ! -L "${path}" ] &&
++        [ "$(stat -c %h -- "${path}")" = "1" ] &&
++        [ "$(stat -c %a -- "${path}")" = "600" ] &&
++        reconciler_runtime_owner_is_root "${path}"
++}
++
++
++ensure_reconciler_runtime_dir() {
++    [ "$(id -u 2>/dev/null)" = "0" ] || return 1
++
++    if [ ! -e "${RECONCILER_RUNTIME_DIR}" ] &&
++        [ ! -L "${RECONCILER_RUNTIME_DIR}" ]; then
++        mkdir -m 0700 -- "${RECONCILER_RUNTIME_DIR}" || return 1
++        chown root:root "${RECONCILER_RUNTIME_DIR}" || return 1
++    fi
++
++    reconciler_runtime_dir_is_secure || return 1
++
++    if [ -e "${RECONCILER_PENDING_FILE}" ] ||
++        [ -L "${RECONCILER_PENDING_FILE}" ]; then
++        reconciler_runtime_file_is_secure "${RECONCILER_PENDING_FILE}" || return 1
++    fi
++
++    return 0
++}
++
++
++cleanup_stale_reconciler_pid() {
++    [ "$(id -u 2>/dev/null)" = "0" ] || return 1
++
++    if [ ! -e "${RECONCILER_PID_FILE}" ] &&
++        [ ! -L "${RECONCILER_PID_FILE}" ]; then
+         return 0
+     fi
+ 
++    reconciler_runtime_file_is_secure "${RECONCILER_PID_FILE}" || return 1
++    reconciler_pid >/dev/null 2>&1 && return 0
+     rm -f -- "${RECONCILER_PID_FILE}"
++}
+ 
+-    return 1
++
++cleanup_reconciler_runtime_dir() {
++    [ "$(id -u 2>/dev/null)" = "0" ] || return 1
++
++    if [ ! -e "${RECONCILER_RUNTIME_DIR}" ] &&
++        [ ! -L "${RECONCILER_RUNTIME_DIR}" ]; then
++        return 0
++    fi
++
++    reconciler_runtime_dir_is_secure || return 1
++    reconciler_status && return 1
++    cleanup_stale_reconciler_pid || return 1
++
++    if [ -e "${RECONCILER_PENDING_FILE}" ] ||
++        [ -L "${RECONCILER_PENDING_FILE}" ]; then
++        reconciler_runtime_file_is_secure "${RECONCILER_PENDING_FILE}" || return 1
++        rm -f -- "${RECONCILER_PENDING_FILE}" || return 1
++    fi
++
++    rmdir -- "${RECONCILER_RUNTIME_DIR}"
+ }
+ 
+ 
+@@ -1038,6 +1157,12 @@ start_reconciler() {
+     local stable_checks=0
+     local termination_wait=2
+ 
++    ensure_reconciler_runtime_dir || {
++        log_message ERROR \
++            "cannot create or validate ${RECONCILER_RUNTIME_DIR}"
++        return 1
++    }
++
+     if reconciler_status; then
+         return 0
+     fi
+@@ -1054,32 +1179,25 @@ start_reconciler() {
+         return 1
+     }
+ 
+-    rm -f -- "${RECONCILER_PID_FILE}"
+-
+-    touch "${RECONCILER_LOG_FILE}" ||
+-        return 1
+-
+-    chmod 0600 "${RECONCILER_LOG_FILE}" ||
++    cleanup_stale_reconciler_pid ||
+         return 1
+ 
+     TAILSCALE_RECONCILER_PKGVAR="${PKGVAR}" \
++    TAILSCALE_RECONCILER_RUNTIME_DIR="${RECONCILER_RUNTIME_DIR}" \
+     TAILSCALE_RECONCILER_TAILSCALE_BIN="${TAILSCALE_BIN}" \
+     TAILSCALE_RECONCILER_SOCKET_FILE="${SOCKET_FILE}" \
+     TAILSCALE_RECONCILER_PID_FILE="${RECONCILER_PID_FILE}" \
+     TAILSCALE_RECONCILER_PENDING_FILE="${RECONCILER_PENDING_FILE}" \
+-        "${RECONCILER_SCRIPT}" \
+-        >>"${RECONCILER_LOG_FILE}" \
+-        2>&1 &
++        "${RECONCILER_SCRIPT}" &
+ 
+     pid=$!
+ 
+-    printf '%s\n' \
+-        "${pid}" \
+-        >"${RECONCILER_PID_FILE}" ||
+-        return 1
+-
+-    chmod 0600 "${RECONCILER_PID_FILE}" ||
+-        return 1
++    (
++        umask 077
++        printf '%s\n' "${pid}" >"${RECONCILER_PID_FILE}"
++    ) || return 1
++    chown root:root "${RECONCILER_PID_FILE}" || return 1
++    chmod 0600 "${RECONCILER_PID_FILE}" || return 1
+ 
+     while [ "${counter}" -gt 0 ]; do
+         if reconciler_status; then
+@@ -1128,7 +1246,8 @@ start_reconciler() {
+     wait "${pid}" >/dev/null 2>&1 ||
+         true
+ 
+-    rm -f -- "${RECONCILER_PID_FILE}"
++    cleanup_stale_reconciler_pid ||
++        true
+ 
+     return 1
+ }
+@@ -1140,8 +1259,8 @@ stop_reconciler() {
+     local counter=20
+ 
+     pid="$(reconciler_pid)" || {
+-        rm -f -- "${RECONCILER_PID_FILE}"
+-        return 0
++        cleanup_stale_reconciler_pid
++        return $?
+     }
+ 
+     log_message INFO \
+@@ -1154,8 +1273,8 @@ stop_reconciler() {
+         current_pid="$(reconciler_pid)" || current_pid=""
+ 
+         if [ "${current_pid}" != "${pid}" ]; then
+-            rm -f -- "${RECONCILER_PID_FILE}"
+-            return 0
++            cleanup_stale_reconciler_pid
++            return $?
+         fi
+ 
+         counter=$((counter - 1))
+@@ -1172,7 +1291,8 @@ stop_reconciler() {
+             true
+     fi
+ 
+-    rm -f -- "${RECONCILER_PID_FILE}"
++    cleanup_stale_reconciler_pid ||
++        return 1
+ 
+     return 0
+ }
+@@ -1182,6 +1302,11 @@ service_status() {
+     if daemon_status; then
+         echo "${SERVICE_NAME} is running"
+ 
++        if [ "$(id -u 2>/dev/null)" != "0" ]; then
++            echo "netfilter reconciler status requires root"
++            return 0
++        fi
++
+         if reconciler_status; then
+             echo "netfilter reconciler is running"
+             return 0
+@@ -1218,6 +1343,12 @@ start)
+             exit 1
+         fi
+ 
++        if ! ensure_reconciler_runtime_dir; then
++            log_message ERROR \
++                "cannot create or validate ${RECONCILER_RUNTIME_DIR}"
++            exit 1
++        fi
++
+         if ! ensure_tun_created; then
+             exit 1
+         fi
+@@ -1255,9 +1386,14 @@ start)
+ stop)
+     STOP_STATUS=0
+ 
+-    if reconciler_status; then
+-        stop_reconciler ||
+-            STOP_STATUS=1
++    if [ "$(id -u 2>/dev/null)" = "0" ]; then
++        if reconciler_status; then
++            stop_reconciler ||
++                STOP_STATUS=1
++        else
++            cleanup_stale_reconciler_pid ||
++                STOP_STATUS=1
++        fi
+     fi
+ 
+     if daemon_status; then
+@@ -1265,6 +1401,11 @@ stop)
+             STOP_STATUS=1
+     fi
+ 
++    if [ "$(id -u 2>/dev/null)" = "0" ]; then
++        cleanup_reconciler_runtime_dir ||
++            STOP_STATUS=1
++    fi
++
+     exit "${STOP_STATUS}"
+     ;;
+ status)
+diff --git a/release/dist/synology/files/scripts/tailscale-netfilter-reconciler b/release/dist/synology/files/scripts/tailscale-netfilter-reconciler
+index 6e1466ade..55a193739 100755
+--- a/release/dist/synology/files/scripts/tailscale-netfilter-reconciler
++++ b/release/dist/synology/files/scripts/tailscale-netfilter-reconciler
+@@ -11,12 +11,15 @@ PKGVAR="${TAILSCALE_RECONCILER_PKGVAR:-${SYNOPKG_PKGVAR:-${PKG_ROOT}/var}}"
+ 
+ TAILSCALE_BIN="${TAILSCALE_RECONCILER_TAILSCALE_BIN:-${SYNOPKG_PKGDEST:-${PKG_ROOT}/target}/bin/tailscale}"
+ SOCKET_FILE="${TAILSCALE_RECONCILER_SOCKET_FILE:-${PKGVAR}/tailscaled.sock}"
++RUNTIME_DIR="${TAILSCALE_RECONCILER_RUNTIME_DIR:-/run/tailscale-synology}"
+ 
+ IPTABLES_BIN="${TAILSCALE_RECONCILER_IPTABLES_BIN:-}"
+ IP6TABLES_BIN="${TAILSCALE_RECONCILER_IP6TABLES_BIN:-}"
+ 
+-PID_FILE="${TAILSCALE_RECONCILER_PID_FILE:-${PKGVAR}/tailscale-netfilter-reconciler.pid}"
+-PENDING_FILE="${TAILSCALE_RECONCILER_PENDING_FILE:-${PKGVAR}/tailscale-netfilter-repair.pending}"
++PID_FILE="${TAILSCALE_RECONCILER_PID_FILE:-${RUNTIME_DIR}/reconciler.pid}"
++PENDING_FILE="${TAILSCALE_RECONCILER_PENDING_FILE:-${RUNTIME_DIR}/repair.pending}"
++LOGGER_BIN="${TAILSCALE_RECONCILER_LOGGER_BIN:-/usr/bin/logger}"
++LOGGER_TAG="tailscale-netfilter-reconciler"
+ 
+ BOOT_PHASE_SECONDS="${TAILSCALE_SYNOLOGY_RECONCILER_BOOT_SECONDS:-120}"
+ BOOT_INTERVAL_SECONDS="${TAILSCALE_SYNOLOGY_RECONCILER_BOOT_INTERVAL:-2}"
+@@ -38,14 +41,38 @@ LAST_REPAIR_EPOCH=0
+ log_message() {
+     local level="$1"
+     shift
++    local priority
+ 
+-    local timestamp
+-    timestamp="$(date --iso-8601=second)"
++    case "${level}" in
++    INFO)
++        priority="daemon.info"
++        ;;
++    NOTICE)
++        priority="daemon.notice"
++        ;;
++    WARNING)
++        priority="daemon.warning"
++        ;;
++    ERROR)
++        priority="daemon.err"
++        ;;
++    *)
++        priority="daemon.notice"
++        ;;
++    esac
++
++    if ! "${LOGGER_BIN}" \
++        -t "${LOGGER_TAG}" \
++        -p "${priority}" \
++        -- \
++        "$*" \
++        2>/dev/null; then
++        printf 'ERROR: system logger failed for %s/%s\n' \
++            "${LOGGER_TAG}" \
++            "${priority}" >&2
++    fi
+ 
+-    printf '%s %s: %s\n' \
+-        "${timestamp}" \
+-        "${level}" \
+-        "$*"
++    return 0
+ }
+ 
+ 
+diff --git a/release/dist/synology/tests/netfilter-reconciler-test.sh b/release/dist/synology/tests/netfilter-reconciler-test.sh
+index 4bba9e00a..d37c26c1f 100755
+--- a/release/dist/synology/tests/netfilter-reconciler-test.sh
++++ b/release/dist/synology/tests/netfilter-reconciler-test.sh
+@@ -156,19 +156,38 @@ ln -s \
+   "${MOCK_BIN}/iptables" \
+   "${MOCK_BIN}/ip6tables"
+ 
++command cat >"${MOCK_BIN}/logger" <<'MOCK'
++#!/bin/bash
++
++set -u
++
++STATE="${MOCK_STATE:?}"
++
++printf '%s\n' "$*" >>"${STATE}/logger.log"
++
++if [ -e "${STATE}/logger-fail" ]; then
++    exit 1
++fi
++MOCK
++
++chmod 0755 "${MOCK_BIN}/logger"
++
+ 
+ setup_case() {
+     CASE_NAME="$1"
+     CASE_ROOT="${TEST_ROOT}/${CASE_NAME}"
+     STATE="${CASE_ROOT}/state"
+     OUTPUT="${CASE_ROOT}/output"
++    RUNTIME="${STATE}/runtime"
+ 
+     rm -rf -- "${CASE_ROOT}"
+ 
+     mkdir -p \
+-        "${STATE}/pkgvar"
++        "${STATE}/pkgvar" \
++        "${RUNTIME}"
+ 
+     : >"${STATE}/commands.log"
++    : >"${STATE}/logger.log"
+ 
+     printf '%s\n' true >"${STATE}/want-running"
+     printf '%s\n' 2 >"${STATE}/netfilter-mode"
+@@ -185,8 +204,9 @@ run_reconciler() {
+         TAILSCALE_RECONCILER_SOCKET_FILE="${STATE}/tailscaled.sock" \
+         TAILSCALE_RECONCILER_IPTABLES_BIN="${MOCK_BIN}/iptables" \
+         TAILSCALE_RECONCILER_IP6TABLES_BIN="${MOCK_BIN}/ip6tables" \
+-        TAILSCALE_RECONCILER_PID_FILE="${STATE}/pkgvar/reconciler.pid" \
+-        TAILSCALE_RECONCILER_PENDING_FILE="${STATE}/pkgvar/repair.pending" \
++        TAILSCALE_RECONCILER_LOGGER_BIN="${MOCK_BIN}/logger" \
++        TAILSCALE_RECONCILER_PID_FILE="${RUNTIME}/reconciler.pid" \
++        TAILSCALE_RECONCILER_PENDING_FILE="${RUNTIME}/repair.pending" \
+         TAILSCALE_SYNOLOGY_TEST_MODE=1 \
+         TAILSCALE_SYNOLOGY_RECONCILER_TEST_MAX_ITERATIONS=1 \
+         TAILSCALE_SYNOLOGY_RECONCILER_TEST_NO_SLEEP=1 \
+@@ -219,11 +239,55 @@ assert_not_contains \
+     "${STATE}/commands.log" \
+     'set --netfilter-mode='
+ 
++assert_contains \
++    "${STATE}/logger.log" \
++    '-t tailscale-netfilter-reconciler -p daemon.info -- started:'
++
++[ ! -e "${STATE}/pkgvar/tailscale-netfilter-reconciler.log" ] ||
++    fail "reconciler created a package-data log"
++
++printf 'PASS\n'
++PASS_COUNT=$((PASS_COUNT + 1))
++
++
++printf 'TEST: logger priorities map all reconciler levels ... '
++
++setup_case logger-priorities
++DEFINITIONS="${CASE_ROOT}/reconciler-definitions.sh"
++
++awk '
++    /^[[:space:]]*main[[:space:]]+"\$@"[[:space:]]*$/ {
++        exit
++    }
++    {
++        print
++    }
++' "${RECONCILER}" >"${DEFINITIONS}"
++
++env \
++    MOCK_STATE="${STATE}" \
++    TAILSCALE_RECONCILER_LOGGER_BIN="${MOCK_BIN}/logger" \
++    bash -u -c '
++        source "$1"
++        log_message INFO info-message
++        log_message NOTICE notice-message
++        log_message WARNING warning-message
++        log_message ERROR error-message
++    ' bash "${DEFINITIONS}"
++
++for expected in \
++    '-t tailscale-netfilter-reconciler -p daemon.info -- info-message' \
++    '-t tailscale-netfilter-reconciler -p daemon.notice -- notice-message' \
++    '-t tailscale-netfilter-reconciler -p daemon.warning -- warning-message' \
++    '-t tailscale-netfilter-reconciler -p daemon.err -- error-message'; do
++    assert_contains "${STATE}/logger.log" "${expected}"
++done
++
+ printf 'PASS\n'
+ PASS_COUNT=$((PASS_COUNT + 1))
+ 
+ 
+-printf 'TEST: missing hooks trigger one off-on reconstruction ... '
++printf 'TEST: fresh boot without a marker repairs missing hooks off-on ... '
+ 
+ setup_case missing
+ 
+@@ -240,9 +304,13 @@ assert_contains \
+ [ -e "${STATE}/hooks-complete" ] ||
+     fail "repair did not restore hooks"
+ 
+-[ ! -e "${STATE}/pkgvar/repair.pending" ] ||
++[ ! -e "${RUNTIME}/repair.pending" ] ||
+     fail "successful repair left a pending marker"
+ 
++assert_contains \
++    "${STATE}/logger.log" \
++    '-t tailscale-netfilter-reconciler -p daemon.notice -- Tailscale netfilter hooks are incomplete'
++
+ printf 'PASS\n'
+ PASS_COUNT=$((PASS_COUNT + 1))
+ 
+@@ -281,7 +349,7 @@ printf 'TEST: interrupted repair restores netfilter mode on ... '
+ 
+ setup_case pending
+ printf '%s\n' 0 >"${STATE}/netfilter-mode"
+-touch "${STATE}/pkgvar/repair.pending"
++touch "${RUNTIME}/repair.pending"
+ 
+ run_reconciler
+ 
+@@ -296,13 +364,33 @@ assert_not_contains \
+ [ -e "${STATE}/hooks-complete" ] ||
+     fail "pending repair did not restore hooks"
+ 
+-[ ! -e "${STATE}/pkgvar/repair.pending" ] ||
++[ ! -e "${RUNTIME}/repair.pending" ] ||
+     fail "pending repair marker was not removed"
+ 
+ printf 'PASS\n'
+ PASS_COUNT=$((PASS_COUNT + 1))
+ 
+ 
++printf 'TEST: logger failure does not fail healthy reconciliation ... '
++
++setup_case logger-failure
++touch "${STATE}/hooks-complete"
++touch "${STATE}/logger-fail"
++
++run_reconciler
++
++assert_contains \
++    "${OUTPUT}" \
++    'system logger failed'
++
++assert_not_contains \
++    "${STATE}/commands.log" \
++    'set --netfilter-mode='
++
++printf 'PASS\n'
++PASS_COUNT=$((PASS_COUNT + 1))
++
++
+ printf '\nResults: %d passed, %d failed\n' \
+     "${PASS_COUNT}" \
+     "${FAIL_COUNT}"
+diff --git a/release/dist/synology/tests/start-stop-definitions-test.sh b/release/dist/synology/tests/start-stop-definitions-test.sh
+index ac8fa7a78..2d56e2727 100755
+--- a/release/dist/synology/tests/start-stop-definitions-test.sh
++++ b/release/dist/synology/tests/start-stop-definitions-test.sh
+@@ -72,17 +72,27 @@ env \
+     SYNOPKG_PKGDEST="${TEST_ROOT}/pkgdest" \
+     SYNOPKG_PKGNAME=Tailscale \
+     TAILSCALE_SYNOLOGY_PACKAGE_ROOT="${TEST_ROOT}/package" \
++    TAILSCALE_SYNOLOGY_RUNTIME_DIR="${TEST_ROOT}/run/tailscale-synology" \
+     TAILSCALE_SYNOLOGY_PROC_ROOT="${TEST_ROOT}/proc" \
+     TAILSCALE_SYNOLOGY_TEST_MODE=1 \
+     bash -u -c '
+         source "$1"
+ 
++        mkdir -p "$RECONCILER_RUNTIME_DIR"
++        chmod 0700 "$RECONCILER_RUNTIME_DIR"
++
+         printf "%s\n" \
+             "$NETFILTER_LOCALAPI_ATTEMPTS" \
+             "$TUN_WAIT_ATTEMPTS" \
+             "$TUN_WAIT_SECONDS" \
+             "$RECONCILER_START_ATTEMPTS" \
+-            "$BOOTSTRAP_COMMAND"
++            "$BOOTSTRAP_COMMAND" \
++            "$BOOTSTRAP_STATE_FILE" \
++            "$RECONCILER_RUNTIME_DIR" \
++            "$RECONCILER_PID_FILE" \
++            "$RECONCILER_PENDING_FILE" \
++            "$SOCKET_FILE" \
++            "${RECONCILER_LOG_FILE-unset}"
+ 
+         mkdir -p "$PROC_ROOT/$$"
+ 
+@@ -103,6 +113,7 @@ env \
+         fi
+ 
+         printf "%s\n" "$$" >"$RECONCILER_PID_FILE"
++        chmod 0600 "$RECONCILER_PID_FILE"
+         printf "%s\0" /bin/bash "$2/unrelated" >"$PROC_ROOT/$$/cmdline"
+ 
+         if reconciler_status; then
+@@ -110,7 +121,13 @@ env \
+             exit 43
+         fi
+ 
++        if [ ! -e "$RECONCILER_PID_FILE" ]; then
++            printf "ERROR: reconciler status removed a stale PID file\n" >&2
++            exit 48
++        fi
++
+         printf "%s\n" "$$" >"$RECONCILER_PID_FILE"
++        chmod 0600 "$RECONCILER_PID_FILE"
+         printf "%s\0" /bin/bash "$RECONCILER_SCRIPT" >"$PROC_ROOT/$$/cmdline"
+ 
+         if ! reconciler_status; then
+@@ -133,6 +150,14 @@ env \
+             return 0
+         }
+ 
++        id() {
++            if [ "${1:-}" = "-u" ]; then
++                printf "0\n"
++                return 0
++            fi
++            command id "$@"
++        }
++
+         if start_reconciler 2>/dev/null; then
+             printf "ERROR: short-lived reconciler passed startup stability check\n" >&2
+             exit 45
+@@ -140,6 +165,14 @@ env \
+ 
+         printf "stability-check-pass\n"
+ 
++        id() {
++            if [ "${1:-}" = "-u" ]; then
++                printf "1000\n"
++                return 0
++            fi
++            command id "$@"
++        }
++
+         daemon_status() {
+             return 1
+         }
+@@ -167,13 +200,98 @@ env \
+             return 1
+         }
+ 
++        service_status >/dev/null 2>&1
++        privileged_status=$?
++
++        if [ "${privileged_status}" -ne 0 ]; then
++            printf "ERROR: non-root service status returned %s, expected 0\n" \
++                "${privileged_status}" >&2
++            exit 47
++        fi
++
++        printf "privileged-status-check-pass\n"
++
++        rm -f "$RECONCILER_PID_FILE" "$RECONCILER_PENDING_FILE"
++        rmdir "$RECONCILER_RUNTIME_DIR"
++
++        if ensure_reconciler_runtime_dir; then
++            printf "ERROR: non-root lifecycle created reconciler runtime state\n" >&2
++            exit 50
++        fi
++
++        if [ -e "$RECONCILER_RUNTIME_DIR" ] || [ -L "$RECONCILER_RUNTIME_DIR" ]; then
++            printf "ERROR: non-root lifecycle mutated reconciler runtime state\n" >&2
++            exit 51
++        fi
++
++        id() {
++            if [ "${1:-}" = "-u" ]; then
++                printf "0\n"
++                return 0
++            fi
++            command id "$@"
++        }
++
++        ln -s "$SYNOPKG_PKGVAR" "$RECONCILER_RUNTIME_DIR"
++        if ensure_reconciler_runtime_dir; then
++            printf "ERROR: root lifecycle accepted a runtime symlink\n" >&2
++            exit 52
++        fi
++        rm -f "$RECONCILER_RUNTIME_DIR"
++
++        mkdir -p "$RECONCILER_RUNTIME_DIR"
++        chmod 0755 "$RECONCILER_RUNTIME_DIR"
++        if ensure_reconciler_runtime_dir; then
++            printf "ERROR: root lifecycle accepted an unsafe runtime mode\n" >&2
++            exit 53
++        fi
++        chmod 0700 "$RECONCILER_RUNTIME_DIR"
++
++        TAILSCALE_SYNOLOGY_TEST_MODE=0
++        if ensure_reconciler_runtime_dir; then
++            printf "ERROR: root lifecycle accepted non-root runtime ownership\n" >&2
++            exit 55
++        fi
++        TAILSCALE_SYNOLOGY_TEST_MODE=1
++
++        printf "999999\n" >"$RECONCILER_PID_FILE"
++        chmod 0600 "$RECONCILER_PID_FILE"
++        printf "pending\n" >"$RECONCILER_PENDING_FILE"
++        chmod 0600 "$RECONCILER_PENDING_FILE"
++
++        cleanup_reconciler_runtime_dir
++
++        if [ -e "$RECONCILER_RUNTIME_DIR" ] || [ -L "$RECONCILER_RUNTIME_DIR" ]; then
++            printf "ERROR: root lifecycle did not clean validated runtime state\n" >&2
++            exit 54
++        fi
++
++        mkdir -p "$RECONCILER_RUNTIME_DIR"
++        chmod 0700 "$RECONCILER_RUNTIME_DIR"
++        ln -s "$SYNOPKG_PKGVAR" "$RECONCILER_PENDING_FILE"
++
++        if cleanup_reconciler_runtime_dir; then
++            printf "ERROR: root lifecycle accepted a pending-marker symlink\n" >&2
++            exit 56
++        fi
++
++        if [ ! -L "$RECONCILER_PENDING_FILE" ]; then
++            printf "ERROR: rejected pending-marker symlink was mutated\n" >&2
++            exit 57
++        fi
++
++        rm -f "$RECONCILER_PENDING_FILE"
++        rmdir "$RECONCILER_RUNTIME_DIR"
++
++        printf "runtime-contract-check-pass\n"
++
+         service_status >/dev/null 2>&1
+         degraded_status=$?
+ 
+         if [ "${degraded_status}" -ne 1 ]; then
+-            printf "ERROR: degraded service status returned %s, expected 1\n" \
++            printf "ERROR: root degraded service status returned %s, expected 1\n" \
+                 "${degraded_status}" >&2
+-            exit 47
++            exit 49
+         fi
+ 
+         printf "degraded-status-check-pass\n"
+@@ -208,9 +326,17 @@ printf '%s\n' \
+     1 \
+     10 \
+     "sudo ${TEST_ROOT}/package/scripts/tailscale-synology-bootstrap install" \
++    "${TEST_ROOT}/package/conf/root-control/root-bootstrap.state" \
++    "${TEST_ROOT}/run/tailscale-synology" \
++    "${TEST_ROOT}/run/tailscale-synology/reconciler.pid" \
++    "${TEST_ROOT}/run/tailscale-synology/repair.pending" \
++    "${TEST_ROOT}/pkgvar/tailscaled.sock" \
++    unset \
+     identity-checks-pass \
+     stability-check-pass \
+     bootstrap-pending-status-check-pass \
++    privileged-status-check-pass \
++    runtime-contract-check-pass \
+     degraded-status-check-pass \
+     >"${EXPECTED}"
+ 
+-- 
+2.53.0
+

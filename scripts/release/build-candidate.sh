@@ -214,39 +214,18 @@ if [ "$build_rc" -ne 0 ]; then
   exit "$build_rc"
 fi
 
-mapfile -t spk_files < <(
-  find \
-    "$OUTPUT_ROOT" \
-    -type f \
-    -name '*.spk' \
-    -print |
-    sort
-)
+printf '\n=== Static candidate SPK inspection ===\n'
 
-if [ "${#spk_files[@]}" -eq 0 ]; then
-  release_fail "candidate build produced no SPK files"
+if ! release_inspect_candidate_artifacts \
+  "$MANIFEST" \
+  "$CONTROL_WORKTREE" \
+  "$OUTPUT_ROOT" \
+  "$SPK_INSPECTOR"; then
+  release_fail "candidate SPK inspection failed"
   exit 1
 fi
 
-printf '\n=== Static candidate SPK inspection ===\n'
-
-for spk_file in "${spk_files[@]}"; do
-  bash \
-    "$SPK_INSPECTOR" \
-    --control-worktree \
-    "$CONTROL_WORKTREE" \
-    --manifest \
-    "$MANIFEST" \
-    --spk \
-    "$spk_file"
-
-  inspect_rc=$?
-
-  if [ "$inspect_rc" -ne 0 ]; then
-    release_fail "candidate SPK inspection failed: ${spk_file}"
-    exit "$inspect_rc"
-  fi
-done
+spk_files=("${RELEASE_CANDIDATE_ARTIFACTS[@]}")
 
 CHECKSUM_FILE="${OUTPUT_ROOT}/candidate-SHA256SUMS"
 

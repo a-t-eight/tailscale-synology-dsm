@@ -37,6 +37,7 @@ Usage:
 USAGE
 }
 
+# shellcheck disable=SC2329
 cleanup() {
   if [ -n "$TEMP_WORKTREE" ] &&
     [ -e "$TEMP_WORKTREE" ]; then
@@ -126,8 +127,6 @@ RELEASE_COMMIT="$(release_manifest_get "$MANIFEST" downstream.release_commit)"
 RELEASE_TREE="$(release_manifest_get "$MANIFEST" downstream.release_tree)"
 WORK_BRANCH="$(release_manifest_get "$MANIFEST" branches.work)"
 RELEASE_BRANCH="$(release_manifest_get "$MANIFEST" branches.release)"
-PATCH_RELATIVE="$(release_manifest_get "$MANIFEST" paths.patch_series)"
-PATCH_ROOT="$(release_resolve_path "$CONTROL_WORKTREE" "$PATCH_RELATIVE")"
 
 SSH_ALLOWED_SIGNERS_RELATIVE="$(
   release_manifest_get \
@@ -368,6 +367,16 @@ if [ "$ROLE" != "upstream" ]; then
     release_pass "source HEAD descends from the pinned upstream commit."
   else
     release_fail "source HEAD does not descend from the upstream commit"
+    FAILURES=$((FAILURES + 1))
+  fi
+fi
+
+if [ "$(release_manifest_patch_layers "$MANIFEST")" = $'base\ncurrent' ]; then
+  printf '\n=== Patch base identity ===\n'
+
+  if release_validate_patch_base_identity "$SOURCE_WORKTREE" "$MANIFEST"; then
+    :
+  else
     FAILURES=$((FAILURES + 1))
   fi
 fi
@@ -666,9 +675,9 @@ fi
 if [ "$ROUND_TRIP" -eq 1 ]; then
   printf '\n=== Patch round-trip ===\n'
 
-  if ! release_validate_patch_inventory \
+  if ! release_validate_patch_layers \
     "$MANIFEST" \
-    "$PATCH_ROOT"; then
+    "$CONTROL_WORKTREE"; then
     release_fail "patch round-trip inventory differs"
     FAILURES=$((FAILURES + 1))
   else
@@ -693,29 +702,17 @@ if [ "$ROUND_TRIP" -eq 1 ]; then
     if [ "$add_rc" -ne 0 ]; then
       release_fail "round-trip worktree creation failed"
       FAILURES=$((FAILURES + 1))
-    elif ! release_check_reference_patches_forward \
-      "$TEMP_WORKTREE" \
-      "$MANIFEST" \
-      "$PATCH_ROOT"; then
-      release_fail "reference patch validation against upstream failed"
-      FAILURES=$((FAILURES + 1))
     else
-      release_apply_patch_series \
+      release_apply_patch_layers \
         "$TEMP_WORKTREE" \
         "$MANIFEST" \
-        "$PATCH_ROOT" \
+        "$CONTROL_WORKTREE" \
         round-trip
 
       apply_rc=$?
 
       if [ "$apply_rc" -ne 0 ]; then
         release_fail "declared aggregate patch set did not apply cleanly"
-        FAILURES=$((FAILURES + 1))
-      elif ! release_check_reference_patches_reverse \
-        "$TEMP_WORKTREE" \
-        "$MANIFEST" \
-        "$PATCH_ROOT"; then
-        release_fail "reference patch is not contained in the aggregate result"
         FAILURES=$((FAILURES + 1))
       else
         ROUND_TRIP_TREE="$(
@@ -730,7 +727,7 @@ if [ "$ROUND_TRIP" -eq 1 ]; then
           release_fail "patch round-trip tree differs from source HEAD"
           FAILURES=$((FAILURES + 1))
         else
-          release_pass "declared aggregate patch reproduces the exact source tree."
+          release_pass "declared patch layers reproduce the exact source tree."
         fi
       fi
     fi

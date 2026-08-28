@@ -6,3 +6,4 @@
 ac845e985c28e122ca3fec97538526d5d92cc2d44c2350212e73c21ff740474a  ./reproducible-build/manifest.json
 8f7a1110afa11ec1898c07186732671a5da1b4b5a0c78ea575a2238a0d032dbe  ./shell-regression/summary.json
 89384b4852649c342a5acd217fdf89f46cb48baf5ebb9f778d1642ca3a8bc19f  ./source-validation/summary.json
+de3adb5c45263ac06aee0396ca8ea02c6cff77725c55ba1b81e1c0d40956161e  ./release-identity.json

@@ -110,12 +110,10 @@ UPSTREAM_TAG="$(release_manifest_get "$MANIFEST" upstream.tag)"
 UPSTREAM_COMMIT="$(release_manifest_get "$MANIFEST" upstream.commit)"
 RELEASE_COMMIT="$(release_manifest_get "$MANIFEST" downstream.release_commit)"
 RELEASE_TREE="$(release_manifest_get "$MANIFEST" downstream.release_tree)"
-PATCH_RELATIVE="$(release_manifest_get "$MANIFEST" paths.patch_series)"
 BUILD_RELATIVE="$(release_manifest_get "$MANIFEST" paths.build_entrypoint)"
 EVIDENCE_RELATIVE="$(release_manifest_get "$MANIFEST" paths.evidence)"
 RECORD_RELATIVE="$(release_manifest_get "$MANIFEST" paths.release_record)"
 
-PATCH_ROOT="$(release_resolve_path "$CONTROL_WORKTREE" "$PATCH_RELATIVE")"
 BUILD_ENTRYPOINT="$(release_resolve_path "$SOURCE_REPO" "$BUILD_RELATIVE")"
 EVIDENCE_ROOT="$(release_resolve_path "$CONTROL_WORKTREE" "$EVIDENCE_RELATIVE")"
 RELEASE_RECORD="$(release_resolve_path "$CONTROL_WORKTREE" "$RECORD_RELATIVE")"
@@ -129,7 +127,6 @@ printf 'Upstream tag:      %s\n' "$UPSTREAM_TAG"
 printf 'Upstream commit:   %s\n' "$UPSTREAM_COMMIT"
 printf 'Release commit:    %s\n' "$RELEASE_COMMIT"
 printf 'Release tree:      %s\n' "$RELEASE_TREE"
-printf 'Patch root:        %s\n' "$PATCH_ROOT"
 printf 'Build entrypoint:  %s\n' "$BUILD_ENTRYPOINT"
 printf 'Evidence root:     %s\n' "$EVIDENCE_ROOT"
 
@@ -286,12 +283,12 @@ fi
 
 printf '\n=== Release assets and paths ===\n'
 
-if release_validate_patch_inventory \
+if release_validate_patch_layers \
   "$MANIFEST" \
-  "$PATCH_ROOT"; then
-  release_pass "canonical patch roles are coherent."
+  "$CONTROL_WORKTREE"; then
+  release_pass "canonical patch layers are coherent."
 else
-  release_fail "canonical patch roles or inventory differ"
+  release_fail "canonical patch layers or inventory differ"
   FAILURES=$((FAILURES + 1))
 fi
 

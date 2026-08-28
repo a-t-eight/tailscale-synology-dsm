@@ -1,0 +1,141 @@
+From f49613eccf9350583cc328183f192a591cd76348 Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Fri, 28 Aug 2026 22:09:45 +1000
+Subject: [PATCH 7/7] fix: tolerate DSM-managed resource rewrites
+
+DSM normalises and enriches conf/resource during package installation, so its post-install bytes cannot match the pre-install payload digest. Keep the path fail-closed on root ownership, regular-file type, single link and mode 0600 while retaining digest authentication for executable and immutable control inputs.
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ .../scripts/tailscale-synology-bootstrap      |  9 ++++---
+ release/dist/synology/pkgs.go                 |  1 -
+ release/dist/synology/pkgs_test.go            |  1 -
+ .../synology/tests/root-bootstrap-test.sh     | 26 ++++++++++++++++++-
+ 4 files changed, 30 insertions(+), 7 deletions(-)
+
+diff --git a/release/dist/synology/files/scripts/tailscale-synology-bootstrap b/release/dist/synology/files/scripts/tailscale-synology-bootstrap
+index bba3ceedb..149e5dbea 100755
+--- a/release/dist/synology/files/scripts/tailscale-synology-bootstrap
++++ b/release/dist/synology/files/scripts/tailscale-synology-bootstrap
+@@ -15,6 +15,7 @@ ACTIVE_PRIVILEGE="${PACKAGE_CONF}/privilege"
+ SAFE_TEMPLATE="${PACKAGE_CONF}/privilege.bootstrap-package"
+ ROOT_TEMPLATE="${PACKAGE_CONF}/privilege.bootstrap-root"
+ ROOT_PAYLOAD_MANIFEST="${PACKAGE_CONF}/root-payload.manifest"
++DSM_RESOURCE="${PACKAGE_CONF}/resource"
+ ROOT_CONTROL_DIR="${PACKAGE_CONF}/root-control"
+ STATE_FILE="${ROOT_CONTROL_DIR}/root-bootstrap.state"
+ TRANSACTION_ROOT="${ROOT_CONTROL_DIR}/transactions"
+@@ -307,6 +308,10 @@ validate_trusted_layout() {
+     require_trusted_directory "${PACKAGE_ROOT}/scripts" 755
+     require_trusted_directory "${ROOT_CONTROL_DIR}" 755
+     require_trusted_regular_file "${ROOT_PAYLOAD_MANIFEST}" 644
++    # DSM normalises and may enrich this descriptor during package install, so
++    # its bytes cannot be authenticated against the pre-install SPK. Its path,
++    # owner, type, link count and restrictive mode remain fail-closed.
++    require_trusted_regular_file "${DSM_RESOURCE}" 600
+     require_trusted_regular_file "${SAFE_TEMPLATE}" 644
+     require_trusted_regular_file "${ROOT_TEMPLATE}" 644
+     require_trusted_regular_file "${ACTIVE_PRIVILEGE}" 644
+@@ -337,9 +342,6 @@ manifest_has_path() {
+ 
+ expected_outer_mode() {
+     case "$1" in
+-    conf/resource)
+-        printf '0600\n'
+-        ;;
+     conf/PKG_DEPS|conf/privilege.bootstrap-package|conf/privilege.bootstrap-root)
+         printf '0644\n'
+         ;;
+@@ -425,7 +427,6 @@ parse_root_payload_manifest() {
+         conf/PKG_DEPS \
+         conf/privilege.bootstrap-package \
+         conf/privilege.bootstrap-root \
+-        conf/resource \
+         scripts/start-stop-status \
+         scripts/tailscale-netfilter-reconciler \
+         scripts/tailscale-synology-bootstrap \
+diff --git a/release/dist/synology/pkgs.go b/release/dist/synology/pkgs.go
+index 3c52ca6cd..66c9ae31b 100644
+--- a/release/dist/synology/pkgs.go
++++ b/release/dist/synology/pkgs.go
+@@ -48,7 +48,6 @@ var rootPayloadOuterFiles = []rootPayloadFile{
+ 	{source: "scripts/tailscale-netfilter-reconciler", path: "scripts/tailscale-netfilter-reconciler", mode: 0755},
+ 	{source: "scripts/preupgrade", path: "scripts/preupgrade", mode: 0755},
+ 	{source: "scripts/postupgrade", path: "scripts/postupgrade", mode: 0755},
+-	{source: "resource", path: "conf/resource", mode: 0600},
+ 	{source: "PKG_DEPS", path: "conf/PKG_DEPS", mode: 0644},
+ 	{source: "privilege-dsm7", path: "conf/privilege.bootstrap-package", mode: 0644},
+ 	{source: "privilege-dsm7.root", path: "conf/privilege.bootstrap-root", mode: 0644},
+diff --git a/release/dist/synology/pkgs_test.go b/release/dist/synology/pkgs_test.go
+index 9fbb3922d..647b78f10 100644
+--- a/release/dist/synology/pkgs_test.go
++++ b/release/dist/synology/pkgs_test.go
+@@ -100,7 +100,6 @@ func TestRootPayloadManifestIsCompleteAndDeterministic(t *testing.T) {
+ 		" scripts/start-stop-status",
+ 		" scripts/tailscale-synology-bootstrap",
+ 		" scripts/tailscale-netfilter-reconciler",
+-		" conf/resource",
+ 		" conf/PKG_DEPS",
+ 		" conf/privilege.bootstrap-package",
+ 		" conf/privilege.bootstrap-root",
+diff --git a/release/dist/synology/tests/root-bootstrap-test.sh b/release/dist/synology/tests/root-bootstrap-test.sh
+index a9a0619db..b318d4206 100755
+--- a/release/dist/synology/tests/root-bootstrap-test.sh
++++ b/release/dist/synology/tests/root-bootstrap-test.sh
+@@ -140,7 +140,6 @@ write_fixture_manifest() {
+     manifest_record 0644 conf/PKG_DEPS "${PACKAGE_ROOT}/conf/PKG_DEPS"
+     manifest_record 0644 conf/privilege.bootstrap-package "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
+     manifest_record 0644 conf/privilege.bootstrap-root "${PACKAGE_ROOT}/conf/privilege.bootstrap-root"
+-    manifest_record 0600 conf/resource "${PACKAGE_ROOT}/conf/resource"
+     manifest_record 0755 scripts/postupgrade "${PACKAGE_ROOT}/scripts/postupgrade"
+     manifest_record 0755 scripts/preupgrade "${PACKAGE_ROOT}/scripts/preupgrade"
+     manifest_record 0755 scripts/start-stop-status "${PACKAGE_ROOT}/scripts/start-stop-status"
+@@ -588,6 +587,21 @@ test_successful_root_install() {
+   assert_contains "${CAPTURED_OUTPUT}" "Runtime: running, UID=0"
+ }
+ 
++test_dsm_managed_resource_rewrite_is_accepted() {
++  setup_fixture
++
++  printf '%s\n' \
++    '{"port-config":{"protocol-file":"conf/Tailscale.sc"},"syslog-config":{"logrotate-relpath":"conf/logrotate.conf"},"systemd-unit":{},"usr-local-linker":{"bin":["bin/tailscale","bin/tailscale-synology-bootstrap"]}}' \
++    >"${PACKAGE_ROOT}/conf/resource"
++  chmod 0600 "${PACKAGE_ROOT}/conf/resource"
++
++  load_bootstrap
++  capture_main install
++
++  assert_status 0 "${CAPTURED_STATUS}"
++  assert_contains "${CAPTURED_OUTPUT}" "root runtime bootstrap completed"
++}
++
+ test_target_entrypoint_is_status_only() {
+   setup_fixture
+ 
+@@ -748,6 +762,12 @@ test_trusted_control_path_substitutions_are_rejected() {
+   capture_main install
+   assert_nonzero_status "${CAPTURED_STATUS}"
+ 
++  setup_fixture
++  load_bootstrap
++  chmod 0666 "${PACKAGE_ROOT}/conf/resource"
++  capture_main install
++  assert_nonzero_status "${CAPTURED_STATUS}"
++
+   setup_fixture
+   load_bootstrap
+   ln -s "${PACKAGE_ROOT}/var" \
+@@ -1300,6 +1320,10 @@ run_case \
+   "successful root runtime bootstrap" \
+   test_successful_root_install
+ 
++run_case \
++  "DSM-managed resource rewrite is accepted" \
++  test_dsm_managed_resource_rewrite_is_accepted
++
+ run_case \
+   "target entrypoint is status-only" \
+   test_target_entrypoint_is_status_only
+-- 
+2.53.0
+

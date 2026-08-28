@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "historical_release": {
+    "revision": "r2",
+    "upstream_tag": "v1.98.9",
+    "upstream_commit": "6c167d40fa37aeb51afa7ff336730670ea4762bf",
+    "release_commit": "0fad8b81a3e0eb86c457bc79c474bcc213834c43",
+    "release_tree": "33f5c5927ae4db54b9d582650ed31cc6a2eb7161",
+    "release_branch": "release/v1.98.9-r2-synology",
+    "release_tag": "release/synology-v1.98.96-r2",
+    "release_record": "docs/releases/v1.98.96-r2/README.md"
+  },
+  "package": {
+    "build_number": "700098097",
+    "full_version": "1.98.96-700098097",
+    "filename": "tailscale-x86_64-1.98.96-700098097-dsm7.spk",
+    "sha256": "f947a1747521c50edf49baf597cc18b512b3bb009c3b7afe963fa326ef2d6c16"
+  },
+  "patch_series": {
+    "path": "patches/v1.98.9-r2",
+    "format": "mail",
+    "patch_count": 58
+  },
+  "evidence": {
+    "path": "tests/releases/v1.98.9-r2"
+  },
+  "safety": {
+    "allow_stable_publication": false,
+    "allow_production_install": false,
+    "allow_root_bootstrap": false,
+    "allow_firewall_mutation": false,
+    "allow_reboot": false
+  }
+}

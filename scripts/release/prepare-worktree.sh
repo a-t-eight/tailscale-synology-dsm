@@ -104,8 +104,6 @@ release_validate_manifest "$MANIFEST" || exit 1
 release_require_clean_worktree "$SOURCE_REPO" || exit 1
 
 UPSTREAM_COMMIT="$(release_manifest_get "$MANIFEST" upstream.commit)"
-PATCH_RELATIVE="$(release_manifest_get "$MANIFEST" paths.patch_series)"
-PATCH_ROOT="$(release_resolve_path "$CONTROL_WORKTREE" "$PATCH_RELATIVE")"
 
 if [ "$ROLE" = "work" ]; then
   TARGET_BRANCH="$(release_manifest_get "$MANIFEST" branches.work)"
@@ -143,19 +141,15 @@ release_clean_git \
     exit 1
   }
 
-PATCH_COUNT="$(
-  find \
-    "$PATCH_ROOT" \
-    -maxdepth 1 \
-    -type f \
-    -name '*.patch' \
-    -print |
-    wc \
-      -l |
-    tr \
-      -d \
-      ' '
-)"
+release_validate_patch_layers "$MANIFEST" "$CONTROL_WORKTREE" || exit 1
+
+PATCH_COUNT=0
+while IFS= read -r layer; do
+  [ -n "$layer" ] || continue
+  PATCH_ROOT="$(release_patch_layer_root "$MANIFEST" "$CONTROL_WORKTREE" "$layer")" || exit 1
+  layer_count="$(find "$PATCH_ROOT" -maxdepth 1 -type f -name '*.patch' -print | wc -l | tr -d ' ')"
+  PATCH_COUNT=$((PATCH_COUNT + layer_count))
+done < <(release_manifest_patch_layers "$MANIFEST")
 
 if [ "$PATCH_COUNT" -lt 1 ]; then
   release_fail "canonical patch series is unavailable: ${PATCH_ROOT}"
@@ -224,10 +218,10 @@ if [ "$WORKTREE_RC" -ne 0 ]; then
 fi
 
 if [ "$APPLY_PATCHES" -eq 1 ]; then
-  release_apply_patch_series \
+  release_apply_patch_layers \
     "$TARGET_WORKTREE" \
     "$MANIFEST" \
-    "$PATCH_ROOT" \
+    "$CONTROL_WORKTREE" \
     worktree
 
   PATCH_RC=$?
