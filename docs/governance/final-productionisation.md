@@ -72,37 +72,34 @@ This task replaces the ambiguous phrase "redesign the root-control trust
 boundary". It does **not** mean dropping root privileges or returning to the
 ordinary DSM package-user/Package Center capability model.
 
-#### 5.1 Collect DSM path and lifecycle evidence
+The approved design is deliberately upstream-compatible. It keeps
+`tailscaled.state`, `tailscaled.sock`, `tailscaled.pid`,
+`tailscaled.stdout.log`, `STATE_DIRECTORY`, logrotate and DSM package-data
+ownership in their existing upstream locations. Task 5 must not relocate or
+recursively re-own that application state.
 
-Before selecting a permanent control location, collect read-only evidence for:
+The authoritative implementation contract is the
+[upstream-compatible root-control design](../superpowers/specs/2026-08-28-upstream-compatible-root-control-design.md).
 
-- `/var/packages/Tailscale/scripts`;
-- package `conf` and `var` locations;
-- resolved `@appconf` and `@appdata` locations;
-- package target and volume-dependent paths;
-- prospective system/root-control locations.
+#### 5.1 Establish the narrow root-control surfaces
 
-Record `realpath`, owner/group, modes, ancestor permissions, mount behaviour and
-lifecycle behaviour across install, upgrade, reboot, rollback, uninstall and
-volume migration.
+Use the existing DSM-installed, root-owned package `scripts` and `conf`
+directories. Add:
 
-#### 5.2 Establish a root-only control plane
+- `conf/root-payload.manifest` for exact build-generated payload identities;
+- `conf/root-control/` for bootstrap approval state and private promotion
+  transactions; and
+- `/run/tailscale-synology/` for the downstream reconciler PID and pending
+  repair marker.
 
-Move authoritative privileged control material beneath a root-owned,
-non-package-writable ancestor chain. This includes, where applicable:
+Validate the installed owner, mode, type and complete ancestor chain. Promotion
+fails closed if DSM does not preserve the observed root-controlled `scripts`
+and `conf` boundary.
 
-- authoritative bootstrap/controller entry points;
-- bootstrap approval/current-state records;
-- privileged backups;
-- reconciler PID and pending/control state;
-- privileged lifecycle logs;
-- privileged temporary files;
-- root-trusted payload-integrity metadata.
+All `install` and `remove` mutations enter through the root-owned package-script
+bootstrap. The `/usr/local/bin` target link remains a status-only convenience.
 
-The `tailscale` package account may continue to exist for DSM compatibility but
-must not be a security authority after bootstrap.
-
-#### 5.3 Authenticate the payload before privilege promotion
+#### 5.2 Authenticate the payload before privilege promotion
 
 Before package ownership is promoted or any package payload executes as UID 0,
 validate the exact inspected SPK payload against root-trusted expected
@@ -121,28 +118,31 @@ The trusted expected manifest must be generated from the exact reviewed build
 and stored where the package account cannot replace it. Promotion fails closed
 on any mismatch.
 
-#### 5.4 Harden privileged filesystem operations
+#### 5.3 Harden privileged filesystem operations
 
 Privileged code must:
 
 - validate the resolved path and every relevant ancestor using
   `lstat`/equivalent checks;
-- reject symlinks and unexpected file types;
+- reject symlinks, multiple hard links and unexpected file types;
 - reject unsafe modes or ownership drift;
 - create temporary objects exclusively inside trusted root-controlled
   directories;
 - use safe atomic replacement only after validating the temporary object;
 - reject unexpected pre-existing backup/destination entries.
 
-#### 5.5 Preserve application-state semantics
+#### 5.4 Adapt reconciliation without changing LocalAPI
 
-Do not recursively change ownership of the complete package variable directory
-without evidence. Classify each persistent path by required owner, writer,
-reader and lifecycle semantics. Preserve any legitimate DSM/Tailscale state
-access while preventing the package account from modifying privileged control
-material.
+Keep the LocalAPI socket in `SYNOPKG_PKGVAR`. Move only the reconciler's own PID
+and pending-repair marker to `/run/tailscale-synology/`. Replace its separate
+root-opened application-data log with `/usr/bin/logger` and retain its existing
+repair, cooldown, process-identity and shutdown behaviour.
 
-#### 5.6 Implement migration and lifecycle handling
+The iptables preflight and guarded cleanup, TUN creation, routing sysctls,
+in-daemon netfilter repairs, dependency checks, `/usr/local/bin` linker entries
+and daemon logrotate contract require no Task 5 path change.
+
+#### 5.5 Implement migration and lifecycle handling
 
 Cover:
 
@@ -157,7 +157,11 @@ Cover:
 - log rotation;
 - backup retention/recovery.
 
-#### 5.7 Validate the exact implementation
+Existing r2 state beneath `SYNOPKG_PKGVAR` is not trusted as approval for the new
+payload. Upgrade requires fresh attended promotion when the exact manifest
+identity changes. Removal must not move, delete or re-own upstream daemon state.
+
+#### 5.6 Validate the exact implementation
 
 Require automated fixtures for:
 
@@ -168,6 +172,10 @@ Require automated fixtures for:
 - payload tampering;
 - trusted-manifest mismatch;
 - unexpected pre-existing destinations/backups.
+
+Also require regression tests for the `/run` reconciler lifecycle and logging,
+and exact assertions that upstream daemon state, socket, PID, stdout-log and
+logrotate paths remain unchanged.
 
 Then require exact-artifact DSM UAT proving that after the hardening change:
 

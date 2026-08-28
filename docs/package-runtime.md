@@ -100,25 +100,30 @@ directory-boundary limitation is recorded in
 
 ## Future trust-boundary hardening
 
-The next functional revision should harden what the persistent UID-0 runtime is
-allowed to trust, without reducing its privilege.
+The next functional revision will harden only the downstream privileged-control
+paths. It will retain the upstream Synology package's application-state
+architecture:
 
-The intended direction is:
+- `tailscaled.state`, `tailscaled.sock`, `tailscaled.pid`,
+  `tailscaled.stdout.log` and `STATE_DIRECTORY` remain in `SYNOPKG_PKGVAR`;
+- the DSM web interface and CLI continue using the same LocalAPI socket;
+- upstream logrotate and package-data ownership remain unchanged;
+- the package target remains `root:root` after attended bootstrap.
 
-- keep authoritative privileged entry points and control state beneath a
-  root-owned, non-package-writable ancestor chain;
-- authenticate the exact inspected package payload before promotion to root;
-- fail closed on symlinks, replacement, unsafe modes, unexpected file types or
-  ownership drift;
-- use trusted root-only locations for privileged temporary files, backups,
-  reconciliation state and lifecycle control;
-- classify application state separately rather than recursively changing the
-  complete package variable directory.
+The build will add a root-trusted payload manifest under package `conf`, and the
+bootstrap will store only its approval state and private transaction material
+under `conf/root-control`. The downstream reconciler's own PID and
+pending-repair marker move to `/run/tailscale-synology`; its separate
+root-opened package-data log is replaced by DSM system logging.
 
-Before a final root-control path is selected, DSM path ownership, mount and
-lifecycle behaviour must be measured on target hardware. The design must cover
-upgrade, rollback, bootstrap removal, uninstall, reboot, volume migration, log
-rotation and backup retention.
+In that revision, `install` and `remove` use only the root-owned package-script
+bootstrap. The `/usr/local/bin` target link remains available for status but no
+longer performs privileged mutations.
+
+Trusted paths are validated by resolved owner, mode and type before use, and
+the exact inspected payload is authenticated before privilege promotion. The
+complete compatibility, migration and validation contract is the
+[upstream-compatible root-control design](superpowers/specs/2026-08-28-upstream-compatible-root-control-design.md).
 
 ## Runtime implications
 

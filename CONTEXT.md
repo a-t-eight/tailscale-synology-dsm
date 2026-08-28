@@ -12,7 +12,10 @@ The supported post-bootstrap product architecture intentionally runs
 promoted target. Future security work must harden the trust boundary around
 that privileged runtime rather than reverting to the ordinary DSM package-user
 or Package Center capability model. The authoritative design constraint is
-recorded in `docs/adr/0002-privileged-bootstrap-trust-boundary.md`.
+recorded in `docs/adr/0002-privileged-bootstrap-trust-boundary.md`. The
+approved Task 5 design hardens only downstream bootstrap and reconciliation
+control paths; it preserves upstream daemon state, socket, PID, logging,
+logrotate and package-data ownership semantics.
 
 The current production baseline is downstream revision `r2`, derived from
 upstream `v1.98.9` at release commit

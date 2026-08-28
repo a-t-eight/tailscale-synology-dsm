@@ -24,6 +24,9 @@ project was developed.
 
 - [ADR 0001: repository branch model](adr/0001-repository-branch-model.md)
 - [ADR 0002: persistent UID-0 runtime trust boundary](adr/0002-privileged-bootstrap-trust-boundary.md)
+- [Upstream-compatible root-control design](superpowers/specs/2026-08-28-upstream-compatible-root-control-design.md)
+  — approved Task 5 path, reconciliation, migration, residual-risk, and
+  validation contract.
 - [Final productionisation status](governance/final-productionisation.md) —
   completed work, remaining UID-0 trust-boundary hardening, agent/tooling
   prerequisites, whole-product reproducibility, and the next-release train.
