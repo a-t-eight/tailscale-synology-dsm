@@ -23,7 +23,10 @@ project was developed.
 ## Architecture and policy
 
 - [ADR 0001: repository branch model](adr/0001-repository-branch-model.md)
-- [ADR 0002: privileged bootstrap trust boundary](adr/0002-privileged-bootstrap-trust-boundary.md)
+- [ADR 0002: persistent UID-0 runtime trust boundary](adr/0002-privileged-bootstrap-trust-boundary.md)
+- [Final productionisation status](governance/final-productionisation.md) —
+  completed work, remaining UID-0 trust-boundary hardening, agent/tooling
+  prerequisites, whole-product reproducibility, and the next-release train.
 - [Repository governance](governance/repository-governance.md)
 - [Automation governance](governance/automation.md) — validation lanes,
   workflow catalogue, required checks, and mutable GitHub state.
