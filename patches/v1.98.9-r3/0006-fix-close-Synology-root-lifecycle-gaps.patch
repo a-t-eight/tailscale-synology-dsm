@@ -1,0 +1,877 @@
+From ff44237b178094f35bca5550e6ab87c73e6a3757 Mon Sep 17 00:00:00 2001
+From: a-t-eight <andreeww.trieu@gmail.com>
+Date: Fri, 28 Aug 2026 20:56:15 +1000
+Subject: [PATCH 6/7] fix: close Synology root lifecycle gaps
+
+Signed-off-by: a-t-eight <andreeww.trieu@gmail.com>
+---
+ .../synology/files/scripts/start-stop-status  | 141 +++++----
+ .../scripts/tailscale-synology-bootstrap      |  39 ++-
+ .../synology/tests/root-bootstrap-test.sh     | 287 ++++++++++++++++++
+ .../tests/start-stop-definitions-test.sh      | 134 ++++++++
+ 4 files changed, 546 insertions(+), 55 deletions(-)
+
+diff --git a/release/dist/synology/files/scripts/start-stop-status b/release/dist/synology/files/scripts/start-stop-status
+index 0d96b4d17..6ed98492d 100755
+--- a/release/dist/synology/files/scripts/start-stop-status
++++ b/release/dist/synology/files/scripts/start-stop-status
+@@ -28,6 +28,11 @@ ROOT_PAYLOAD_MANIFEST="${PKG_ROOT}/conf/root-payload.manifest"
+ ACTIVE_PRIVILEGE_FILE="${PKG_ROOT}/conf/privilege"
+ ROOT_PRIVILEGE_TEMPLATE="${PKG_ROOT}/conf/privilege.bootstrap-root"
+ BOOTSTRAP_COMMAND="sudo ${PKG_ROOT}/scripts/tailscale-synology-bootstrap install"
++BOOTSTRAP_SCRIPT="${PKG_ROOT}/scripts/tailscale-synology-bootstrap"
++
++if [ "${TAILSCALE_SYNOLOGY_TEST_MODE:-0}" = "1" ]; then
++    BOOTSTRAP_SCRIPT="${TAILSCALE_SYNOLOGY_BOOTSTRAP_SCRIPT:-${BOOTSTRAP_SCRIPT}}"
++fi
+ 
+ PID_FILE="${PKGVAR}/tailscaled.pid"
+ LOG_FILE="${PKGVAR}/tailscaled.stdout.log"
+@@ -300,6 +305,7 @@ bootstrap_is_current() {
+     local stored_manifest_hash
+     local current_manifest_hash
+     local expected_binary_hash
++    local expected_bootstrap_hash
+     local expected_privilege_hash
+     local target_real
+ 
+@@ -335,6 +341,9 @@ bootstrap_is_current() {
+     secure_root_regular_file "${ROOT_PAYLOAD_MANIFEST}" 644 ||
+         return 1
+ 
++    secure_root_regular_file "${BOOTSTRAP_SCRIPT}" 755 ||
++        return 1
++
+     [ "$(bootstrap_state_value schema)" = "2" ] || return 1
+     [ "$(bootstrap_state_value mode)" = "root" ] || return 1
+ 
+@@ -356,6 +365,15 @@ bootstrap_is_current() {
+         "${ROOT_PRIVILEGE_TEMPLATE}" ||
+         return 1
+ 
++    expected_bootstrap_hash="$(manifest_file_digest scripts/tailscale-synology-bootstrap)" || return 1
++    [ "${expected_bootstrap_hash}" = "$(sha256_file "${BOOTSTRAP_SCRIPT}")" ] ||
++        return 1
++
++    TAILSCALE_SYNOLOGY_PACKAGE_ROOT="${PKG_ROOT}" \
++        "${BOOTSTRAP_SCRIPT}" verify-current \
++        >/dev/null 2>&1 ||
++        return 1
++
+     return 0
+ }
+ 
+@@ -1151,11 +1169,58 @@ cleanup_reconciler_runtime_dir() {
+ }
+ 
+ 
++terminate_reconciler_process() {
++    local pid="$1"
++    local counter="$2"
++    local kill_wait=2
++
++    kill -0 -- "${pid}" >/dev/null 2>&1 ||
++        return 0
++    process_cmdline_has_arg "${pid}" "${RECONCILER_SCRIPT}" ||
++        return 1
++
++    kill -TERM -- "${pid}" >/dev/null 2>&1 ||
++        true
++
++    while [ "${counter}" -gt 0 ] &&
++        kill -0 -- "${pid}" >/dev/null 2>&1
++    do
++        counter=$((counter - 1))
++        sleep 1
++    done
++
++    if kill -0 -- "${pid}" >/dev/null 2>&1; then
++        if ! process_cmdline_has_arg "${pid}" "${RECONCILER_SCRIPT}"; then
++            wait "${pid}" >/dev/null 2>&1 ||
++                true
++            ! kill -0 -- "${pid}" >/dev/null 2>&1
++            return $?
++        fi
++
++        log_message WARNING \
++            "netfilter reconciler did not stop after SIGTERM; sending SIGKILL"
++        kill -KILL -- "${pid}" >/dev/null 2>&1 ||
++            true
++
++        wait "${pid}" >/dev/null 2>&1 ||
++            true
++
++        while [ "${kill_wait}" -gt 0 ] &&
++            kill -0 -- "${pid}" >/dev/null 2>&1
++        do
++            kill_wait=$((kill_wait - 1))
++            sleep 1
++        done
++    fi
++
++    ! kill -0 -- "${pid}" >/dev/null 2>&1
++}
++
++
+ start_reconciler() {
+     local pid
+     local counter="${RECONCILER_START_ATTEMPTS}"
+     local stable_checks=0
+-    local termination_wait=2
+ 
+     ensure_reconciler_runtime_dir || {
+         log_message ERROR \
+@@ -1192,12 +1257,21 @@ start_reconciler() {
+ 
+     pid=$!
+ 
+-    (
++    if ! (
+         umask 077
+         printf '%s\n' "${pid}" >"${RECONCILER_PID_FILE}"
+-    ) || return 1
+-    chown root:root "${RECONCILER_PID_FILE}" || return 1
+-    chmod 0600 "${RECONCILER_PID_FILE}" || return 1
++    ) ||
++        ! chown root:root "${RECONCILER_PID_FILE}" ||
++        ! chmod 0600 "${RECONCILER_PID_FILE}"; then
++        log_message ERROR \
++            "cannot secure netfilter reconciler PID state"
++        terminate_reconciler_process "${pid}" 2 ||
++            log_message ERROR \
++                "cannot stop reconciler after PID-state failure"
++        cleanup_stale_reconciler_pid ||
++            true
++        return 1
++    fi
+ 
+     while [ "${counter}" -gt 0 ]; do
+         if reconciler_status; then
+@@ -1222,29 +1296,9 @@ start_reconciler() {
+     log_message ERROR \
+         "netfilter reconciler did not remain running"
+ 
+-    if kill -0 -- "${pid}" >/dev/null 2>&1 &&
+-        process_cmdline_has_arg "${pid}" "${RECONCILER_SCRIPT}"
+-    then
+-        kill -TERM -- "${pid}" >/dev/null 2>&1 ||
+-            true
+-
+-        while [ "${termination_wait}" -gt 0 ] &&
+-            kill -0 -- "${pid}" >/dev/null 2>&1
+-        do
+-            termination_wait=$((termination_wait - 1))
+-            sleep 1
+-        done
+-
+-        if kill -0 -- "${pid}" >/dev/null 2>&1 &&
+-            process_cmdline_has_arg "${pid}" "${RECONCILER_SCRIPT}"
+-        then
+-            kill -KILL -- "${pid}" >/dev/null 2>&1 ||
+-                true
+-        fi
+-    fi
+-
+-    wait "${pid}" >/dev/null 2>&1 ||
+-        true
++    terminate_reconciler_process "${pid}" 2 ||
++        log_message ERROR \
++            "cannot stop unstable netfilter reconciler"
+ 
+     cleanup_stale_reconciler_pid ||
+         true
+@@ -1255,8 +1309,6 @@ start_reconciler() {
+ 
+ stop_reconciler() {
+     local pid=""
+-    local current_pid=""
+-    local counter=20
+ 
+     pid="$(reconciler_pid)" || {
+         cleanup_stale_reconciler_pid
+@@ -1266,30 +1318,11 @@ stop_reconciler() {
+     log_message INFO \
+         "stopping netfilter reconciler PID=${pid}"
+ 
+-    kill -TERM -- "${pid}" >/dev/null 2>&1 ||
+-        true
+-
+-    while [ "${counter}" -gt 0 ]; do
+-        current_pid="$(reconciler_pid)" || current_pid=""
+-
+-        if [ "${current_pid}" != "${pid}" ]; then
+-            cleanup_stale_reconciler_pid
+-            return $?
+-        fi
+-
+-        counter=$((counter - 1))
+-        sleep 1
+-    done
+-
+-    log_message WARNING \
+-        "netfilter reconciler did not stop after SIGTERM; sending SIGKILL"
+-
+-    current_pid="$(reconciler_pid)" || current_pid=""
+-
+-    if [ "${current_pid}" = "${pid}" ]; then
+-        kill -KILL -- "${pid}" >/dev/null 2>&1 ||
+-            true
+-    fi
++    terminate_reconciler_process "${pid}" 20 || {
++        log_message ERROR \
++            "netfilter reconciler exit could not be confirmed"
++        return 1
++    }
+ 
+     cleanup_stale_reconciler_pid ||
+         return 1
+diff --git a/release/dist/synology/files/scripts/tailscale-synology-bootstrap b/release/dist/synology/files/scripts/tailscale-synology-bootstrap
+index ee3cef59e..bba3ceedb 100755
+--- a/release/dist/synology/files/scripts/tailscale-synology-bootstrap
++++ b/release/dist/synology/files/scripts/tailscale-synology-bootstrap
+@@ -47,6 +47,17 @@ declare -a ROOT_PAYLOAD_PATHS=()
+ declare -a ROOT_PAYLOAD_MODES=()
+ declare -a ROOT_PAYLOAD_DIGESTS=()
+ 
++bootstrap_test_checkpoint() {
++    local stage="$1"
++    shift
++
++    if [ "${TAILSCALE_SYNOLOGY_TEST_MODE:-0}" = "1" ] &&
++        [ "${BASH_SOURCE[0]}" != "$0" ] &&
++        declare -F tailscale_synology_bootstrap_test_checkpoint >/dev/null; then
++        tailscale_synology_bootstrap_test_checkpoint "${stage}" "$@"
++    fi
++}
++
+ log_message() {
+     local level="$1"
+     shift
+@@ -522,7 +533,7 @@ inventory_target_payload() {
+     done
+ 
+     while IFS= read -r -d '' entry; do
+-        relative="${entry#${RESOLVED_TARGET}/}"
++        relative="${entry#"${RESOLVED_TARGET}"/}"
+         manifest_path="target/${relative}"
+         if [ -L "${entry}" ]; then
+             die "target payload contains a symlink: ${manifest_path}"
+@@ -782,6 +793,8 @@ promote_target_payload() {
+             "${ROOT_PAYLOAD_MODES[${index}]}" \
+             "${ROOT_PAYLOAD_DIGESTS[${index}]}" \
+             any || return 1
++        bootstrap_test_checkpoint before-target-copy \
++            "${relative}" "${file}" "" || return 1
+         directory="$(dirname -- "${file}")"
+         STAGED_TEMP="${directory}/.tailscale-root-promote.$$-${index}"
+         [ ! -e "${STAGED_TEMP}" ] && [ ! -L "${STAGED_TEMP}" ] || return 1
+@@ -790,6 +803,8 @@ promote_target_payload() {
+             umask 077
+             cp -- "${file}" "${STAGED_TEMP}"
+         ) || return 1
++        bootstrap_test_checkpoint after-target-copy \
++            "${relative}" "${file}" "${STAGED_TEMP}" || return 1
+         chown root:root "${STAGED_TEMP}" || return 1
+         chmod "${ROOT_PAYLOAD_MODES[${index}]}" "${STAGED_TEMP}" || return 1
+         verify_regular_payload_file \
+@@ -797,8 +812,12 @@ promote_target_payload() {
+             "${ROOT_PAYLOAD_MODES[${index}]}" \
+             "${ROOT_PAYLOAD_DIGESTS[${index}]}" \
+             root || return 1
++        bootstrap_test_checkpoint after-staged-verification \
++            "${relative}" "${file}" "${STAGED_TEMP}" || return 1
+         mv -f -- "${STAGED_TEMP}" "${file}" || return 1
+         STAGED_TEMP=""
++        bootstrap_test_checkpoint after-target-rename \
++            "${relative}" "${file}" "" || return 1
+     done
+     verify_promoted_target_payload
+ }
+@@ -874,6 +893,8 @@ restore_transaction() {
+     local previous_mode
+ 
+     trap - EXIT
++    bootstrap_test_checkpoint before-rollback-restore \
++        "${TRANSACTION_DIR}" || return 1
+     run_synopkg_with_timeout stop "${PACKAGE_NAME}" >/dev/null || return 1
+     require_trusted_regular_file "${TRANSACTION_DIR}/privilege" 600
+     install_privilege "${TRANSACTION_DIR}/privilege" || return 1
+@@ -947,15 +968,28 @@ install_action() {
+     ROLLBACK_ARMED=1
+     trap rollback_on_exit EXIT
+ 
++    bootstrap_test_checkpoint after-transaction-create \
++        "${TRANSACTION_DIR}" || die "bootstrap transaction checkpoint failed"
++
+     promote_target_payload || die "cannot promote the authenticated target payload"
++    bootstrap_test_checkpoint after-target-promotion ||
++        die "target promotion checkpoint failed"
+     verify_outer_payload
+     verify_promoted_target_payload
++    bootstrap_test_checkpoint before-state-write ||
++        die "bootstrap state checkpoint failed"
+     write_state || die "cannot write bootstrap state"
++    bootstrap_test_checkpoint before-privilege-install ||
++        die "privilege checkpoint failed"
+     install_privilege "${ROOT_TEMPLATE}" || die "cannot install root privilege manifest"
+     bootstrap_is_current || die "bootstrap state validation failed"
+     start_and_verify || die "root package startup validation failed"
+ 
++    bootstrap_test_checkpoint before-legacy-cleanup ||
++        die "legacy cleanup checkpoint failed"
+     remove_exact_legacy_state || die "cannot remove the exact legacy bootstrap state"
++    bootstrap_test_checkpoint before-transaction-cleanup ||
++        die "transaction cleanup checkpoint failed"
+     cleanup_transaction || die "cannot remove the completed bootstrap transaction"
+     ROLLBACK_ARMED=0
+     trap - EXIT
+@@ -1044,6 +1078,9 @@ main() {
+     status)
+         status_action
+         ;;
++    verify-current)
++        bootstrap_is_current
++        ;;
+     *)
+         usage >&2
+         exit 2
+diff --git a/release/dist/synology/tests/root-bootstrap-test.sh b/release/dist/synology/tests/root-bootstrap-test.sh
+index 94142e62e..a9a0619db 100755
+--- a/release/dist/synology/tests/root-bootstrap-test.sh
++++ b/release/dist/synology/tests/root-bootstrap-test.sh
+@@ -710,6 +710,76 @@ test_trusted_symlink_and_hardlink_are_rejected() {
+     "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
+ }
+ 
++test_trusted_control_path_substitutions_are_rejected() {
++  local original
++
++  setup_fixture
++  load_bootstrap
++  original="${PACKAGE_ROOT}/conf/root-payload.manifest.original"
++  mv "${PACKAGE_ROOT}/conf/root-payload.manifest" "${original}"
++  ln -s "${original}" "${PACKAGE_ROOT}/conf/root-payload.manifest"
++  capture_main install
++  assert_nonzero_status "${CAPTURED_STATUS}"
++
++  setup_fixture
++  load_bootstrap
++  ln "${PACKAGE_ROOT}/conf/root-payload.manifest" \
++    "${PACKAGE_ROOT}/conf/root-payload.manifest.hardlink"
++  capture_main install
++  assert_nonzero_status "${CAPTURED_STATUS}"
++
++  setup_fixture
++  load_bootstrap
++  rm "${PACKAGE_ROOT}/conf/root-payload.manifest"
++  mkfifo "${PACKAGE_ROOT}/conf/root-payload.manifest"
++  capture_main install
++  assert_nonzero_status "${CAPTURED_STATUS}"
++
++  setup_fixture
++  load_bootstrap
++  rm "${PACKAGE_ROOT}/conf/privilege.bootstrap-root"
++  mkdir "${PACKAGE_ROOT}/conf/privilege.bootstrap-root"
++  capture_main install
++  assert_nonzero_status "${CAPTURED_STATUS}"
++
++  setup_fixture
++  load_bootstrap
++  chmod 0666 "${PACKAGE_ROOT}/conf/privilege"
++  capture_main install
++  assert_nonzero_status "${CAPTURED_STATUS}"
++
++  setup_fixture
++  load_bootstrap
++  ln -s "${PACKAGE_ROOT}/var" \
++    "${PACKAGE_ROOT}/conf/root-control/transactions"
++  capture_main install
++  assert_nonzero_status "${CAPTURED_STATUS}"
++}
++
++test_trusted_bootstrap_state_substitutions_are_rejected() {
++  local state
++
++  perform_successful_install
++  state="${PACKAGE_ROOT}/conf/root-control/root-bootstrap.state"
++  mv "${state}" "${state}.original"
++  ln -s "${state}.original" "${state}"
++  capture_main install
++  assert_nonzero_status "${CAPTURED_STATUS}"
++
++  perform_successful_install
++  state="${PACKAGE_ROOT}/conf/root-control/root-bootstrap.state"
++  ln "${state}" "${state}.hardlink"
++  capture_main install
++  assert_nonzero_status "${CAPTURED_STATUS}"
++
++  perform_successful_install
++  state="${PACKAGE_ROOT}/conf/root-control/root-bootstrap.state"
++  rm "${state}"
++  mkfifo "${state}"
++  capture_main install
++  assert_nonzero_status "${CAPTURED_STATUS}"
++}
++
+ test_open_writer_cannot_change_promoted_target() {
+   local expected_hash
+   local writer_fd
+@@ -731,6 +801,121 @@ test_open_writer_cannot_change_promoted_target() {
+   fi
+ }
+ 
++test_concurrent_target_mutation_is_detected() {
++  local checkpoint
++
++  for checkpoint in before-target-copy after-staged-verification; do
++    setup_fixture
++    load_bootstrap
++
++    tailscale_synology_bootstrap_test_checkpoint() {
++      local stage="$1"
++      local relative="$2"
++      local source="$3"
++      local staged="$4"
++
++      [ "${stage}" = "${checkpoint}" ] || return 0
++      [ "${relative}" = target/bin/tailscale ] || return 0
++
++      if [ "${stage}" = before-target-copy ]; then
++        printf 'concurrent-source-mutation\n' >>"${source}"
++      else
++        printf 'concurrent-staged-mutation\n' >>"${staged}"
++      fi
++    }
++
++    capture_main install
++    assert_nonzero_status "${CAPTURED_STATUS}"
++    assert_files_equal \
++      "${PACKAGE_ROOT}/conf/privilege" \
++      "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
++    assert_file_absent \
++      "${PACKAGE_ROOT}/conf/root-control/root-bootstrap.state"
++  done
++}
++
++test_promotion_failures_roll_back_each_stage() {
++  local checkpoint
++
++  for checkpoint in \
++    after-target-promotion \
++    before-state-write \
++    before-privilege-install \
++    before-legacy-cleanup \
++    before-transaction-cleanup; do
++    setup_fixture
++    load_bootstrap
++
++    tailscale_synology_bootstrap_test_checkpoint() {
++      [ "$1" != "${checkpoint}" ]
++    }
++
++    capture_main install
++    assert_nonzero_status "${CAPTURED_STATUS}"
++    assert_files_equal \
++      "${PACKAGE_ROOT}/conf/privilege" \
++      "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
++    assert_file_absent \
++      "${PACKAGE_ROOT}/conf/root-control/root-bootstrap.state"
++    assert_directory_empty \
++      "${PACKAGE_ROOT}/conf/root-control/transactions"
++  done
++}
++
++test_failed_rollback_retains_one_blocking_transaction() {
++  setup_fixture
++  load_bootstrap
++
++  tailscale_synology_bootstrap_test_checkpoint() {
++    case "$1" in
++    after-transaction-create)
++      return 1
++      ;;
++    before-rollback-restore)
++      return 1
++      ;;
++    esac
++  }
++
++  capture_main install
++  assert_nonzero_status "${CAPTURED_STATUS}"
++
++  if [ "$(find "${PACKAGE_ROOT}/conf/root-control/transactions" \
++    -mindepth 1 -maxdepth 1 -type d | wc -l)" -ne 1 ]; then
++    fail "failed rollback did not retain exactly one transaction"
++  fi
++
++  unset -f tailscale_synology_bootstrap_test_checkpoint
++  capture_main install
++  assert_nonzero_status "${CAPTURED_STATUS}"
++  assert_contains "${CAPTURED_OUTPUT}" \
++    "an incomplete bootstrap transaction requires attended recovery"
++}
++
++test_transaction_backup_substitution_is_retained_for_recovery() {
++  setup_fixture
++  load_bootstrap
++
++  tailscale_synology_bootstrap_test_checkpoint() {
++    local transaction
++
++    [ "$1" = after-transaction-create ] || return 0
++    transaction="$2"
++    rm "${transaction}/privilege"
++    ln -s "${PACKAGE_ROOT}/conf/privilege.bootstrap-package" \
++      "${transaction}/privilege"
++    return 1
++  }
++
++  capture_main install
++  assert_nonzero_status "${CAPTURED_STATUS}"
++
++  if [ "$(find "${PACKAGE_ROOT}/conf/root-control/transactions" \
++    -mindepth 1 -maxdepth 1 -type d | wc -l)" -ne 1 ]; then
++    fail "unsafe transaction backup was not retained for attended recovery"
++  fi
++}
++
+ test_privilege_is_installed_after_final_target_verification() {
+   setup_fixture
+   load_bootstrap
+@@ -777,6 +962,60 @@ LEGACY
+   assert_file_absent "${PACKAGE_ROOT}/var/root-bootstrap.state"
+ }
+ 
++test_hostile_legacy_state_is_unlinked_or_rejected_safely() {
++  local sentinel
++
++  setup_fixture
++  load_bootstrap
++  sentinel="${CASE_ROOT}/legacy-sentinel"
++  printf 'preserve\n' >"${sentinel}"
++  ln -s "${sentinel}" "${PACKAGE_ROOT}/var/root-bootstrap.state"
++  capture_main install
++  assert_status 0 "${CAPTURED_STATUS}"
++  assert_file_absent "${PACKAGE_ROOT}/var/root-bootstrap.state"
++  [ "$(cat "${sentinel}")" = preserve ] ||
++    fail "legacy symlink cleanup changed its target"
++
++  setup_fixture
++  load_bootstrap
++  sentinel="${CASE_ROOT}/legacy-hardlink"
++  printf 'preserve\n' >"${sentinel}"
++  ln "${sentinel}" "${PACKAGE_ROOT}/var/root-bootstrap.state"
++  capture_main install
++  assert_nonzero_status "${CAPTURED_STATUS}"
++  assert_files_equal \
++    "${PACKAGE_ROOT}/conf/privilege" \
++    "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
++
++  setup_fixture
++  load_bootstrap
++  mkfifo "${PACKAGE_ROOT}/var/root-bootstrap.state"
++  capture_main install
++  assert_nonzero_status "${CAPTURED_STATUS}"
++  assert_files_equal \
++    "${PACKAGE_ROOT}/conf/privilege" \
++    "${PACKAGE_ROOT}/conf/privilege.bootstrap-package"
++}
++
++test_idempotent_install_and_remove_rebootstrap() {
++  perform_successful_install
++
++  capture_main install
++  assert_status 0 "${CAPTURED_STATUS}"
++  assert_files_equal \
++    "${PACKAGE_ROOT}/conf/privilege" \
++    "${PACKAGE_ROOT}/conf/privilege.bootstrap-root"
++
++  capture_main remove
++  assert_status 0 "${CAPTURED_STATUS}"
++
++  capture_main install
++  assert_status 0 "${CAPTURED_STATUS}"
++  assert_files_equal \
++    "${PACKAGE_ROOT}/conf/privilege" \
++    "${PACKAGE_ROOT}/conf/privilege.bootstrap-root"
++}
++
+ test_stale_binary_rejected_by_startup_gate() {
+   perform_successful_install
+   load_start_stop_definitions
+@@ -1007,6 +1246,18 @@ test_remove_restores_safe_state() {
+ 
+ }
+ 
++test_verify_current_command_checks_complete_payload() {
++  perform_successful_install
++
++  capture_main verify-current
++  assert_status 0 "${CAPTURED_STATUS}"
++
++  printf 'tampered\n' >>"${TARGET_REAL}/bin/tailscale"
++
++  capture_main verify-current
++  assert_nonzero_status "${CAPTURED_STATUS}"
++}
++
+ run_case() {
+   local name="$1"
+   local function_name="$2"
+@@ -1069,10 +1320,34 @@ run_case \
+   "trusted symlink and hardlink substitutions are rejected" \
+   test_trusted_symlink_and_hardlink_are_rejected
+ 
++run_case \
++  "trusted control-path substitutions are rejected" \
++  test_trusted_control_path_substitutions_are_rejected
++
++run_case \
++  "trusted bootstrap-state substitutions are rejected" \
++  test_trusted_bootstrap_state_substitutions_are_rejected
++
+ run_case \
+   "open writer cannot change promoted target" \
+   test_open_writer_cannot_change_promoted_target
+ 
++run_case \
++  "concurrent target mutation is detected" \
++  test_concurrent_target_mutation_is_detected
++
++run_case \
++  "promotion failures roll back at every stage" \
++  test_promotion_failures_roll_back_each_stage
++
++run_case \
++  "failed rollback retains one blocking transaction" \
++  test_failed_rollback_retains_one_blocking_transaction
++
++run_case \
++  "unsafe transaction backup is retained for recovery" \
++  test_transaction_backup_substitution_is_retained_for_recovery
++
+ run_case \
+   "privilege activation follows final target verification" \
+   test_privilege_is_installed_after_final_target_verification
+@@ -1085,6 +1360,14 @@ run_case \
+   "legacy r2 state is not trusted" \
+   test_legacy_state_is_not_trusted
+ 
++run_case \
++  "hostile legacy state is unlinked or rejected safely" \
++  test_hostile_legacy_state_is_unlinked_or_rejected_safely
++
++run_case \
++  "idempotent install and remove/re-bootstrap succeed" \
++  test_idempotent_install_and_remove_rebootstrap
++
+ run_case \
+   "stale binary is rejected by startup gate" \
+   test_stale_binary_rejected_by_startup_gate
+@@ -1129,6 +1412,10 @@ run_case \
+   "remove restores safe package state" \
+   test_remove_restores_safe_state
+ 
++run_case \
++  "read-only verifier checks complete promoted payload" \
++  test_verify_current_command_checks_complete_payload
++
+ printf '\nResults: %s passed, %s failed\n' \
+   "${PASS_COUNT}" \
+   "${FAIL_COUNT}"
+diff --git a/release/dist/synology/tests/start-stop-definitions-test.sh b/release/dist/synology/tests/start-stop-definitions-test.sh
+index 2d56e2727..d80f1e708 100755
+--- a/release/dist/synology/tests/start-stop-definitions-test.sh
++++ b/release/dist/synology/tests/start-stop-definitions-test.sh
+@@ -27,6 +27,7 @@ STDOUT_FILE="${TEST_ROOT}/stdout"
+ STDERR_FILE="${TEST_ROOT}/stderr"
+ 
+ mkdir -p \
++    "${TEST_ROOT}/package/conf/root-control" \
+     "${TEST_ROOT}/package/scripts" \
+     "${TEST_ROOT}/proc" \
+     "${TEST_ROOT}/pkgvar" \
+@@ -47,9 +48,21 @@ cat >"${TEST_ROOT}/package/scripts/tailscale-netfilter-reconciler" <<'RECONCILER
+ exit 0
+ RECONCILER
+ 
++cat >"${TEST_ROOT}/package/scripts/tailscale-synology-bootstrap" <<'BOOTSTRAP'
++#!/bin/bash
++printf '%s\n' "$1" >"${TAILSCALE_TEST_BOOTSTRAP_CALL}"
++test "$1" = verify-current
++BOOTSTRAP
++
++printf 'state\n' >"${TEST_ROOT}/package/conf/root-control/root-bootstrap.state"
++printf 'manifest\n' >"${TEST_ROOT}/package/conf/root-payload.manifest"
++printf 'root privilege\n' >"${TEST_ROOT}/package/conf/privilege"
++printf 'root privilege\n' >"${TEST_ROOT}/package/conf/privilege.bootstrap-root"
++
+ chmod 0755 \
+     "${TEST_ROOT}/pkgdest/bin/tailscaled" \
+     "${TEST_ROOT}/unrelated" \
++    "${TEST_ROOT}/package/scripts/tailscale-synology-bootstrap" \
+     "${TEST_ROOT}/package/scripts/tailscale-netfilter-reconciler"
+ 
+ awk '
+@@ -75,9 +88,57 @@ env \
+     TAILSCALE_SYNOLOGY_RUNTIME_DIR="${TEST_ROOT}/run/tailscale-synology" \
+     TAILSCALE_SYNOLOGY_PROC_ROOT="${TEST_ROOT}/proc" \
+     TAILSCALE_SYNOLOGY_TEST_MODE=1 \
++    TAILSCALE_TEST_BOOTSTRAP_CALL="${TEST_ROOT}/bootstrap-call" \
+     bash -u -c '
+         source "$1"
+ 
++        secure_root_path() {
++            return 0
++        }
++
++        secure_root_regular_file() {
++            return 0
++        }
++
++        bootstrap_state_value() {
++            case "$1" in
++            schema) printf "2\n" ;;
++            mode) printf "root\n" ;;
++            manifest_sha256) printf "manifest-hash\n" ;;
++            esac
++        }
++
++        manifest_file_digest() {
++            case "$1" in
++            target/bin/tailscaled) printf "tailscaled-hash\n" ;;
++            conf/privilege.bootstrap-root) printf "privilege-hash\n" ;;
++            scripts/tailscale-synology-bootstrap) printf "bootstrap-hash\n" ;;
++            *) return 1 ;;
++            esac
++        }
++
++        sha256_file() {
++            case "$1" in
++            "$ROOT_PAYLOAD_MANIFEST") printf "manifest-hash\n" ;;
++            "$SYNOPKG_PKGDEST/bin/tailscaled") printf "tailscaled-hash\n" ;;
++            "$ROOT_PRIVILEGE_TEMPLATE") printf "privilege-hash\n" ;;
++            "$BOOTSTRAP_SCRIPT") printf "bootstrap-hash\n" ;;
++            *) return 1 ;;
++            esac
++        }
++
++        if ! bootstrap_is_current; then
++            printf "ERROR: complete payload verification was rejected\n" >&2
++            exit 58
++        fi
++
++        if [ "$(cat "$TAILSCALE_TEST_BOOTSTRAP_CALL")" != verify-current ]; then
++            printf "ERROR: lifecycle did not invoke complete payload verifier\n" >&2
++            exit 59
++        fi
++
++        printf "payload-verification-pass\n"
++
+         mkdir -p "$RECONCILER_RUNTIME_DIR"
+         chmod 0700 "$RECONCILER_RUNTIME_DIR"
+ 
+@@ -165,6 +226,75 @@ env \
+ 
+         printf "stability-check-pass\n"
+ 
++        printf "%s\n" \
++            "#!/bin/bash" \
++            "printf \"%s\\n\" \"\$\$\" >\"$2/orphan-candidate\"" \
++            "trap \"exit 0\" TERM" \
++            "while :; do sleep 1; done" \
++            >"$RECONCILER_SCRIPT"
++
++        chown() {
++            case "${*: -1}" in
++            "$RECONCILER_PID_FILE") return 1 ;;
++            esac
++            command chown "$@"
++        }
++
++        if start_reconciler 2>/dev/null; then
++            printf "ERROR: reconciler startup accepted PID ownership failure\n" >&2
++            exit 60
++        fi
++
++        orphan_pid="$(cat "$2/orphan-candidate")"
++        orphan_alive=0
++        kill -0 "$orphan_pid" >/dev/null 2>&1 && orphan_alive=1
++        kill -KILL "$orphan_pid" >/dev/null 2>&1 || true
++        wait "$orphan_pid" >/dev/null 2>&1 || true
++        unset -f chown
++
++        if [ "$orphan_alive" -ne 0 ]; then
++            printf "ERROR: failed PID setup left a root reconciler running\n" >&2
++            exit 61
++        fi
++
++        printf "orphan-cleanup-pass\n"
++
++        rm -f "$RECONCILER_PID_FILE"
++        printf "%s\n" \
++            "#!/bin/bash" \
++            "printf ready >\"$2/sigkill-ready\"" \
++            "trap \"\" TERM" \
++            "while :; do sleep 1; done" \
++            >"$RECONCILER_SCRIPT"
++        chmod 0755 "$RECONCILER_SCRIPT"
++
++        "$RECONCILER_SCRIPT" &
++        sigkill_pid=$!
++        while [ ! -e "$2/sigkill-ready" ]; do
++            command sleep 0.01
++        done
++        printf "%s\n" "$sigkill_pid" >"$RECONCILER_PID_FILE"
++        chmod 0600 "$RECONCILER_PID_FILE"
++
++        sleep() {
++            return 0
++        }
++
++        if stop_reconciler >/dev/null 2>&1; then
++            stop_status=0
++        else
++            stop_status=$?
++        fi
++        unset -f sleep
++        wait "$sigkill_pid" >/dev/null 2>&1 || true
++
++        if [ "$stop_status" -ne 0 ] || [ -e "$RECONCILER_PID_FILE" ]; then
++            printf "ERROR: SIGKILL shutdown did not observe exit before cleanup\n" >&2
++            exit 62
++        fi
++
++        printf "sigkill-cleanup-pass\n"
++
+         id() {
+             if [ "${1:-}" = "-u" ]; then
+                 printf "1000\n"
+@@ -308,6 +438,7 @@ if [ "${STATUS}" -ne 0 ]; then
+     printf 'ERROR: loading start-stop definitions failed with status %s\n' \
+         "${STATUS}" >&2
+ 
++    sed -n '1,200p' "${STDOUT_FILE}" >&2
+     sed -n '1,200p' "${STDERR_FILE}" >&2
+     exit 1
+ fi
+@@ -321,6 +452,7 @@ fi
+ EXPECTED="${TEST_ROOT}/expected"
+ 
+ printf '%s\n' \
++    payload-verification-pass \
+     30 \
+     10 \
+     1 \
+@@ -334,6 +466,8 @@ printf '%s\n' \
+     unset \
+     identity-checks-pass \
+     stability-check-pass \
++    orphan-cleanup-pass \
++    sigkill-cleanup-pass \
+     bootstrap-pending-status-check-pass \
+     privileged-status-check-pass \
+     runtime-contract-check-pass \
+-- 
+2.53.0
+

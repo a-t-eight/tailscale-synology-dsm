@@ -23,29 +23,26 @@ Package users normally do not need to clone this repository. Download the SPK
 and `SHA256SUMS` from the applicable GitHub release and follow that release's
 installation and administrator-bootstrap instructions.
 
-## Current production release
+## Release status
 
-| Property | Value |
-| --- | --- |
-| Upstream source tag | `v1.98.9` |
-| Upstream source commit | `6c167d40fa37aeb51afa7ff336730670ea4762bf` |
-| Downstream revision | `r2` |
-| Downstream release commit | `0fad8b81a3e0eb86c457bc79c474bcc213834c43` |
-| Release source tree | `33f5c5927ae4db54b9d582650ed31cc6a2eb7161` |
-| Release branch | `release/v1.98.9-r2-synology` |
-| Signed release tag | `release/synology-v1.98.96-r2` |
-| Published release | [Tailscale for Synology DSM 1.98.96-r2](https://github.com/a-t-eight/tailscale-synology-dsm/releases/tag/release/synology-v1.98.96-r2) |
-| Accepted package | `tailscale-x86_64-1.98.96-700098097-dsm7.spk` |
-| Accepted package SHA-256 | `f947a1747521c50edf49baf597cc18b512b3bb009c3b7afe963fa326ef2d6c16` |
-| Tested platform | Synology DS920+ / `geminilake` / `x86_64` |
-| Tested DSM | DSM 7.4.1 |
-| Package DSM minimum | `7.3-86009` |
-| Hard package dependency | `iptables-netfilter-extensions >= 1.1.0-2` |
+The published r2 release remains the installed-package reference. The accepted
+r3 candidate is a separate, unpublished release identity; it must not be
+represented as published or installed.
 
-Revision r1 remains in the repository as superseded release history. The
-machine-readable current identity is [release/manifest.yaml](release/manifest.yaml),
-and validated platform status is recorded in
-[support-matrix.yaml](support-matrix.yaml).
+| Identity | Revision | Source commit/tree | Artifact | Status |
+| --- | --- | --- | --- | --- |
+| Published r2 | `r2` | `0fad8b81a3e0eb86c457bc79c474bcc213834c43` / `33f5c5927ae4db54b9d582650ed31cc6a2eb7161` | `tailscale-x86_64-1.98.96-700098097-dsm7.spk` (`f947a1747521c50edf49baf597cc18b512b3bb009c3b7afe963fa326ef2d6c16`) | Published release |
+| Accepted r3 candidate | `r3` | `f49613eccf9350583cc328183f192a591cd76348` / `44c0bc3cd3bbcd3eb70cacf34e9611909a38bd10` | `tailscale-x86_64-1.98.96-700098098-dsm7.spk` (`a8323d98c318c210ce9c3c467ae6ece9a3bf3e13735ee77efc1b855820ddc41d`) | Unpublished; no tag, publication, or production action authorised |
+
+The r3 candidate branch is `release/v1.98.9-r3-synology`; its intended tag is
+`release/synology-v1.98.96-r3`. Its Package Center reference artifact is
+`tailscale-x86_64-1.98.96-720098098-dsm7-2.spk`
+(`9f507a8336471fe9990e94f7c23276ad5cb40c477d6f2a3763faa4d3f32b818c`).
+
+The machine-readable candidate identity is [release/manifest.yaml](release/manifest.yaml),
+while retained r2 integrity is validated from
+[tests/releases/v1.98.9-r2/release-identity.json](tests/releases/v1.98.9-r2/release-identity.json).
+Platform status is recorded in [support-matrix.yaml](support-matrix.yaml).
 
 ## What this project changes
 

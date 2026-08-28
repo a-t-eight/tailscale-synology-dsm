@@ -273,6 +273,56 @@ if get("package.filename") != (
 ):
     raise SystemExit("package filename does not match package identity")
 
+artifacts = data["package"].get("artifacts")
+if artifacts is not None:
+    if not isinstance(artifacts, dict):
+        raise SystemExit("package.artifacts must be an object when present")
+
+    for role in ("sideload", "package_center_reference"):
+        artifact = artifacts.get(role)
+        if not isinstance(artifact, dict):
+            raise SystemExit(f"package.artifacts.{role} must be an object")
+        filename = artifact.get("filename")
+        sha256 = artifact.get("sha256")
+        if not isinstance(filename, str) or not filename.endswith(".spk"):
+            raise SystemExit(f"package.artifacts.{role}.filename is invalid")
+        if not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", sha256):
+            raise SystemExit(f"package.artifacts.{role}.sha256 is invalid")
+
+    package_center = artifacts["package_center_reference"]
+    for field in ("build_number", "full_version"):
+        value = package_center.get(field)
+        if not isinstance(value, str) or not value:
+            raise SystemExit(
+                f"package.artifacts.package_center_reference.{field} is invalid"
+            )
+
+    if not re.fullmatch(r"[0-9]+", package_center["build_number"]):
+        raise SystemExit(
+            "package.artifacts.package_center_reference.build_number is invalid"
+        )
+
+    if package_center["full_version"] != (
+        f"{get('package.version')}-{package_center['build_number']}"
+    ):
+        raise SystemExit(
+            "package.artifacts.package_center_reference.full_version does not match package.version and build_number"
+        )
+
+    if package_center["filename"] != (
+        f"tailscale-{get('package.architecture')}-"
+        f"{package_center['full_version']}-dsm7-2.spk"
+    ):
+        raise SystemExit(
+            "package.artifacts.package_center_reference.filename does not match package identity"
+        )
+
+    if artifacts["sideload"] != {
+        "filename": get("package.filename"),
+        "sha256": get("package.sha256"),
+    }:
+        raise SystemExit("package.artifacts.sideload must match the legacy package identity")
+
 for field in (
     "safety.allow_stable_publication",
     "safety.allow_production_install",
@@ -332,6 +382,49 @@ if patch_format == "mail" and reference_files:
     raise SystemExit(
         "mail patch series must not declare reference-only patches"
     )
+
+base = data["validation"].get("patch_base")
+
+if base is not None:
+    if not isinstance(base, dict):
+        raise SystemExit("validation.patch_base must be an object when present")
+
+    for field in (
+        "path",
+        "patch_series_format",
+        "patch_apply_files",
+        "patch_reference_files",
+        "release_commit",
+        "release_tree",
+    ):
+        if field not in base:
+            raise SystemExit(f"validation.patch_base.{field} is required")
+
+    base_path = base["path"]
+    pure = PurePosixPath(str(base_path))
+    if pure.is_absolute() or ".." in pure.parts or base_path in ("", "."):
+        raise SystemExit("validation.patch_base.path is not a safe repository-relative path")
+    if base_path == get("paths.patch_series"):
+        raise SystemExit("validation.patch_base.path must differ from paths.patch_series")
+    if base["patch_series_format"] not in ("mail", "raw-diff"):
+        raise SystemExit("validation.patch_base.patch_series_format is unsupported")
+    for field in ("release_commit", "release_tree"):
+        if not isinstance(base[field], str) or not re.fullmatch(r"[0-9a-f]{40}", base[field]):
+            raise SystemExit(f"validation.patch_base.{field} is not a full lowercase Git SHA")
+    base_apply = base["patch_apply_files"]
+    base_reference = base["patch_reference_files"]
+    if not isinstance(base_apply, list) or not base_apply:
+        raise SystemExit("validation.patch_base.patch_apply_files must be a non-empty array")
+    if not isinstance(base_reference, list):
+        raise SystemExit("validation.patch_base.patch_reference_files must be an array")
+    base_files = base_apply + base_reference
+    if len(base_files) != len(set(base_files)):
+        raise SystemExit("validation.patch_base declares duplicate patch filenames")
+    for patch_name in base_files:
+        if not isinstance(patch_name, str) or "/" in patch_name or patch_name in ("", ".", "..") or not patch_name.endswith(".patch"):
+            raise SystemExit("validation.patch_base declares an unsafe direct .patch filename")
+    if base["patch_series_format"] == "mail" and base_reference:
+        raise SystemExit("mail patch base must not declare reference-only patches")
 
 legacy_commits = get(
     "validation.accepted_legacy_no_signoff_commits"
@@ -403,12 +496,55 @@ release_count_matching_signoff() {
     true
 }
 
+release_validate_patch_base_identity() {
+  target_worktree="$1"
+  manifest="$2"
+  base_commit="$(release_manifest_get "$manifest" validation.patch_base.release_commit)" || return 1
+  base_tree="$(release_manifest_get "$manifest" validation.patch_base.release_tree)" || return 1
+  release_commit="$(release_manifest_get "$manifest" downstream.release_commit)" || return 1
+
+  if ! release_clean_git -C "$target_worktree" cat-file -e "${base_commit}^{commit}"; then
+    release_fail "declared patch base commit is unavailable in the source repository"
+    return 1
+  fi
+
+  observed_tree="$(
+    release_clean_git \
+      -C "$target_worktree" \
+      rev-parse \
+      "${base_commit}^{tree}"
+  )" || return 1
+
+  if [ "$observed_tree" != "$base_tree" ]; then
+    release_fail "declared patch base commit does not resolve to the declared base tree"
+    return 1
+  fi
+
+  if ! release_clean_git -C "$target_worktree" cat-file -e "${release_commit}^{commit}"; then
+    release_fail "declared release commit is unavailable in the source repository"
+    return 1
+  fi
+
+  if ! release_clean_git \
+    -C "$target_worktree" \
+    merge-base \
+    --is-ancestor \
+    "$base_commit" \
+    "$release_commit"; then
+    release_fail "declared patch base commit is not an ancestor of the release commit"
+    return 1
+  fi
+
+  release_pass "declared patch base commit, tree, and release ancestry match."
+}
+
 release_validate_patch_inventory() {
   manifest="$1"
   patch_root="$2"
+  layer="${3:-current}"
 
   python3 \
-    - "$manifest" "$patch_root" << 'PY'
+    - "$manifest" "$patch_root" "$layer" << 'PY'
 import json
 import sys
 from pathlib import Path
@@ -417,8 +553,16 @@ manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 root = Path(sys.argv[2]).resolve()
 validation = manifest["validation"]
 
-apply_files = validation["patch_apply_files"]
-reference_files = validation["patch_reference_files"]
+layer = sys.argv[3]
+if layer == "current":
+    declared = validation
+elif layer == "base" and isinstance(validation.get("patch_base"), dict):
+    declared = validation["patch_base"]
+else:
+    raise SystemExit(f"unknown or absent patch layer: {layer}")
+
+apply_files = declared["patch_apply_files"]
+reference_files = declared["patch_reference_files"]
 expected = sorted(apply_files + reference_files)
 observed = sorted(path.name for path in root.glob("*.patch") if path.is_file())
 
@@ -436,6 +580,85 @@ print(f"Patch apply files:     {len(apply_files)}")
 print(f"Patch reference files: {len(reference_files)}")
 print("PASS: direct patch inventory matches the manifest roles.")
 PY
+}
+
+release_manifest_patch_layers() {
+  manifest="$1"
+
+  python3 - "$manifest" << 'PY'
+import json
+import sys
+from pathlib import Path
+
+validation = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["validation"]
+if "patch_base" in validation:
+    print("base")
+print("current")
+PY
+}
+
+release_patch_layer_root() {
+  manifest="$1"
+  control_root="$2"
+  layer="$3"
+
+  case "$layer" in
+    base)
+      relative="$(release_manifest_get "$manifest" validation.patch_base.path)"
+      ;;
+    current)
+      relative="$(release_manifest_get "$manifest" paths.patch_series)"
+      ;;
+    *)
+      release_fail "unknown patch layer: ${layer}"
+      return 1
+      ;;
+  esac
+
+  release_resolve_path "$control_root" "$relative"
+}
+
+release_patch_layer_expression() {
+  layer="$1"
+
+  case "$layer" in
+    base)
+      printf '%s\n' 'validation.patch_base'
+      ;;
+    current)
+      printf '%s\n' 'validation'
+      ;;
+    *)
+      release_fail "unknown patch layer: ${layer}"
+      return 1
+      ;;
+  esac
+}
+
+release_validate_patch_layers() {
+  manifest="$1"
+  control_root="$2"
+  base_root=""
+  layer=""
+
+  while IFS= read -r layer; do
+    [ -n "$layer" ] || continue
+    patch_root="$(release_patch_layer_root "$manifest" "$control_root" "$layer")" || return 1
+
+    case "$layer" in
+      base)
+        base_root="$patch_root"
+        ;;
+      current)
+        if [ -n "$base_root" ] && [ "$patch_root" = "$base_root" ]; then
+          release_fail "canonical patch layer roots collide, including through a symlink alias"
+          return 1
+        fi
+        ;;
+    esac
+
+    release_validate_patch_inventory "$manifest" "$patch_root" "$layer" || return 1
+  done < <(release_manifest_patch_layers "$manifest")
 }
 
 release_patch_paths() {
@@ -462,9 +685,11 @@ release_check_reference_patches_forward() {
   target_worktree="$1"
   manifest="$2"
   patch_root="$3"
+  layer="${4:-current}"
+  patch_expression="$(release_patch_layer_expression "$layer")" || return 1
 
   mapfile -t reference_patches < <(
-    release_patch_paths "$manifest" "$patch_root" validation.patch_reference_files
+    release_patch_paths "$manifest" "$patch_root" "${patch_expression}.patch_reference_files"
   )
 
   if [ "${#reference_patches[@]}" -eq 0 ]; then
@@ -484,9 +709,11 @@ release_check_reference_patches_reverse() {
   target_worktree="$1"
   manifest="$2"
   patch_root="$3"
+  layer="${4:-current}"
+  patch_expression="$(release_patch_layer_expression "$layer")" || return 1
 
   mapfile -t reference_patches < <(
-    release_patch_paths "$manifest" "$patch_root" validation.patch_reference_files
+    release_patch_paths "$manifest" "$patch_root" "${patch_expression}.patch_reference_files"
   )
 
   if [ "${#reference_patches[@]}" -eq 0 ]; then
@@ -506,6 +733,7 @@ release_apply_patch_series() (
   manifest="$2"
   patch_root="$3"
   application_mode="$4"
+  layer="${5:-current}"
 
   case "$application_mode" in
     worktree | round-trip) ;;
@@ -515,11 +743,12 @@ release_apply_patch_series() (
       ;;
   esac
 
-  release_validate_patch_inventory "$manifest" "$patch_root" || exit 1
-  patch_format="$(release_manifest_get "$manifest" validation.patch_series_format)"
+  release_validate_patch_inventory "$manifest" "$patch_root" "$layer" || exit 1
+  patch_expression="$(release_patch_layer_expression "$layer")" || exit 1
+  patch_format="$(release_manifest_get "$manifest" "${patch_expression}.patch_series_format")"
 
   mapfile -t patch_files < <(
-    release_patch_paths "$manifest" "$patch_root" validation.patch_apply_files
+    release_patch_paths "$manifest" "$patch_root" "${patch_expression}.patch_apply_files"
   )
 
   printf 'Patch series format: %s\n' "$patch_format"
@@ -563,3 +792,119 @@ release_apply_patch_series() (
       ;;
   esac
 )
+
+release_apply_patch_layers() {
+  target_worktree="$1"
+  manifest="$2"
+  control_root="$3"
+  application_mode="$4"
+  layer=""
+
+  release_validate_patch_layers "$manifest" "$control_root" || return 1
+
+  while IFS= read -r layer; do
+    [ -n "$layer" ] || continue
+    patch_root="$(release_patch_layer_root "$manifest" "$control_root" "$layer")" || return 1
+    release_check_reference_patches_forward "$target_worktree" "$manifest" "$patch_root" "$layer" || return 1
+    release_apply_patch_series "$target_worktree" "$manifest" "$patch_root" "$application_mode" "$layer" || return 1
+    release_check_reference_patches_reverse "$target_worktree" "$manifest" "$patch_root" "$layer" || return 1
+
+    if [ "$layer" = "base" ]; then
+      expected_tree="$(release_manifest_get "$manifest" validation.patch_base.release_tree)" || return 1
+      observed_tree="$(release_clean_git -C "$target_worktree" write-tree)" || return 1
+
+      if [ "$observed_tree" != "$expected_tree" ]; then
+        release_fail "patch base layer does not reproduce the declared base tree"
+        return 1
+      fi
+
+      release_pass "patch base layer reproduces the declared base tree."
+    fi
+  done < <(release_manifest_patch_layers "$manifest")
+}
+
+release_inspect_candidate_artifacts() {
+  if [ "$#" -ne 4 ]; then
+    release_fail "candidate artifact inspection requires manifest, control worktree, output root, and inspector"
+    return 2
+  fi
+
+  local manifest="$1"
+  local control_worktree="$2"
+  local output_root="$3"
+  local spk_inspector="$4"
+  local artifact role path expected_list observed_list
+  local -a expected_artifacts=()
+  local -a expected_paths=()
+
+  mapfile -t expected_artifacts < <(
+    python3 - "$manifest" "$output_root" << 'PY'
+import json
+import sys
+from pathlib import Path
+
+manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+output_root = Path(sys.argv[2]).resolve()
+artifacts = manifest["package"]["artifacts"]
+
+for role, directory, key in (
+    ("sideload", "sideload", "sideload"),
+    ("package-center-reference", "package-center-reference", "package_center_reference"),
+):
+    filename = artifacts[key]["filename"]
+    print(f"{role}\t{output_root / directory / filename}")
+PY
+  ) || return 1
+
+  if [ "${#expected_artifacts[@]}" -ne 2 ]; then
+    release_fail "candidate artifact role map is incomplete"
+    return 1
+  fi
+
+  RELEASE_CANDIDATE_ARTIFACTS=()
+
+  for artifact in "${expected_artifacts[@]}"; do
+    role="${artifact%%$'\t'*}"
+    path="${artifact#*$'\t'}"
+
+    case "$role" in
+      sideload | package-center-reference) ;;
+      *)
+        release_fail "candidate artifact role map contains an unsupported role: ${role}"
+        return 1
+        ;;
+    esac
+
+    expected_paths+=("$path")
+  done
+
+  expected_list="$(printf '%s\n' "${expected_paths[@]}" | sort)"
+  observed_list="$(find "$output_root" -type f -name '*.spk' -print | sort)"
+
+  if [ "$observed_list" != "$expected_list" ]; then
+    release_fail "candidate SPK output must contain exactly one canonical artifact for each role"
+    printf 'Expected canonical SPKs:\n%s\nObserved SPKs:\n%s\n' \
+      "$expected_list" \
+      "$observed_list" \
+      >&2
+    return 1
+  fi
+
+  for artifact in "${expected_artifacts[@]}"; do
+    role="${artifact%%$'\t'*}"
+    path="${artifact#*$'\t'}"
+
+    bash \
+      "$spk_inspector" \
+      --control-worktree \
+      "$control_worktree" \
+      --manifest \
+      "$manifest" \
+      --artifact-role \
+      "$role" \
+      --spk \
+      "$path" || return $?
+
+    RELEASE_CANDIDATE_ARTIFACTS+=("$path")
+  done
+}

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -u
 
-SOURCE_ENV_COMMIT="0fad8b81a3e0eb86c457bc79c474bcc213834c43"
-SOURCE_ENV_TREE="33f5c5927ae4db54b9d582650ed31cc6a2eb7161"
+SOURCE_ENV_COMMIT="f49613eccf9350583cc328183f192a591cd76348"
+SOURCE_ENV_TREE="44c0bc3cd3bbcd3eb70cacf34e9611909a38bd10"
 
 SHELLCHECK_VERSION="v0.11.0"
 SHFMT_VERSION="v3.13.1"
@@ -1304,6 +1304,36 @@ else
   fail_check "synthetic static SPK inspection tests failed"
 fi
 
+printf '\n=== Release control contracts ===\n'
+
+if bash \
+  tests/releases/patch-base-identity-contract.sh; then
+  pass_check "patch-base identity contract passed."
+else
+  fail_check "patch-base identity contract failed"
+fi
+
+if bash \
+  tests/releases/layered-patch-contract.sh; then
+  pass_check "layered patch contract passed."
+else
+  fail_check "layered patch contract failed"
+fi
+
+if bash \
+  tests/releases/reference-patch-contract.sh; then
+  pass_check "reference patch contract passed."
+else
+  fail_check "reference patch contract failed"
+fi
+
+if bash \
+  tests/releases/temporary-git-isolation-contract.sh; then
+  pass_check "temporary Git contract isolation passed."
+else
+  fail_check "temporary Git contract isolation failed"
+fi
+
 printf '\n=== Living r2 release contract ===\n'
 
 if bash \
@@ -1311,6 +1341,24 @@ if bash \
   pass_check "living r2 release contract and retained checksums passed."
 else
   fail_check "living r2 release contract or retained checksums failed"
+fi
+
+printf '\n=== Living r3 release contract ===\n'
+
+if bash \
+  tests/releases/r3-control-contract.sh; then
+  pass_check "living r3 release contract and retained checksums passed."
+else
+  fail_check "living r3 release contract or retained checksums failed"
+fi
+
+printf '\n=== Candidate artifact role contract ===\n'
+
+if bash \
+  tests/releases/build-candidate-role-contract.sh; then
+  pass_check "candidate artifact role contract passed."
+else
+  fail_check "candidate artifact role contract failed"
 fi
 
 printf '\n=== Automation governance contract ===\n'

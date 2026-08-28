@@ -2,10 +2,10 @@
 
 ## Canonical command
 
-Create or reuse a clean detached worktree at the accepted release commit:
+Create or reuse a clean detached worktree at the accepted r3 candidate commit:
 
 ```text
-0fad8b81a3e0eb86c457bc79c474bcc213834c43
+f49613eccf9350583cc328183f192a591cd76348
 ```
 
 When exactly one clean registered worktree matches that commit and tree, run:
@@ -25,7 +25,7 @@ bash scripts/validate-repository.sh \
 The source environment must have tree:
 
 ```text
-33f5c5927ae4db54b9d582650ed31cc6a2eb7161
+44c0bc3cd3bbcd3eb70cacf34e9611909a38bd10
 ```
 
 All Go operations use that worktree's repository-pinned:
@@ -45,7 +45,7 @@ pinned commit and tree.
 
 | Tool | Version | Source |
 | --- | --- | --- |
-| Go | repository-pinned by `./tool/go` | accepted release worktree |
+| Go | repository-pinned by `./tool/go` | accepted r3 candidate worktree |
 | ShellCheck | `0.11.0` | checksum-verified release binary |
 | shfmt | `3.13.1` | built with repository-pinned Go |
 | actionlint | `1.7.12` | built with repository-pinned Go |
@@ -66,7 +66,7 @@ bootstrap command to recreate it.
 
 ## Supply-chain controls
 
-- the exact accepted release commit and tree identify the build environment;
+- the exact accepted r3 candidate commit and tree identify the build environment;
 - every Go build and `go run` operation uses the release worktree's `./tool/go`;
 - ShellCheck is verified against the SHA-256 digest from its GitHub release;
 - shfmt and actionlint use exact module versions;

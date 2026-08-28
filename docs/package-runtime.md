@@ -26,8 +26,8 @@ build of one does not validate the other.
 ## Privilege model
 
 The package is installed with its package-account privilege configuration and
-`tailscale:tailscale` target ownership. Full routing and netfilter operation
-requires one attended administrator bootstrap.
+`tailscale:tailscale` target ownership. Full project functionality requires one
+attended administrator bootstrap.
 
 The initial privileged operation must use the root-owned package-script copy:
 
@@ -53,6 +53,27 @@ Bootstrap state: current
 Runtime: running, UID=0
 ```
 
+## Supported post-bootstrap runtime invariant
+
+The UID-0 runtime is deliberate and is part of the product architecture, not a
+temporary implementation detail.
+
+A future security or trust-boundary redesign must preserve all of the following
+after successful attended bootstrap:
+
+- `tailscaled` runs as UID 0;
+- the package target remains `root:root`;
+- TUN operation remains enabled;
+- subnet routing and `--accept-routes` remain supported;
+- exit-node operation remains supported;
+- the normal Linux netfilter backend remains enabled;
+- required Synology netfilter kernel extensions remain usable;
+- downstream removal of upstream Synology feature gates is not reversed.
+
+The project must not be "hardened" by reverting to an ordinary DSM package-user
+runtime or by reintroducing Synology-specific restrictions that nullify the
+purpose of the downstream build.
+
 ## Why `sudo` is not sufficient by itself
 
 `sudo` changes the identity of the process that executes a file. It does not
@@ -70,19 +91,46 @@ A trusted privileged entry point therefore requires:
 - no group or other write permission;
 - trusted, non-package-writable ancestor directories;
 - validation of the resolved path rather than only the displayed symlink;
-- fail-closed handling when ownership, mode, path, or content differs.
+- fail-closed handling when ownership, mode, path or content differs.
 
 The accepted r2 implementation enforces root ownership and safe file modes for
 the privileged script and switches the target to `root:root`. Its remaining
 directory-boundary limitation is recorded in
 [ADR 0002](adr/0002-privileged-bootstrap-trust-boundary.md).
 
+## Future trust-boundary hardening
+
+The next functional revision will harden only the downstream privileged-control
+paths. It will retain the upstream Synology package's application-state
+architecture:
+
+- `tailscaled.state`, `tailscaled.sock`, `tailscaled.pid`,
+  `tailscaled.stdout.log` and `STATE_DIRECTORY` remain in `SYNOPKG_PKGVAR`;
+- the DSM web interface and CLI continue using the same LocalAPI socket;
+- upstream logrotate and package-data ownership remain unchanged;
+- the package target remains `root:root` after attended bootstrap.
+
+The build will add a root-trusted payload manifest under package `conf`, and the
+bootstrap will store only its approval state and private transaction material
+under `conf/root-control`. The downstream reconciler's own PID and
+pending-repair marker move to `/run/tailscale-synology`; its separate
+root-opened package-data log is replaced by DSM system logging.
+
+In that revision, `install` and `remove` use only the root-owned package-script
+bootstrap. The `/usr/local/bin` target link remains available for status but no
+longer performs privileged mutations.
+
+Trusted paths are validated by resolved owner, mode and type before use, and
+the exact inspected payload is authenticated before privilege promotion. The
+complete compatibility, migration and validation contract is the
+[upstream-compatible root-control design](superpowers/specs/2026-08-28-upstream-compatible-root-control-design.md).
+
 ## Runtime implications
 
 The service and Synology package lifecycle run with full NAS root authority
-after bootstrap. This enables the required TUN, routing, and netfilter changes,
-but a compromise of the daemon, package files, or lifecycle scripts could
-compromise the NAS.
+after bootstrap. This enables the required TUN, routing, accept-routes,
+exit-node and netfilter changes, but a compromise of the daemon, package files,
+or lifecycle scripts could compromise the NAS.
 
 Bootstrap restarts Tailscale and updates networking and firewall state. Perform
 it from a LAN or out-of-band session rather than relying solely on the Tailscale
