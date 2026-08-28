@@ -22,6 +22,35 @@
 - Examples in documentation must be clearly labelled and must not override the
   manifest.
 
+## Runtime architecture invariants
+
+The downstream product deliberately promotes the installed DSM package into a
+persistent root runtime through an attended administrator bootstrap. Security
+work must harden what that privileged runtime trusts; it must not reduce the
+runtime privilege required by the product.
+
+After successful bootstrap, future changes must preserve:
+
+- `tailscaled` running as UID 0;
+- effective `run-as: root` package execution;
+- the promoted package target owned `root:root`;
+- kernel TUN operation;
+- subnet routing and `--accept-routes` support;
+- exit-node operation;
+- the normal Linux netfilter backend;
+- use of the required Synology netfilter-extension package;
+- downstream removal of upstream Synology feature gates that conflict with
+  these capabilities.
+
+Do not reinterpret trust-boundary hardening as a mandate to return to the
+ordinary DSM package-user or Package Center capability model. Do not re-enable
+upstream Synology restrictions merely to reduce privilege. Any proposal that
+changes one of these invariants requires an explicit architecture decision and
+must be treated as a product regression risk.
+
+The future trust-boundary task is defined by
+`docs/adr/0002-privileged-bootstrap-trust-boundary.md`.
+
 ## Commit and patch rules
 
 - Sign every downstream commit.
